@@ -1,0 +1,312 @@
+---
+title: "18.3 Project layout"
+description: "Organise a Maven project into packages, decide what is public, and move the library catalogue into the layout every Spring Boot project uses."
+sidebar:
+  order: 3
+---
+
+import { Aside, FileTree, Steps } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can put classes in packages, use `public` and `import` to connect them, and turn the Module 17 library catalogue into a Maven project.
+
+## Why it matters
+
+Open the PayDeck API's `src/main/java` and you find folders such as `dev/paydeck/api/card` and `dev/paydeck/api/ledger`. Each folder is a **package**: a group of classes that belong together. Packages are how a project with hundreds of classes stays findable, and they decide which classes can see each other. Every Spring Boot project is laid out this way, so learning it now means Part 6 looks familiar.
+
+## The idea
+
+### Packages
+
+A package is a folder of classes with a dotted name. The first line of each file says which package it is in:
+
+```java
+package com.example.library;
+```
+
+and the file must be in the matching folder, `src/main/java/com/example/library/`. Package names are lower case and usually start with a reversed domain name you own (`dev.paydeck` for PayDeck; `com.example` is reserved for examples like this one), so that two libraries never use the same name.
+
+The full name of a class includes its package: `com.example.library.Catalogue`. Inside the same package you just write `Catalogue`. From another package you `import` it first:
+
+```java
+import com.example.library.Catalogue;
+```
+
+You have been doing this all along: `java.util.List` is the class `List` in the package `java.util`.
+
+### public
+
+So far you have left out `public` almost everywhere. Without it, a class or method is visible only **inside its own package**. With `public`, any package can use it:
+
+| Written as | Visible to |
+| --- | --- |
+| `private` | Only the same class |
+| *(nothing)* | Only the same package |
+| `public` | Everyone |
+
+Make public only what other packages need. Keeping the rest hidden means you can change it later without breaking anyone else's code, which is the same reason fields are `private`.
+
+<Aside type="note" title="A public record needs a public constructor">
+In a `public record` with a compact constructor, the constructor must be `public` too: `public Book { ... }`. Without it the compiler says "invalid canonical constructor in record Book (attempting to assign stronger access privileges; was public)".
+</Aside>
+
+## Worked example
+
+Move the library catalogue from Module 17 into a Maven project, with the demo in a package of its own.
+
+<FileTree>
+- library-maven/
+  - pom.xml
+  - .gitignore
+  - src/
+    - main/
+      - java/
+        - com/
+          - example/
+            - library/
+              - Book.java
+              - BookNotFoundException.java
+              - Catalogue.java
+              - demo/
+                - LibraryDemo.java
+</FileTree>
+
+<Steps>
+
+1. Make the folders:
+
+   ```sh
+   mkdir -p ~/Projects/course/java/library-maven/src/main/java/com/example/library/demo
+   cd ~/Projects/course/java/library-maven
+   ```
+
+2. Create `pom.xml`. It is the `hello-maven` one from lesson 18.1 with a new `artifactId` and `mainClass`:
+
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <project xmlns="http://maven.apache.org/POM/4.0.0"
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+       <modelVersion>4.0.0</modelVersion>
+
+       <groupId>com.example</groupId>
+       <artifactId>library</artifactId>
+       <version>1.0-SNAPSHOT</version>
+
+       <properties>
+           <maven.compiler.release>25</maven.compiler.release>
+           <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+       </properties>
+
+       <build>
+           <plugins>
+               <plugin>
+                   <groupId>org.codehaus.mojo</groupId>
+                   <artifactId>exec-maven-plugin</artifactId>
+                   <version>3.6.2</version>
+                   <configuration>
+                       <mainClass>com.example.library.demo.LibraryDemo</mainClass>
+                   </configuration>
+               </plugin>
+           </plugins>
+       </build>
+   </project>
+   ```
+
+   `mainClass` is now the full name, package included.
+
+3. Copy `Book.java`, `BookNotFoundException.java` and `Catalogue.java` from your Module 17 `library` folder into `src/main/java/com/example/library/`. Then change each one:
+
+   - Add `package com.example.library;` as the very first line.
+   - Make the class or record `public`.
+   - Make its constructors and the methods other packages call `public`.
+
+   `Book.java` becomes:
+
+   ```java
+   package com.example.library;
+
+   /** A book in the catalogue. The ISBN is the book's unique code, printed on the back cover. */
+   public record Book(String isbn, String title, String author, int year) {
+       public Book {
+           if (isbn == null || isbn.isBlank()) {
+               throw new IllegalArgumentException("A book needs an ISBN");
+           }
+           if (title == null || title.isBlank()) {
+               throw new IllegalArgumentException("A book needs a title");
+           }
+       }
+   }
+   ```
+
+   `BookNotFoundException.java`:
+
+   ```java
+   package com.example.library;
+
+   /** Thrown when no book in the catalogue has the given ISBN. */
+   public class BookNotFoundException extends RuntimeException {
+       public BookNotFoundException(String isbn) {
+           super("No book with ISBN " + isbn);
+       }
+   }
+   ```
+
+   In `Catalogue.java`, add the `package` line above the imports, write `public class Catalogue`, and put `public` in front of all ten methods: `add`, `size`, `find`, `get`, `search`, `lend`, `giveBack`, `isAvailable`, `available` and `borrowedBy`. The two fields stay `private`. The start of the file:
+
+   ```java
+   package com.example.library;
+
+   import java.util.Comparator;
+   import java.util.HashMap;
+   import java.util.LinkedHashMap;
+   import java.util.List;
+   import java.util.Map;
+   import java.util.Optional;
+
+   /** The library's books, and who has borrowed which. */
+   public class Catalogue {
+       private final Map<String, Book> books = new LinkedHashMap<>();
+       private final Map<String, String> borrowers = new HashMap<>();
+
+       public void add(Book book) {
+           // ... the same as before
+       }
+
+       public int size() {
+           return books.size();
+       }
+
+       // ... and so on for the other methods
+   }
+   ```
+
+4. Turn the Module 17 `Main.java` into `src/main/java/com/example/library/demo/LibraryDemo.java`. Wrap everything in a class, indented one level, with a `package` line and imports at the top:
+
+   ```java
+   package com.example.library.demo;
+
+   import java.util.List;
+
+   import com.example.library.Book;
+   import com.example.library.Catalogue;
+
+   /** Shows the catalogue in action, as in Module 17. */
+   public class LibraryDemo {
+       void main() {
+           Catalogue catalogue = new Catalogue();
+           catalogue.add(new Book("978-1-000-00001-1", "Java by the Sea", "Lena Park", 2021));
+           // ... the rest of main, print and attempt, unchanged
+       }
+   }
+   ```
+
+   `LibraryDemo` is in a different package (`...library.demo`) from `Catalogue` (`...library`), so it needs the imports, and everything it uses must be `public`.
+
+5. Create `.gitignore` so that Git never saves what Maven builds:
+
+   ```
+   target/
+   ```
+
+6. Run it:
+
+   ```sh
+   mvn -q compile exec:java
+   ```
+
+   You get exactly the same output as in Module 17, starting with `5 books`.
+
+</Steps>
+
+Now see `public` at work. Remove `public` from `lend` in `Catalogue.java` and compile:
+
+```
+[ERROR] .../demo/LibraryDemo.java:[24,18] lend(java.lang.String,java.lang.String) is not public in com.example.library.Catalogue; cannot be accessed from outside package
+```
+
+The compiler checks who may call what. Put `public` back.
+
+<Aside type="tip" title="IntelliJ does the busywork">
+In IntelliJ, open `library-maven`, right-click `src/main/java` → **New → Package**, and type `com.example.library`: it makes all three folders. If you drag a class into another package, IntelliJ updates its `package` line and every `import` for you. When you use a class from another package, press **Option+Enter** on its name to add the `import`.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a report package">
+Create a class `CatalogueReport` in a new package `com.example.library.report`, with a method `String summary(Catalogue catalogue)` that returns, for example, "5 books, 2 available, 3 on loan". Call it from `LibraryDemo` just before "Available:" is printed.
+
+<Fragment slot="hint">The new file goes in `src/main/java/com/example/library/report/`. Both the class and `summary` must be `public`, because `LibraryDemo` is in a different package. `LibraryDemo` needs `import com.example.library.report.CatalogueReport;`.</Fragment>
+<Fragment slot="solution">
+
+`src/main/java/com/example/library/report/CatalogueReport.java`:
+
+```java
+package com.example.library.report;
+
+import com.example.library.Catalogue;
+
+/** One-line summaries of a catalogue. */
+public class CatalogueReport {
+    public String summary(Catalogue catalogue) {
+        int available = catalogue.available().size();
+        return catalogue.size() + " books, " + available + " available, " + (catalogue.size() - available) + " on loan";
+    }
+}
+```
+
+In `LibraryDemo`, add the import, then this line just before `IO.println("Available:");`:
+
+```java
+IO.println(new CatalogueReport().summary(catalogue));
+```
+
+```
+5 books, 2 available, 3 on loan
+```
+
+`CatalogueReport` can only use what `Catalogue` makes public, which is exactly what keeps the catalogue's rules safe: a report cannot quietly change who has borrowed a book.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="cannot find symbol: class Catalogue">
+The class is in another package and there is no `import` for it, or the `import` has a typo.
+</Aside>
+
+<Aside type="caution" title="is not public in ...; cannot be accessed from outside package">
+You used a class, constructor or method from another package that is not `public`. Add `public` to it, if other packages really should use it.
+</Aside>
+
+<Aside type="caution" title="The package line does not match the folder">
+`package com.example.library;` belongs in `src/main/java/com/example/library/`. When they do not match, IntelliJ underlines the `package` line in red. Maven may still compile it, but people and tools expect to find a class where its package says it is. Move the file, or fix the line.
+</Aside>
+
+## Recap
+
+- A package is a folder of related classes: `package com.example.library;` lives in `src/main/java/com/example/library/`.
+- Use classes from other packages with `import`.
+- No modifier means "this package only"; `public` means everyone; `private` means this class only.
+- Make public only what other packages need.
+
+<Quiz
+	questions={[
+		{
+			question: 'Where does a class with `package com.example.library.demo;` go?',
+			options: ['src/main/java/LibraryDemo.java', 'src/main/java/com/example/library/demo/LibraryDemo.java', 'src/com.example.library.demo/LibraryDemo.java'],
+			answer: 1,
+			explanation: 'Each part of the package name is a folder under src/main/java.',
+		},
+		{
+			question: 'A method has no access modifier. Who can call it?',
+			options: ['Everyone', 'Only classes in the same package', 'Only the same class'],
+			answer: 1,
+			explanation: 'No modifier means package-only.',
+		},
+	]}
+/>
+
+<MarkComplete />

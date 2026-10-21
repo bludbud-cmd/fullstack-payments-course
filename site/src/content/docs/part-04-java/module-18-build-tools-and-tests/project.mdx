@@ -1,0 +1,341 @@
+---
+title: "Mini-project: test the library catalogue"
+description: "Write a full test suite for the library catalogue with JUnit and AssertJ, covering every rule, and prove it catches real bugs."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside, FileTree } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+In Module 17 you checked the catalogue by reading the demo's output. Now you will write tests that check every rule automatically, in under a second, every time you run `mvn test`. This is exactly how the PayDeck API is protected: in Part 6 you write the same kind of tests for real money.
+
+## What you build
+
+<FileTree>
+- library-maven/
+  - pom.xml JUnit plus a new test library, AssertJ
+  - src/
+    - main/java/com/example/library/ unchanged from lesson 18.3
+    - test/
+      - java/
+        - com/
+          - example/
+            - library/
+              - BookTest.java
+              - CatalogueTest.java
+</FileTree>
+
+When you are done:
+
+```
+[INFO] Tests run: 13, Failures: 0, Errors: 0, Skipped: 0 -- in com.example.library.CatalogueTest
+[INFO] Tests run: 9, Failures: 0, Errors: 0, Skipped: 0 -- in com.example.library.BookTest
+[INFO]
+[INFO] Tests run: 22, Failures: 0, Errors: 0, Skipped: 0
+[INFO]
+[INFO] BUILD SUCCESS
+```
+
+## Two new tools
+
+### AssertJ
+
+**AssertJ** is a library of assertions that read like sentences. The PayDeck API's tests use it, so you will meet it again. Add it to `pom.xml`, next to JUnit:
+
+```xml
+<dependency>
+    <groupId>org.assertj</groupId>
+    <artifactId>assertj-core</artifactId>
+    <version>3.27.7</version>
+    <scope>test</scope>
+</dependency>
+```
+
+Everything starts with `assertThat(actual)`, followed by what should be true:
+
+```java
+assertThat(catalogue.size()).isEqualTo(3);
+assertThat(catalogue.isAvailable(isbn)).isFalse();
+assertThat(catalogue.find(isbn)).isEmpty();                        // an empty Optional
+assertThat(catalogue.search("park"))
+        .extracting(Book::title)                                   // look only at the titles
+        .containsExactly("Java by the Sea", "The Pocket Ledger");  // these, in this order
+
+assertThatThrownBy(() -> catalogue.lend(isbn, "Ben"))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("Java by the Sea is already on loan to Asha");
+```
+
+Because the actual value comes first, you can never mix up expected and actual. And when a list check fails, AssertJ prints both lists in full.
+
+### Parameterized tests
+
+A **parameterized test** runs the same test with several inputs. Instead of `@Test`, write `@ParameterizedTest` and list the inputs:
+
+```java
+@ParameterizedTest
+@NullAndEmptySource                       // null and ""
+@ValueSource(strings = {" ", "   "})      // and these two
+void aBookNeedsATitle(String title) {
+    // runs four times, once for each title
+}
+```
+
+`@ParameterizedTest` comes with the `junit-jupiter` dependency you already have.
+
+## Requirements
+
+1. **`BookTest`** checks that a valid book keeps its values, and that a missing or blank ISBN, and a missing or blank title, are each refused with the right message. Use parameterized tests for the last two.
+2. **`CatalogueTest`** starts every test from the same three books (use `@BeforeEach`), and has at least one test for each rule of the Module 17 project:
+   - added books can be found; a duplicate ISBN is refused and the size does not change;
+   - `find` gives an empty `Optional` and `get` throws `BookNotFoundException` for an unknown ISBN;
+   - search matches titles ignoring case, matches authors, sorts by title, and returns an empty list when nothing matches;
+   - lending makes a book unavailable and removes it from `available()`; a book cannot be lent twice;
+   - giving back makes it available again; a book that is not on loan cannot be given back;
+   - `borrowedBy` lists only that person's books;
+   - `lend`, `giveBack` and `isAvailable` all refuse an unknown ISBN.
+3. Every test name says what should be true, in words.
+4. `mvn test` passes.
+
+<Exercise title="Write the tests">
+Write both test classes, using AssertJ for every check, then run `mvn test`.
+
+<Fragment slot="hint">Use constants for the ISBNs, such as `static final String JAVA_BY_THE_SEA = "978-1-000-00001-1";`, so the tests read like sentences. Group the tests with short comments: adding and finding, searching, lending.</Fragment>
+<Fragment slot="hint2">Imports you will need: `static org.assertj.core.api.Assertions.assertThat`, `static org.assertj.core.api.Assertions.assertThatThrownBy`, `org.junit.jupiter.api.BeforeEach`, `org.junit.jupiter.api.Test`, and for the parameterized tests `org.junit.jupiter.params.ParameterizedTest`, `org.junit.jupiter.params.provider.NullAndEmptySource` and `org.junit.jupiter.params.provider.ValueSource`.</Fragment>
+<Fragment slot="solution">
+
+`src/test/java/com/example/library/BookTest.java`:
+
+```java
+package com.example.library;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
+
+class BookTest {
+
+    @Test
+    void aValidBookKeepsItsValues() {
+        Book book = new Book("978-1-000-00001-1", "Java by the Sea", "Lena Park", 2021);
+
+        assertThat(book.isbn()).isEqualTo("978-1-000-00001-1");
+        assertThat(book.title()).isEqualTo("Java by the Sea");
+        assertThat(book.year()).isEqualTo(2021);
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {" ", "   "})
+    void aBookNeedsAnIsbn(String isbn) {
+        assertThatThrownBy(() -> new Book(isbn, "Java by the Sea", "Lena Park", 2021))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("A book needs an ISBN");
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {" ", "   "})
+    void aBookNeedsATitle(String title) {
+        assertThatThrownBy(() -> new Book("978-1-000-00001-1", title, "Lena Park", 2021))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("A book needs a title");
+    }
+}
+```
+
+`src/test/java/com/example/library/CatalogueTest.java`:
+
+```java
+package com.example.library;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+class CatalogueTest {
+    static final String JAVA_BY_THE_SEA = "978-1-000-00001-1";
+    static final String SPRING_MORNINGS = "978-1-000-00002-8";
+    static final String POCKET_LEDGER = "978-1-000-00003-5";
+    static final String UNKNOWN = "978-9-999-99999-9";
+
+    Catalogue catalogue;
+
+    @BeforeEach
+    void setUp() {
+        catalogue = new Catalogue();
+        catalogue.add(new Book(JAVA_BY_THE_SEA, "Java by the Sea", "Lena Park", 2021));
+        catalogue.add(new Book(SPRING_MORNINGS, "Spring Mornings", "Omar Haddad", 2019));
+        catalogue.add(new Book(POCKET_LEDGER, "The Pocket Ledger", "Lena Park", 2017));
+    }
+
+    // Adding and finding
+
+    @Test
+    void addedBooksCanBeFoundByIsbn() {
+        assertThat(catalogue.size()).isEqualTo(3);
+        assertThat(catalogue.get(SPRING_MORNINGS).title()).isEqualTo("Spring Mornings");
+        assertThat(catalogue.find(SPRING_MORNINGS)).isPresent();
+    }
+
+    @Test
+    void aDuplicateIsbnIsRefused() {
+        Book copy = new Book(SPRING_MORNINGS, "Spring Mornings", "Omar Haddad", 2024);
+
+        assertThatThrownBy(() -> catalogue.add(copy))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("ISBN 978-1-000-00002-8 is already in the catalogue");
+        assertThat(catalogue.size()).isEqualTo(3);
+    }
+
+    @Test
+    void findReturnsEmptyForAnUnknownIsbn() {
+        assertThat(catalogue.find(UNKNOWN)).isEmpty();
+    }
+
+    @Test
+    void getRefusesAnUnknownIsbn() {
+        assertThatThrownBy(() -> catalogue.get(UNKNOWN))
+                .isInstanceOf(BookNotFoundException.class)
+                .hasMessage("No book with ISBN 978-9-999-99999-9");
+    }
+
+    // Searching
+
+    @Test
+    void searchMatchesTitlesIgnoringCase() {
+        assertThat(catalogue.search("SPRING"))
+                .extracting(Book::title)
+                .containsExactly("Spring Mornings");
+    }
+
+    @Test
+    void searchMatchesAuthorsAndSortsByTitle() {
+        assertThat(catalogue.search("park"))
+                .extracting(Book::title)
+                .containsExactly("Java by the Sea", "The Pocket Ledger");
+    }
+
+    @Test
+    void searchWithNoMatchesReturnsAnEmptyList() {
+        assertThat(catalogue.search("dragons")).isEmpty();
+    }
+
+    // Lending
+
+    @Test
+    void lendingABookMakesItUnavailable() {
+        catalogue.lend(JAVA_BY_THE_SEA, "Asha");
+
+        assertThat(catalogue.isAvailable(JAVA_BY_THE_SEA)).isFalse();
+        assertThat(catalogue.available())
+                .extracting(Book::title)
+                .containsExactly("Spring Mornings", "The Pocket Ledger");
+    }
+
+    @Test
+    void aBookCannotBeLentTwice() {
+        catalogue.lend(JAVA_BY_THE_SEA, "Asha");
+
+        assertThatThrownBy(() -> catalogue.lend(JAVA_BY_THE_SEA, "Ben"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Java by the Sea is already on loan to Asha");
+    }
+
+    @Test
+    void givingABookBackMakesItAvailableAgain() {
+        catalogue.lend(JAVA_BY_THE_SEA, "Asha");
+
+        catalogue.giveBack(JAVA_BY_THE_SEA);
+
+        assertThat(catalogue.isAvailable(JAVA_BY_THE_SEA)).isTrue();
+    }
+
+    @Test
+    void aBookThatIsNotOnLoanCannotBeGivenBack() {
+        assertThatThrownBy(() -> catalogue.giveBack(POCKET_LEDGER))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("The Pocket Ledger is not on loan");
+    }
+
+    @Test
+    void borrowedByListsOnlyThatPersonsBooks() {
+        catalogue.lend(JAVA_BY_THE_SEA, "Asha");
+        catalogue.lend(SPRING_MORNINGS, "Ben");
+        catalogue.lend(POCKET_LEDGER, "Asha");
+
+        assertThat(catalogue.borrowedBy("Asha"))
+                .extracting(Book::title)
+                .containsExactly("Java by the Sea", "The Pocket Ledger");
+        assertThat(catalogue.borrowedBy("Chen")).isEmpty();
+    }
+
+    @Test
+    void everyIsbnMethodRefusesAnUnknownIsbn() {
+        assertThatThrownBy(() -> catalogue.lend(UNKNOWN, "Asha")).isInstanceOf(BookNotFoundException.class);
+        assertThatThrownBy(() -> catalogue.giveBack(UNKNOWN)).isInstanceOf(BookNotFoundException.class);
+        assertThatThrownBy(() -> catalogue.isAvailable(UNKNOWN)).isInstanceOf(BookNotFoundException.class);
+    }
+}
+```
+
+The parameterized tests count once per input, which is how 3 test methods in `BookTest` become 9 tests.
+</Fragment>
+</Exercise>
+
+## Prove the tests work
+
+A test suite is only useful if it catches mistakes. Try each of these "bugs" in `Catalogue.java`, run `mvn test`, see which test goes red, then undo it:
+
+1. In `search`, change `String wanted = text.toLowerCase();` to `String wanted = text;`.
+
+   ```
+   [ERROR] Failures:
+   [ERROR]   CatalogueTest.searchMatchesTitlesIgnoringCase:62
+   Expecting actual:
+     []
+   to contain exactly (and in same order):
+     ["Spring Mornings"]
+   ```
+
+2. In `add`, remove the duplicate check: `aDuplicateIsbnIsRefused` goes red.
+3. In `isAvailable`, remove the `get(isbn);` line: `everyIsbnMethodRefusesAnUnknownIsbn` goes red.
+4. In `available`, remove the `.sorted(...)` line. Run the tests: **everything still passes**.
+
+If a change like the last one does not turn any test red, your suite has a gap.
+
+<Exercise title="Close the gap">
+Why did removing `.sorted(...)` from `available` go unnoticed? Write a test that fails without the sorting and passes with it.
+
+<Fragment slot="hint">The three books in `setUp` are added in title order already, so sorted and unsorted give the same list. Add a book whose title comes first alphabetically, inside the test.</Fragment>
+<Fragment slot="solution">
+
+```java
+@Test
+void availableIsSortedByTitle() {
+    catalogue.add(new Book("978-1-000-00007-3", "A Penny Saved", "Ines Duarte", 2022));
+
+    assertThat(catalogue.available())
+            .extracting(Book::title)
+            .containsExactly("A Penny Saved", "Java by the Sea", "Spring Mornings", "The Pocket Ledger");
+}
+```
+
+Without `.sorted(...)`, "A Penny Saved" comes last, in the order it was added, and the test fails. Test data that happens to be in the right order already is one of the most common ways for a bug to slip through.
+</Fragment>
+</Exercise>
+
+<Aside type="note" title="Why this matters for money">
+Imagine bug 3 in the PayDeck API: the same payment recorded twice, so a customer is charged twice. Module 24 adds exactly that rule for payments, and Module 25 tests it the way you just tested the catalogue.
+</Aside>
+
+<MarkComplete />

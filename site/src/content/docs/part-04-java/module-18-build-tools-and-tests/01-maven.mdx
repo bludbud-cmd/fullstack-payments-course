@@ -1,0 +1,262 @@
+---
+title: "18.1 Maven"
+description: "Install Maven, describe a project in a pom.xml, and compile, run and package it with mvn commands."
+sidebar:
+  order: 1
+---
+
+import { Aside, FileTree, Steps } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can install Maven, write a small `pom.xml`, and use `mvn` to compile, run and package a Java project.
+
+## Why it matters
+
+`java Main.java` is perfect for small programs. Real projects need more: hundreds of files, libraries written by other people, tests, and a way to build the same thing on every computer, including the GitHub server that checks your code. A **build tool** does all of that from one description of the project. The PayDeck API is built with **Maven**, the most widely used Java build tool; its description is the `pom.xml` file in the `api` folder. In React Native, `package.json` and `npm` played the same role.
+
+## The idea
+
+Maven reads a file called **`pom.xml`** (POM means Project Object Model). It says:
+
+- **who the project is**: a `groupId` (usually a reversed domain name, such as `com.example`), an `artifactId` (the project's name) and a `version`;
+- **settings**, such as which Java version to compile for;
+- **dependencies**: libraries the project uses (next lesson);
+- **plugins**: extra tools, such as one that runs your program.
+
+It is written in **XML**: nested tags in angle brackets, like HTML. `<version>1.0-SNAPSHOT</version>` is a tag with a value. `SNAPSHOT` means "a version still being worked on".
+
+Maven expects files in fixed places, so it never needs to be told where they are:
+
+<FileTree>
+- hello-maven/
+  - pom.xml
+  - src/
+    - main/
+      - java/ your code
+    - test/
+      - java/ your tests (lesson 18.4)
+  - target/ everything Maven builds; safe to delete
+</FileTree>
+
+You run Maven with the `mvn` command and a **phase**: how far along the build to go. Each phase runs all the ones before it:
+
+| Command | What it does |
+| --- | --- |
+| `mvn compile` | Compiles `src/main/java` into `target/classes` |
+| `mvn test` | Compiles, then runs the tests |
+| `mvn package` | Compiles, tests, then bundles everything into a `.jar` file in `target` |
+| `mvn clean` | Deletes `target` |
+
+## Worked example
+
+<Steps>
+
+1. Install Maven with Homebrew, then check it:
+
+   ```sh
+   brew install maven
+   mvn -v
+   ```
+
+   ```
+   Apache Maven 3.9.11 (...)
+   Maven home: /opt/homebrew/Cellar/maven/3.9.11/libexec
+   Java version: 25.0.1, vendor: Eclipse Adoptium, runtime: /Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home
+   ```
+
+   Your version numbers may be newer. The line that matters is **Java version: 25**. Maven uses the Java in `JAVA_HOME`, which you set in lesson 15.1. If it shows another version, open a new Terminal window and check `echo $JAVA_HOME`.
+
+2. Make the project folders:
+
+   ```sh
+   mkdir -p ~/Projects/course/java/hello-maven/src/main/java
+   cd ~/Projects/course/java/hello-maven
+   ```
+
+3. Create `pom.xml` in the `hello-maven` folder:
+
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <project xmlns="http://maven.apache.org/POM/4.0.0"
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+       <modelVersion>4.0.0</modelVersion>
+
+       <groupId>com.example</groupId>
+       <artifactId>hello-maven</artifactId>
+       <version>1.0-SNAPSHOT</version>
+
+       <properties>
+           <maven.compiler.release>25</maven.compiler.release>
+           <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+       </properties>
+
+       <build>
+           <plugins>
+               <plugin>
+                   <groupId>org.codehaus.mojo</groupId>
+                   <artifactId>exec-maven-plugin</artifactId>
+                   <version>3.6.2</version>
+                   <configuration>
+                       <mainClass>Hello</mainClass>
+                   </configuration>
+               </plugin>
+           </plugins>
+       </build>
+   </project>
+   ```
+
+   - The first lines are the same in every `pom.xml`; copy them as they are.
+   - `maven.compiler.release` is the Java version to compile for. `sourceEncoding` makes sure characters such as é are read correctly.
+   - The **exec** plugin runs a class's `main` method. `mainClass` says which class.
+
+4. Create `src/main/java/Hello.java`:
+
+   ```java
+   public class Hello {
+       void main() {
+           IO.println("Hello from Maven");
+           IO.println("Java " + Runtime.version().feature());
+       }
+   }
+   ```
+
+   In a Maven project, code lives in ordinary classes rather than compact source files. The `void main()` goes inside the class. Mark the class `public` so that the plugin can start it (lesson 18.3 explains `public`).
+
+5. Compile and run:
+
+   ```sh
+   mvn compile
+   ```
+
+   ```
+   [INFO] --- compiler:3.13.0:compile (default-compile) @ hello-maven ---
+   [INFO] Compiling 1 source file with javac [debug release 25] to target/classes
+   [INFO] ------------------------------------------------------------------------
+   [INFO] BUILD SUCCESS
+   ```
+
+   The first run downloads Maven's own plugins, so it prints a lot and takes a minute. After that it is quick.
+
+   ```sh
+   mvn -q compile exec:java
+   ```
+
+   ```
+   Hello from Maven
+   Java 25
+   ```
+
+   `-q` (quiet) hides Maven's `[INFO]` lines so you only see your program's output. `exec:java` is a **goal** of the exec plugin: a single task, rather than a phase.
+
+6. Package it:
+
+   ```sh
+   mvn package
+   ls target
+   ```
+
+   ```
+   classes  hello-maven-1.0-SNAPSHOT.jar  maven-archiver  maven-status
+   ```
+
+   A `.jar` is a zip file of compiled classes, ready to hand to someone else or to a server. In Part 10, the PayDeck API is deployed as exactly this kind of file.
+
+</Steps>
+
+<Aside type="note" title={`WARNING: sun.misc.Unsafe::staticFieldBase has been called`}>
+Some versions of Maven print four `WARNING` lines about `sun.misc.Unsafe` when they run on Java 25. They come from Maven's own code, not yours, and are harmless.
+</Aside>
+
+<Aside type="tip" title="Maven in IntelliJ">
+In IntelliJ, **File → Open** and choose the `hello-maven` folder. IntelliJ reads `pom.xml` and sets everything up. The **Maven** panel on the right lists the phases: double-click **compile** or **package** to run them. The ▶ next to `void main()` works too.
+</Aside>
+
+### Reading a build error
+
+Remove the `;` after `IO.println("Hello from Maven")` and run `mvn -q compile`:
+
+```
+[ERROR] COMPILATION ERROR :
+[ERROR] /Users/you/Projects/course/java/hello-maven/src/main/java/Hello.java:[3,39] ';' expected
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:3.13.0:compile (default-compile) on project hello-maven: Compilation failure
+```
+
+Look for the first line with a file name. `[3,39]` means line 3, column 39. Everything after it is Maven saying "the compile step failed", which you already know. Put the `;` back.
+
+## Try it
+
+<Exercise title="Try it: a second class">
+Add a `src/main/java/Greeter.java` class with a method `String greet(String name)` that returns `"Hello, " + name + "!"`. Use it from `Hello.main` to print "Hello, Maven!", and run it with `mvn -q compile exec:java`. Then run `mvn clean` and look at what happened to the `target` folder.
+
+<Fragment slot="hint">In `main`, create a `Greeter` with `new Greeter()` and call `greet` on it. Classes in the same folder can use each other without any `import`.</Fragment>
+<Fragment slot="solution">
+
+`Greeter.java`:
+
+```java
+class Greeter {
+    String greet(String name) {
+        return "Hello, " + name + "!";
+    }
+}
+```
+
+In `Hello.main`:
+
+```java
+Greeter greeter = new Greeter();
+IO.println(greeter.greet("Maven"));
+```
+
+`mvn clean` deletes `target` completely. Nothing is lost: the next `mvn compile` rebuilds it from `src`. That is why `target` never goes into Git.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="release version 25 not supported">
+Maven is running with an older Java. Check `mvn -v`; if it does not say 25, check `JAVA_HOME` (lesson 15.1) and open a new Terminal window.
+</Aside>
+
+<Aside type="caution" title="Non-parseable POM">
+A tag in `pom.xml` is not closed, or closed with the wrong name. For `<version>3.6.2</versoin>` the message says "end tag name </versoin> must be the same as start tag <version> from line 21". Every `<tag>` needs a matching `</tag>`.
+</Aside>
+
+<Aside type="caution" title="An exception occurred while executing the Java class">
+If the message ends with a class name, such as `Hellp`, the `mainClass` in `pom.xml` is misspelled. If it says "doesn't contain a main method with appropriate signature" and "package access", the class is not `public`.
+</Aside>
+
+## Recap
+
+- Maven builds Java projects from a description in `pom.xml`: identity, settings, dependencies and plugins.
+- Code goes in `src/main/java`, tests in `src/test/java`; Maven builds into `target`.
+- `mvn compile`, `mvn test`, `mvn package`, `mvn clean`; each phase runs the ones before it.
+- `mvn -q compile exec:java` runs the program.
+
+<Quiz
+	questions={[
+		{
+			question: 'Where does Maven expect your main code?',
+			options: ['In the project folder', 'In src/main/java', 'In target/classes'],
+			answer: 1,
+			explanation: 'Maven uses fixed folders; target is where it puts what it builds.',
+		},
+		{
+			question: 'What does mvn package do?',
+			options: ['Only creates a .jar', 'Compiles, runs the tests, then creates a .jar', 'Uploads the project'],
+			answer: 1,
+			explanation: 'Each phase runs all the phases before it.',
+		},
+		{
+			question: 'Should the target folder be committed to Git?',
+			options: ['Yes', 'No: Maven rebuilds it from src'],
+			answer: 1,
+			explanation: 'It only contains things built from the source.',
+		},
+	]}
+/>
+
+<MarkComplete />
