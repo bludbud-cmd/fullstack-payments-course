@@ -17,6 +17,8 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
+import dev.paydeck.api.common.BusinessRuleException;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -51,11 +53,14 @@ public class MoneyController {
     private final MoneyMovementService money;
     private final AccessPolicy access;
     private final LedgerService ledger;
+    private final boolean simulatedTopUps;
 
-    public MoneyController(MoneyMovementService money, AccessPolicy access, LedgerService ledger) {
+    public MoneyController(MoneyMovementService money, AccessPolicy access, LedgerService ledger,
+                           @Value("${paydeck.simulated-top-ups:true}") boolean simulatedTopUps) {
         this.money = money;
         this.access = access;
         this.ledger = ledger;
+        this.simulatedTopUps = simulatedTopUps;
     }
 
     @PostMapping("/api/accounts/{accountId}/top-ups")
@@ -65,6 +70,9 @@ public class MoneyController {
             @RequestHeader("Idempotency-Key") @Size(min = 1, max = 100) String idempotencyKey,
             @Valid @RequestBody TopUpRequest request) {
         access.account(user, accountId, AccountAction.MOVE_MONEY);
+        if (!simulatedTopUps) {
+            throw new BusinessRuleException("SIMULATED_TOP_UPS_OFF", "Top up with a card instead.");
+        }
         MovementResult result = money.topUp(accountId, request.amountCents(), request.description().strip(),
                 idempotencyKey);
         return respond(result, request.amountCents());

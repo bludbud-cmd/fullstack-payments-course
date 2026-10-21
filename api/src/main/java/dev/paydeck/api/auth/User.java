@@ -41,6 +41,14 @@ public class User {
     @Column(nullable = false)
     private Instant createdAt;
 
+    /** Send a notification for every payment and incoming money. */
+    @Column(nullable = false)
+    private boolean notifyPayments = true;
+
+    /** Send a notification when a payment is declined. */
+    @Column(nullable = false)
+    private boolean notifyDeclines = true;
+
     protected User() {
         // For JPA
     }
@@ -75,6 +83,19 @@ public class User {
 
     public void changeRole(Role role) {
         this.role = role;
+    }
+
+    public void setNotifications(boolean payments, boolean declines) {
+        this.notifyPayments = payments;
+        this.notifyDeclines = declines;
+    }
+
+    public boolean isNotifyPayments() {
+        return notifyPayments;
+    }
+
+    public boolean isNotifyDeclines() {
+        return notifyDeclines;
     }
 
     public UUID getId() {

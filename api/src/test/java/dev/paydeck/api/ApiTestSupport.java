@@ -114,6 +114,21 @@ public abstract class ApiTestSupport {
         return openAccount(register(owner), currency);
     }
 
+    /** Issues a card on the account, optionally for someone else, and returns its ID. */
+    protected UUID issueCard(UUID accountId, String nickname, Long limitCents, String cardholderEmail)
+            throws Exception {
+        String holder = cardholderEmail == null ? "null" : "\"" + cardholderEmail + "\"";
+        String body = mvc.perform(post("/api/accounts/{id}/cards", accountId)
+                        .with(asOwnerOf(accountId))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"nickname": "%s", "spendingLimitCents": %s, "cardholderEmail": %s}
+                                """.formatted(nickname, limitCents, holder)))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        return UUID.fromString(JsonPath.read(body, "$.id"));
+    }
+
     protected void topUp(UUID accountId, long amountCents) throws Exception {
         mvc.perform(post("/api/accounts/{id}/top-ups", accountId)
                         .with(asOwnerOf(accountId))

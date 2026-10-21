@@ -14,6 +14,8 @@ import dev.paydeck.api.auth.CurrentUser;
 import dev.paydeck.api.auth.User;
 import dev.paydeck.api.auth.UserRepository;
 import dev.paydeck.api.common.BusinessRuleException;
+import dev.paydeck.api.live.AccountEvent;
+import org.springframework.context.ApplicationEventPublisher;
 import dev.paydeck.api.money.SupportedCurrency;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Email;
@@ -66,13 +68,15 @@ public class CardController {
     private final AccountRepository accounts;
     private final UserRepository users;
     private final AccessPolicy access;
+    private final ApplicationEventPublisher events;
 
     public CardController(CardRepository cards, AccountRepository accounts, UserRepository users,
-                          AccessPolicy access) {
+                          AccessPolicy access, ApplicationEventPublisher events) {
         this.cards = cards;
         this.accounts = accounts;
         this.users = users;
         this.access = access;
+        this.events = events;
     }
 
     @PostMapping("/api/accounts/{accountId}/cards")
@@ -129,6 +133,7 @@ public class CardController {
     public CardResponse freeze(CurrentUser user, @PathVariable UUID id) {
         Card card = access.card(user, id, CardAction.FREEZE);
         card.freeze();
+        cardChanged(card, "frozen");
         return respond(card);
     }
 
@@ -137,6 +142,7 @@ public class CardController {
     public CardResponse unfreeze(CurrentUser user, @PathVariable UUID id) {
         Card card = access.card(user, id, CardAction.UNFREEZE);
         card.unfreeze();
+        cardChanged(card, "unfrozen");
         return respond(card);
     }
 
@@ -149,5 +155,12 @@ public class CardController {
 
     private CardResponse respond(Card card) {
         return CardResponse.of(card, accounts.findById(card.getAccountId()).orElseThrow().getCurrency());
+    }
+
+    /** Lets every open app (the owner's and the cardholder's) redraw the card straight away. */
+    private void cardChanged(Card card, String what) {
+        events.publishEvent(new AccountEvent(card.getAccountId(), AccountEvent.Kind.CARD_UPDATED,
+                card.getNickname() + " " + what, "The card ending " + card.getLast4() + " was " + what + ".",
+                card.getId()));
     }
 }

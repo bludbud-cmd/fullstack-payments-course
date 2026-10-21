@@ -7,7 +7,6 @@ import javax.crypto.spec.SecretKeySpec;
 
 import com.nimbusds.jose.jwk.source.ImmutableSecret;
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
@@ -33,7 +32,6 @@ import org.springframework.security.web.SecurityFilterChain;
  */
 @Configuration
 @EnableMethodSecurity
-@EnableConfigurationProperties(AuthProperties.class)
 public class SecurityConfig {
 
     @Bean
@@ -50,6 +48,9 @@ public class SecurityConfig {
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED))
                 .authorizeHttpRequests(requests -> requests
                         .requestMatchers("/api/auth/**", "/oauth2/**", "/login/oauth2/**").permitAll()
+                        // Stripe calls the webhook, and checks its own signature (see StripeWebhookController).
+                        // The WebSocket checks the token itself, in StompAuthInterceptor.
+                        .requestMatchers("/api/stripe/webhook", "/payments/return", "/ws").permitAll()
                         .requestMatchers("/actuator/health", "/docs/**", "/swagger-ui/**", "/v3/api-docs/**",
                                 "/error").permitAll()
                         .requestMatchers("/api/admin/**").hasAnyRole("SUPPORT", "ADMIN")
