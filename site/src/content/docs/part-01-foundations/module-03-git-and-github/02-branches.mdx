@@ -1,0 +1,126 @@
+---
+title: "3.2 Branches"
+description: "Work on a change in its own branch, then merge it back into main."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can create a branch, commit to it, switch between branches, and merge one into another.
+
+## Why it matters
+
+While you build a new PayDeck feature, the rest of the app should keep working. **Branches** let you try a change on the side, and only bring it into the main version once it works. In Part 10, you will see that the course's own code was built this way: one branch and one pull request per feature.
+
+## The idea
+
+A **branch** is a line of commits with a name. Every repository starts with one branch, `main`. Creating a branch is like saying "from this commit on, I'm going to try something", without disturbing `main`.
+
+```
+main:      A───B───────────E   (E merges the feature in)
+                \         /
+feature:         C───────D
+```
+
+- Commits `C` and `D` are made on the `feature` branch. `main` does not see them.
+- When the feature works, you **merge** it into `main`, and `main` gets both changes.
+
+Switching branches changes the files in your folder to match that branch. Git does this instantly.
+
+## Worked example
+
+In your `notes` repository:
+
+```sh
+git switch -c try-markdown
+```
+
+`switch -c` **c**reates a branch and switches to it. `git branch` lists branches; the current one has a `*`.
+
+Add a heading to `stuck-log.md` (a line starting with `# `), save, and commit:
+
+```sh
+git add stuck-log.md
+git commit -m "Add a heading to the stuck log"
+```
+
+Now switch back:
+
+```sh
+git switch main
+```
+
+Look at `stuck-log.md` in VS Code: the heading is gone. It is not lost; it lives on the other branch. Switch back with `git switch try-markdown` and it reappears.
+
+Happy with it? Merge it into `main`:
+
+```sh
+git switch main
+git merge try-markdown
+git log --oneline
+```
+
+The commit is now on `main`. Delete the finished branch:
+
+```sh
+git branch -d try-markdown
+```
+
+### When branches disagree
+
+If two branches change the **same lines** of the same file differently, Git cannot guess which to keep. That is a **merge conflict**. Git marks the spot in the file:
+
+```
+<<<<<<< HEAD
+I got stuck on paths.
+=======
+I got stuck on the terminal.
+>>>>>>> other-branch
+```
+
+Edit the file to keep what you want (deleting the marker lines), save, then `git add` the file and `git commit`. VS Code shows buttons above conflicts to make this easier.
+
+## Try it
+
+<Exercise title="Try it: make and fix a conflict">
+Create a branch `a`, change the first line of `first-file.txt` and commit. Switch to `main`, change the *same* line differently, and commit. Then merge `a` into `main` and resolve the conflict.
+
+<Fragment slot="hint">`git switch -c a`, edit, commit; `git switch main`, edit, commit; `git merge a`.</Fragment>
+<Fragment slot="solution">The merge stops with `CONFLICT (content): Merge conflict in first-file.txt`. Open the file, choose the line you want (or combine them), delete the `<<<<<<<`, `=======` and `>>>>>>>` lines, save, then run `git add first-file.txt` and `git commit -m "Merge branch a"`. `git log --oneline --graph` draws the two lines of history joining.</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Your local changes would be overwritten">
+Git will not switch branches if you have uncommitted changes that the switch would destroy. Commit them first (or throw them away with `git restore`).
+</Aside>
+
+## Recap
+
+- A **branch** is a named line of commits; `main` is the default.
+- `git switch -c name` creates a branch; `git switch name` moves between branches.
+- `git merge name` brings another branch's commits into the current one.
+- A **merge conflict** means both sides changed the same lines; edit the file, then add and commit.
+
+<Quiz
+	questions={[
+		{
+			question: 'You are on main and run `git merge feature`. Which branch changes?',
+			options: ['feature', 'main', 'Both'],
+			answer: 1,
+			explanation: 'Merging brings the other branch’s commits into the branch you are on.',
+		},
+		{
+			question: 'When does a merge conflict happen?',
+			options: ['Whenever two branches exist', 'When both branches changed the same lines differently', 'When a branch is deleted'],
+			answer: 1,
+			explanation: 'Git merges changes to different lines by itself; it only asks when the same lines differ.',
+		},
+	]}
+/>
+
+<MarkComplete />

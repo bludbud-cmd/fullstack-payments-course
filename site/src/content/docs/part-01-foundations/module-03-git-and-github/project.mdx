@@ -1,0 +1,57 @@
+---
+title: "Mini-project: publish your first repo"
+description: "Publish a small project to GitHub, built on a branch and merged through a pull request."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Publish a repository the way professional teams do: work on a branch, open a **pull request**, and merge it on GitHub.
+
+A **pull request** (PR) is a request to merge one branch into another, on GitHub. It shows every change, lets people comment line by line, and runs automated checks. It is how every feature of PayDeck was added.
+
+## The task
+
+1. Create a folder `~/Projects/course/about-me` and turn it into a repository.
+2. Add a `README.md` with your name and one sentence about why you are learning to code. Commit it on `main`.
+3. Create a **public** repository called `about-me` on GitHub, connect it as `origin`, and push `main`.
+4. Create a branch called `add-goals`. Add a section to the README listing three things you want to build. Commit, and push the branch with `git push -u origin add-goals`.
+5. On GitHub, you will see a banner offering to **Compare & pull request**. Open a pull request, read through the changes it shows, and click **Merge pull request**.
+6. Back on your Mac, switch to `main` and pull, so your Mac has the merged version too.
+
+<Exercise title="Check your work">
+On GitHub, open your repository's **Pull requests** tab, then **Closed**. Your PR should be there, marked **Merged**. And `git log --oneline` on your Mac should show the merge.
+
+<Fragment slot="hint">If `git push` for the branch fails, check you ran `git switch -c add-goals` before committing, and that the branch name in the push command matches.</Fragment>
+<Fragment slot="solution">
+
+```sh
+mkdir -p ~/Projects/course/about-me && cd ~/Projects/course/about-me
+git init
+# write README.md in VS Code, then:
+git add README.md
+git commit -m "Introduce myself"
+git remote add origin https://github.com/YOUR-USERNAME/about-me.git
+git push -u origin main
+git switch -c add-goals
+# add the goals section, then:
+git commit -am "Add what I want to build"
+git push -u origin add-goals
+# open and merge the pull request on GitHub, then:
+git switch main
+git pull
+```
+
+`git commit -am` stages every change to files Git already tracks and commits them in one step. It does not include brand new files.
+</Fragment>
+</Exercise>
+
+<Aside type="tip" title="Your public profile">
+Public repositories show on your GitHub profile. By the end of this course, your PayDeck repository will be there too: a complete, working full-stack app you can point anyone to.
+</Aside>
+
+<MarkComplete />

@@ -1,0 +1,102 @@
+---
+title: "3.4 Cloning the course repo"
+description: "Download the course's code with git clone, find your way around it, and keep it up to date."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you have the full PayDeck code on your Mac, and you know where each part lives.
+
+## Why it matters
+
+You will build PayDeck yourself, step by step. But it helps enormously to have the finished version next to you: to compare when you are stuck, and to see where you are heading. Downloading a repository from GitHub is called **cloning**, and it is how you will start working on any existing project, at any job.
+
+## The idea
+
+`git clone` downloads a repository **with its whole history**, and sets up `origin` to point back at it. It is not just a copy of the files: you can see every commit ever made, and pull updates later.
+
+## Worked example
+
+```sh
+cd ~/Projects
+git clone https://github.com/bludbud-cmd/fullstack-payments-course.git
+cd fullstack-payments-course
+ls
+```
+
+You will see:
+
+| Folder | What it is | Built in |
+| --- | --- | --- |
+| `api` | The PayDeck server: Java 25 and Spring Boot | Parts 4 to 6, 8 and 9 |
+| `app` | The PayDeck app: React Native for Android and macOS | Parts 3 and 7 to 9 |
+| `site` | This website | (You are reading it) |
+| `.github` | Automated checks that run on every change | Part 10 |
+
+Look around:
+
+```sh
+git log --oneline | head -20
+```
+
+`| head -20` sends the output of `git log` into `head`, which shows only the first 20 lines. Each line is a step in building PayDeck. Many say "Merge pull request #…": each feature was built on a branch and merged, just like lesson 3.2.
+
+```sh
+code .
+```
+
+Opens the whole project in VS Code (`.` means "this folder"). Open `app/README.md` and `api/README.md`: each explains its half of PayDeck. Do not worry about understanding the code yet; by the end of the course you will.
+
+### Keeping it up to date
+
+The course code may get fixes and improvements. To get them:
+
+```sh
+cd ~/Projects/fullstack-payments-course
+git pull
+```
+
+<Aside type="caution" title="Build your own, read this one">
+Build your PayDeck in your own folder and repository, and use this clone only to read and compare. If you edit the clone, `git pull` may hit conflicts with the course's own changes.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: travel in time">
+Every commit is a snapshot you can visit. Find the very first commit in the course repository, and see what the project looked like then.
+
+<Fragment slot="hint">`git log --oneline --reverse | head -1` shows the oldest commit first.</Fragment>
+<Fragment slot="hint2">`git switch --detach <id>` visits a commit without creating a branch.</Fragment>
+<Fragment slot="solution">Run `git log --oneline --reverse | head -1` to get the first commit's ID, then `git switch --detach` followed by that ID. `ls` shows far fewer files: the project's starting point. Come back to the present with `git switch main`.</Fragment>
+</Exercise>
+
+## Recap
+
+- `git clone URL` downloads a repository with its entire history.
+- The course repository has `api` (server), `app` (client) and `site` (this website).
+- `git pull` brings in updates later.
+- Build your own PayDeck separately; use the clone to read and compare.
+
+<Quiz
+	questions={[
+		{
+			question: 'What does `git clone` give you, compared with downloading a zip of the files?',
+			options: ['Nothing extra', 'The whole history, and a connection to pull updates', 'A faster download'],
+			answer: 1,
+			explanation: 'A clone is a full repository, with every commit and `origin` set up.',
+		},
+		{
+			question: 'In the course repository, where is the server code?',
+			options: ['app', 'api', 'site'],
+			answer: 1,
+			explanation: '`api` is the Spring Boot server; `app` is the React Native client.',
+		},
+	]}
+/>
+
+<MarkComplete />

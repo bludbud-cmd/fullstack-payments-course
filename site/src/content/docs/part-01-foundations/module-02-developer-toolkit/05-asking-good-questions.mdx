@@ -1,0 +1,94 @@
+---
+title: "2.5 Asking good questions"
+description: "Get unstuck by searching well, and ask a question that gets a useful answer."
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you have a routine for getting unstuck, and you can write a question that someone can actually answer.
+
+## Why it matters
+
+You are learning on your own, so the skill of unsticking yourself matters as much as any programming skill. Professional developers search, read documentation and ask questions every single day. Doing it well saves hours.
+
+## The idea
+
+When you are stuck, go through these steps in order:
+
+1. **Read the error message** with the method from the last lesson.
+2. **Explain the problem out loud**, line by line, to anyone or anything (programmers call this "rubber duck debugging", after explaining code to a toy duck). Saying what each line *should* do often reveals the line that does not.
+3. **Search** for the error message.
+4. **Read the official documentation** for the tool involved.
+5. **Take a short break.** It works far more often than it should.
+6. **Ask someone**, with a good question.
+
+### Searching well
+
+- Copy the **error message itself**, without your own file names and numbers: search for `ReferenceError is not defined node`, not `bil is not defined /Users/asha/tip.js`.
+- Add the tool and version: `react native 0.83`, `spring boot 4`.
+- Prefer recent answers and official docs. An answer from 2017 may describe a version that no longer works that way.
+
+### Asking well
+
+A good question has five parts:
+
+1. **What you are trying to do.**
+2. **What you did**: the exact command or code.
+3. **What you expected** to happen.
+4. **What happened instead**, with the full error message pasted as **text**, not a photo of your screen.
+5. **What you have already tried.**
+
+<Aside type="note" title="Using an AI assistant">
+AI assistants can explain an error or a concept very well, and the same five parts make their answers better too. Treat their answers like a classmate's: often right, sometimes confidently wrong. Run the code and make sure you understand it before you keep it.
+</Aside>
+
+## Worked example: a weak question and a strong one
+
+> **Weak:** my app doesn't work help
+
+Nobody can answer this without asking five questions first.
+
+> **Strong:** I'm on Module 11. I'm trying to start my first React Native app on the Android emulator. I ran `npm run android` in the `app` folder. I expected the app to open in the emulator, but the terminal printed `error Failed to launch emulator. Reason: No emulators found as an output of 'emulator -list-avds'`. I've checked Android Studio is installed and restarted the terminal. Do I need to create an emulator first?
+
+This one is likely to be answered in minutes, and while writing it, you might even spot the answer yourself: no emulator has been created yet.
+
+## Try it
+
+<Exercise title="Try it: rewrite a question">
+Rewrite this question so that it has all five parts. Invent any details you need.
+
+> the terminal says command not found
+
+<Fragment slot="hint">Which command? Where were you? What did you expect it to do?</Fragment>
+<Fragment slot="solution">For example: "I'm following lesson 2.2 and trying to open my Projects folder in VS Code from the terminal. I typed `code ~/Projects` in Terminal. I expected VS Code to open, but I got `zsh: command not found: code`. I've checked that VS Code is installed in Applications and opens normally from there. Is there a setup step I missed?" (There is: installing the `code` command from the command palette, in lesson 2.1.)</Fragment>
+</Exercise>
+
+## Recap
+
+- Work through: read the error, explain it out loud, search, read the docs, take a break, then ask.
+- Search for the error message without your own names, plus the tool and version.
+- A good question says what you tried to do, what you did, what you expected, what happened (as text), and what you already tried.
+
+<Quiz
+	questions={[
+		{
+			question: 'What is the best thing to paste when asking for help with an error?',
+			options: ['A photo of your screen', 'The full error message as text', 'Just the first word of the error'],
+			answer: 1,
+			explanation: 'Text can be searched and copied; photos cannot.',
+		},
+		{
+			question: 'Why remove your own file names before searching for an error?',
+			options: ['They are private', 'Other people’s errors will not contain your names, so searches match better', 'Search engines do not allow slashes'],
+			answer: 1,
+			explanation: 'The general part of the message is what other people will have searched for too.',
+		},
+	]}
+/>
+
+<MarkComplete />

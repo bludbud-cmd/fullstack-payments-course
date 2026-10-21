@@ -1,0 +1,95 @@
+---
+title: "2.1 Installing VS Code"
+description: "Install Visual Studio Code, open a folder in it, and create, edit and save your first file."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you have Visual Studio Code installed, and you can open a folder, create a file, and save it.
+
+## Why it matters
+
+Code is plain text, so you could write it in TextEdit. But a **code editor** colours your code, spots typing mistakes as you go, finishes words for you, and shows all the files of a project side by side. You will write every line of PayDeck in **Visual Studio Code** (VS Code), the free editor most professional developers use.
+
+## The idea
+
+VS Code is organised around **folders**, not single files. You open the folder of a project, and VS Code shows every file in it on the left. This matters because a real app is hundreds of files that refer to each other.
+
+The window has four areas you will use constantly:
+
+| Area | Where | What it is for |
+| --- | --- | --- |
+| **Explorer** | Left side | The files and folders of the open project |
+| **Editor** | Middle | The file you are editing, one tab per open file |
+| **Terminal** | Bottom (hidden at first) | Typing commands, which you will learn next lesson |
+| **Command palette** | Pops up at the top | Every VS Code feature, searchable. Open it with **Command + Shift + P** |
+
+## Worked example: install and set up
+
+1. Go to [code.visualstudio.com](https://code.visualstudio.com) and click **Download for macOS**.
+2. Open your **Downloads** folder and double-click the downloaded file if it did not unzip by itself. You get **Visual Studio Code.app**.
+3. Drag it into your **Applications** folder. (If you skip this, macOS may refuse to update it later.)
+4. Open it from Applications. If macOS asks whether you are sure, click **Open**: it was downloaded from the internet, which is fine for this app.
+5. Open the command palette (**Command + Shift + P**), type `shell command`, and choose **Shell Command: Install 'code' command in PATH**. This lets you open VS Code from the terminal by typing `code`, which you will use in the next lesson.
+
+Now make your first file:
+
+1. In Finder, create a folder called `Projects` inside your home folder (the one with the house icon).
+2. In VS Code choose **File → Open Folder…** and pick `Projects`. If it asks whether you trust the authors, say yes: you are the author.
+3. In the Explorer, hover over the folder name and click the **New File** icon. Name the file `hello.txt`.
+4. Type `Hello from my first file`, then press **Command + S** to save.
+
+A white dot on a tab means the file has unsaved changes. Get into the habit of pressing **Command + S** often.
+
+<Aside type="tip" title="Turn on Auto Save">
+Choose **File → Auto Save** and VS Code saves for you after every change. Many beginners' "my change didn't work" problems are really "my change wasn't saved".
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a second file">
+In the same `Projects` folder, create a file called `notes.md` and write three things you want to build after this course. Save it, close the tab, and open it again from the Explorer to check it was saved.
+
+<Fragment slot="hint">`.md` means Markdown, a simple text format. Any text is fine.</Fragment>
+<Fragment slot="solution">Create the file with the **New File** icon, type your list, press **Command + S**, close the tab (**Command + W**), then click `notes.md` in the Explorer. Your text is still there because it was saved to storage, not just held in memory.</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="“command not found: code”">
+You will see this in the terminal if step 5 above was skipped. Run **Shell Command: Install 'code' command in PATH** from the command palette, then open a new terminal window.
+</Aside>
+
+<Aside type="caution" title="Editing a file from the Downloads folder">
+If you opened a single file instead of a folder, VS Code cannot see the rest of the project. Always use **File → Open Folder…**.
+</Aside>
+
+## Recap
+
+- VS Code is a free code editor. Always open a **folder**, not a single file.
+- The **Explorer** shows files, the **editor** edits them, and the **command palette** (**Command + Shift + P**) finds any feature.
+- A white dot on a tab means unsaved changes. Save with **Command + S**, or turn on Auto Save.
+
+<Quiz
+	questions={[
+		{
+			question: 'How do you find a VS Code feature when you do not know where its menu is?',
+			options: ['Restart VS Code', 'Open the command palette with Command + Shift + P', 'Search Finder'],
+			answer: 1,
+			explanation: 'The command palette lists every feature and is searchable.',
+		},
+		{
+			question: 'A tab shows a white dot. What does it mean?',
+			options: ['The file has an error', 'The file has unsaved changes', 'The file is read-only'],
+			answer: 1,
+			explanation: 'Save with Command + S and the dot disappears.',
+		},
+	]}
+/>
+
+<MarkComplete />

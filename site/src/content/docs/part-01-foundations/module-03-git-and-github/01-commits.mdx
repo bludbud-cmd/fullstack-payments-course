@@ -1,0 +1,138 @@
+---
+title: "3.1 Commits"
+description: "Install Git, turn a folder into a repository, and save snapshots of your work as commits."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can create a Git repository and save your work in commits you can look back at.
+
+## Why it matters
+
+Imagine changing ten files in PayDeck, and the app stops working. Which change broke it? With **Git**, you can see every change since the last working version, and go back to it in seconds. Every software team in the world uses Git, and every lesson from now on assumes you save your work with it.
+
+## The idea
+
+Git takes **snapshots** of a project folder. Each snapshot is a **commit**: the state of every file at that moment, plus a message saying what changed and why. The folder Git watches is a **repository** (or "repo").
+
+Saving a commit is a two-step process, like taking a group photo:
+
+1. **Stage** the changes you want in the photo: `git add`. (The staging area is who is standing in front of the camera.)
+2. **Commit** them with a message: `git commit`. (Click.)
+
+Two steps let you commit related changes together, even when you have edited several unrelated things.
+
+## Worked example
+
+### Install and introduce yourself
+
+macOS comes with a small installer for Git. In the terminal, run:
+
+```sh
+git --version
+```
+
+If Git is missing, macOS offers to install the **command line developer tools**. Click **Install** and wait; then run `git --version` again. You should see something like `git version 2.39.5`.
+
+Tell Git who you are. This name and email go into every commit you make:
+
+```sh
+git config --global user.name "Asha Rao"
+git config --global user.email "asha@example.com"
+git config --global init.defaultBranch main
+```
+
+Use the email you will use for GitHub in lesson 3.3. You only do this once per computer.
+
+### Your first repository
+
+```sh
+cd ~/Projects/course/notes
+git init
+```
+
+`git init` turns the folder into a repository. It creates a hidden `.git` folder where Git keeps every snapshot. Never edit it by hand.
+
+```sh
+git status
+```
+
+`git status` is the command you will run most. It says which files are new or changed, and what is staged. Right now it lists your files as **untracked**: Git sees them but is not saving them yet.
+
+```sh
+git add stuck-log.md first-file.txt
+git status
+git commit -m "Start my notes"
+```
+
+Now the files are in a commit. `-m` gives the message.
+
+Edit `stuck-log.md` in VS Code, add a line, save, then:
+
+```sh
+git diff
+```
+
+`git diff` shows exactly what changed since the last commit: removed lines with `-`, added lines with `+`.
+
+```sh
+git add stuck-log.md
+git commit -m "Log the cd error from lesson 2.3"
+git log --oneline
+```
+
+`git log` lists your commits, newest first. Each has a short ID such as `3f9c2ab`.
+
+<Aside type="tip" title="Write messages for future you">
+A good commit message says *what* changed in a short sentence: "Add the top-up screen", "Fix rounding of card limits". "stuff" or "changes" will not help you in three months.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: undo an unwanted edit">
+Change a line in `first-file.txt` and save it. Now pretend the change was a mistake. Use Git to put the file back exactly as it was in the last commit.
+
+<Fragment slot="hint">`git status` suggests the command for you. Read its output.</Fragment>
+<Fragment slot="solution">Run `git restore first-file.txt`. The file goes back to its committed version. `git status` and `git diff` now show nothing changed. Careful: the uncommitted edit is gone for good, because it was never in a commit.</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="fatal: not a git repository">
+You ran a Git command outside a repository. Check with `pwd`: you need to be in the folder where you ran `git init`, or a folder inside it.
+</Aside>
+
+<Aside type="caution" title="The commit opens a strange editor">
+If you forget `-m`, Git opens an editor called Vim to ask for a message. To get out: press **Escape**, type `:q!` and press Return, then commit again with `-m "message"`.
+</Aside>
+
+## Recap
+
+- A **repository** is a folder Git watches; `git init` creates one.
+- A **commit** is a snapshot with a message. Stage with `git add`, save with `git commit -m`.
+- `git status` says what changed; `git diff` shows the lines; `git log` lists commits.
+- `git restore` throws away uncommitted changes to a file.
+
+<Quiz
+	questions={[
+		{
+			question: 'What does `git add` do?',
+			options: ['Saves a commit', 'Stages changes for the next commit', 'Uploads to GitHub'],
+			answer: 1,
+			explanation: '`git add` chooses what goes into the next commit; `git commit` saves it.',
+		},
+		{
+			question: 'Which command shows the exact lines you changed since the last commit?',
+			options: ['git log', 'git diff', 'git init'],
+			answer: 1,
+			explanation: '`git diff` compares your files with the last commit.',
+		},
+	]}
+/>
+
+<MarkComplete />
