@@ -1,5 +1,6 @@
 package dev.paydeck.api.account;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -21,4 +22,6 @@ public interface AccountRepository extends JpaRepository<Account, UUID> {
     Optional<Account> findByIdForUpdate(UUID id);
 
     Optional<Account> findByKindAndCurrency(AccountKind kind, SupportedCurrency currency);
+
+    List<Account> findByOwnerUserIdOrderByCreatedAt(UUID ownerUserId);
 }

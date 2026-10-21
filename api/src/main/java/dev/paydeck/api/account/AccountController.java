@@ -4,13 +4,14 @@ import java.net.URI;
 import java.time.Instant;
 import java.util.UUID;
 
-import dev.paydeck.api.common.NotFoundException;
+import dev.paydeck.api.access.AccessPolicy;
+import dev.paydeck.api.access.AccountAction;
+import dev.paydeck.api.auth.CurrentUser;
+import dev.paydeck.api.auth.UserRepository;
 import dev.paydeck.api.ledger.LedgerService;
 import dev.paydeck.api.money.SupportedCurrency;
 import jakarta.validation.Valid;
-import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.Size;
 import org.springframework.http.ResponseEntity;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -24,42 +25,45 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/accounts")
 public class AccountController {
 
-    public record OpenAccountRequest(
-            @NotBlank @Size(max = 100) String ownerName,
-            @NotNull SupportedCurrency currency) {
+    public record OpenAccountRequest(@NotNull SupportedCurrency currency) {
     }
 
     public record AccountResponse(
             UUID id, String ownerName, SupportedCurrency currency, long balanceCents, Instant createdAt) {
+
+        public static AccountResponse of(Account account, long balanceCents) {
+            return new AccountResponse(account.getId(), account.getOwnerName(), account.getCurrency(),
+                    balanceCents, account.getCreatedAt());
+        }
     }
 
     private final AccountRepository accounts;
+    private final UserRepository users;
     private final LedgerService ledger;
+    private final AccessPolicy access;
 
-    public AccountController(AccountRepository accounts, LedgerService ledger) {
+    public AccountController(AccountRepository accounts, UserRepository users, LedgerService ledger,
+                             AccessPolicy access) {
         this.accounts = accounts;
+        this.users = users;
         this.ledger = ledger;
+        this.access = access;
     }
 
+    /** Opens an account for the signed-in user, in their name. */
     @PostMapping
     @Transactional
-    public ResponseEntity<AccountResponse> open(@Valid @RequestBody OpenAccountRequest request) {
-        Account account = accounts.save(Account.openCustomerAccount(request.ownerName().strip(), request.currency()));
+    public ResponseEntity<AccountResponse> open(CurrentUser user, @Valid @RequestBody OpenAccountRequest request) {
+        String ownerName = users.findById(user.id()).orElseThrow().getDisplayName();
+        Account account = accounts.save(Account.openCustomerAccount(user.id(), ownerName, request.currency()));
         return ResponseEntity.created(URI.create("/api/accounts/" + account.getId()))
-                .body(toResponse(account, 0));
+                .body(AccountResponse.of(account, 0));
     }
 
     @GetMapping("/{id}")
     @Transactional(readOnly = true)
-    public AccountResponse get(@PathVariable UUID id) {
-        Account account = accounts.findById(id)
-                .filter(a -> a.getKind() == AccountKind.CUSTOMER)
-                .orElseThrow(() -> new NotFoundException("Account", id));
-        return toResponse(account, ledger.balanceOf(id));
-    }
-
-    private static AccountResponse toResponse(Account account, long balanceCents) {
-        return new AccountResponse(account.getId(), account.getOwnerName(), account.getCurrency(),
-                balanceCents, account.getCreatedAt());
+    public AccountResponse get(CurrentUser user, @PathVariable UUID id) {
+        Account account = access.account(user, id, AccountAction.VIEW);
+        return AccountResponse.of(account, ledger.balanceOf(id));
     }
 }
