@@ -1,0 +1,229 @@
+---
+title: "14.4 Folder structure"
+description: "Split a growing app into folders for screens, components, navigation, state and data, with one component per file and clear imports."
+sidebar:
+  order: 4
+---
+
+import { Aside, FileTree } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can organise an app into folders the way PayDeck is organised, move code between files with `export` and `import`, and find anything quickly.
+
+## Why it matters
+
+`App.tsx` from the last lesson already has data, three components and a navigator in one file. A real app has dozens of screens. Without a plan, you spend more time scrolling than building. A clear structure also means that when you open PayDeck's code in later Parts, you know where everything lives.
+
+## The idea
+
+Two rules:
+
+1. **One component per file**, named after the component: `CardsScreen` lives in `CardsScreen.tsx`.
+2. **Group files by what they are**, in folders under `src/`.
+
+PayDeck's structure, which you will use from now on:
+
+<FileTree>
+- App.tsx the root: providers and the navigator, nothing else
+- src/
+  - components/ pieces used on several screens
+    - Button.tsx
+    - Field.tsx
+    - PaymentCard.tsx
+    - Screen.tsx the frame every screen shares
+  - screens/ one file per screen
+    - HomeScreen.tsx
+    - CardsScreen.tsx
+    - CardDetailScreen.tsx
+  - navigation/
+    - routes.ts the Route type, the tabs, push and pop
+    - NavigationContext.tsx
+    - AppNavigator.tsx
+  - state/ data the whole app shares, and how it is saved
+  - data/
+    - sampleData.ts made-up cards and transactions, until Part 7
+  - money.ts
+  - validation.ts
+  - theme.ts
+  - types.ts the shapes of cards and transactions
+</FileTree>
+
+Files that contain JSX end in `.tsx`; plain TypeScript files end in `.ts`.
+
+### Exports and imports
+
+A file shares things with `export`; other files bring them in with `import`, using a **relative path** from the importing file:
+
+```tsx
+// src/screens/CardsScreen.tsx
+import { PaymentCard } from '../components/PaymentCard';   // up one folder, then into components
+import { useNavigation } from '../navigation/NavigationContext';
+import type { Card } from '../types';
+
+export function CardsScreen() { ... }
+```
+
+- `./` means "this folder", `../` means "the folder above".
+- No file extension is needed.
+- `import type` brings in only a type. It is removed completely when the app is built, which makes it clear the file only needs the shape, not any code.
+
+PayDeck uses **named exports** (`export function CardsScreen`) for everything except `App.tsx`, which keeps `export default` because `index.js` expects it. Named exports mean the name is the same everywhere it is used, which makes searching easy.
+
+## Worked example
+
+Split the last lesson's `App.tsx`:
+
+1. Create the folders: in VS Code's file explorer, right-click → **New Folder**, or in the terminal:
+
+   ```sh
+   mkdir -p src/screens src/navigation src/data
+   ```
+
+2. Move the card list into `src/data/sampleData.ts`:
+
+   ```ts
+   export const sampleCards = [
+     { id: 'c1', nickname: 'Everyday', last4: '4242' },
+     { id: 'c2', nickname: 'Travel', last4: '1881' },
+   ];
+   ```
+
+3. Move `NavigationContext.tsx` into `src/navigation/`.
+
+4. Move each screen into `src/screens/`, adding `export` and the imports it needs. `src/screens/CardsScreen.tsx`:
+
+   ```tsx
+   import { Button, Text, View } from 'react-native';
+   import { sampleCards } from '../data/sampleData';
+   import { useNavigation } from '../navigation/NavigationContext';
+
+   export function CardsScreen() {
+     const { navigate } = useNavigation();
+     return (
+       <View style={{ gap: 8 }}>
+         <Text style={{ fontSize: 28, fontWeight: '700' }}>Cards</Text>
+         {sampleCards.map((card) => (
+           <Button
+             key={card.id}
+             title={card.nickname}
+             onPress={() => navigate({ name: 'card', cardId: card.id })}
+           />
+         ))}
+       </View>
+     );
+   }
+   ```
+
+   Do the same for `CardDetailScreen`.
+
+5. Move the stack, `renderScreen` and the provider into `src/navigation/AppNavigator.tsx`, as an exported `AppNavigator` component.
+
+6. `App.tsx` becomes tiny:
+
+   ```tsx
+   import { AppNavigator } from './src/navigation/AppNavigator';
+
+   export default function App() {
+     return <AppNavigator />;
+   }
+   ```
+
+Save everything and check the app still works. Then run the checker over the whole project, which catches any import you got wrong:
+
+```sh
+npx tsc --noEmit
+```
+
+No output means every import points at something real. The React Native template already has a `tsconfig.json` with sensible settings, so this works straight away.
+
+<Aside type="tip" title="Let VS Code fix imports">
+When you move a file in VS Code's explorer, it offers to **update imports** in every file that uses it. Say yes. And when you type a name that is exported elsewhere, such as `PaymentCard`, VS Code suggests adding the import for you.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a shared Screen frame">
+Both screens start with a title, and the detail screen has a back button. Create `src/components/Screen.tsx`: a component with props `title` and `children` that shows a back button (only when `canGoBack` from `useNavigation()` is true), the title, and then the children, inside a `ScrollView`. Use it in both screens.
+
+<Fragment slot="hint">`children` is a special prop: whatever you put between `<Screen>` and `</Screen>`. Its type is `ReactNode`, imported from `'react'`.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+import type { ReactNode } from 'react';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useNavigation } from '../navigation/NavigationContext';
+
+type ScreenProps = {
+  title: string;
+  children: ReactNode;
+};
+
+export function Screen({ title, children }: ScreenProps) {
+  const { canGoBack, goBack } = useNavigation();
+
+  return (
+    <ScrollView contentContainerStyle={styles.page}>
+      <View style={styles.header}>
+        {canGoBack && (
+          <Pressable accessibilityRole="button" onPress={goBack} hitSlop={12}>
+            <Text style={styles.back}>‹ Back</Text>
+          </Pressable>
+        )}
+        <Text accessibilityRole="header" style={styles.title}>
+          {title}
+        </Text>
+      </View>
+      {children}
+    </ScrollView>
+  );
+}
+
+const styles = StyleSheet.create({
+  page: { padding: 24, gap: 16, width: '100%', maxWidth: 640, alignSelf: 'center' },
+  header: { gap: 8 },
+  back: { color: '#3c4fe0', fontSize: 16 },
+  title: { fontSize: 28, fontWeight: '700', color: '#14162b' },
+});
+```
+
+Each screen then becomes `<Screen title="Cards">...</Screen>`, without its own title or back button. PayDeck's `app/src/components/Screen.tsx` is the same idea.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Unable to resolve module">
+Metro could not find an import. Check the path from the importing file's folder: a screen in `src/screens` reaches components with `../components/...`, not `./components/...`.
+</Aside>
+
+<Aside type="caution" title="Default and named exports mixed up">
+`import CardsScreen from ...` (no braces) asks for a default export; `import { CardsScreen } from ...` asks for a named one. If one gives `undefined`, check which kind the file exports.
+</Aside>
+
+## Recap
+
+- One component per file; folders for components, screens, navigation, state and data.
+- `export` shares; `import` with `./` and `../` paths brings things in; `import type` for types only.
+- `App.tsx` stays tiny: providers and the navigator.
+- `npx tsc --noEmit` checks every import and type in the project.
+
+<Quiz
+	questions={[
+		{
+			question: 'From src/screens/HomeScreen.tsx, how do you import money.ts in src/?',
+			options: ["'./money'", "'../money'", "'src/money'"],
+			answer: 1,
+			explanation: '../ goes up from screens to src.',
+		},
+		{
+			question: 'Where does a Button used on many screens belong?',
+			options: ['src/screens', 'src/components', 'App.tsx'],
+			answer: 1,
+			explanation: 'Shared pieces go in components; screens are whole pages.',
+		},
+	]}
+/>
+
+<MarkComplete />

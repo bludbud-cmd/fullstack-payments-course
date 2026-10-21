@@ -1,0 +1,193 @@
+---
+title: "14.2 A sidebar on macOS"
+description: "Turn the phone's tab bar into a Mac-style sidebar when the window is wide, using the same tab buttons."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson your app shows a tab bar at the bottom on narrow screens and a sidebar on the left on wide windows, from one list of tabs.
+
+## Why it matters
+
+A tab bar at the bottom of a big Mac window looks like a phone app blown up. Mac apps such as Mail, Music and System Settings put their sections in a **sidebar** on the left. PayDeck does the same whenever the window is wide enough, and switches back to a tab bar when it is narrow, using one component for both.
+
+## The idea
+
+Three steps:
+
+1. Describe the tabs **once**, as data, with their labels:
+
+   ```ts
+   const tabs = [
+     { name: 'home', label: 'Wallet' },
+     { name: 'cards', label: 'Cards' },
+     { name: 'activity', label: 'Activity' },
+   ] as const;
+
+   type TabName = (typeof tabs)[number]['name'];   // 'home' | 'cards' | 'activity'
+   ```
+
+   `as const` keeps the exact strings. The `TabName` line reads: take the type of `tabs`, look at any item (`[number]`), and take its `name`. The result is the union of tab names, worked out from the list so the two can never disagree.
+
+2. Decide the layout from the window width (lesson 12.5): `const wide = width >= 720;`.
+
+3. Build the tab buttons once, and place them either in a sidebar **before** the content in a row, or in a tab bar **after** the content in a column.
+
+## Worked example
+
+Starting from lesson 14.1's `App.tsx`, add `useWindowDimensions` to the `react-native` import, add the `tabs` list, and replace the `return` and the styles:
+
+```tsx
+const tabs = [
+  { name: 'home', label: 'Wallet' },
+  { name: 'cards', label: 'Cards' },
+] as const;
+
+const WIDE_LAYOUT = 720;
+
+// at the top of App, next to useState:
+const { width } = useWindowDimensions();
+const wide = width >= WIDE_LAYOUT;
+
+// after the switch that picks `screen`:
+const activeTab = stack[0].name;
+
+const tabButtons = tabs.map((tab) => {
+  const selected = tab.name === activeTab;
+  return (
+    <Pressable
+      key={tab.name}
+      accessibilityRole="tab"
+      accessibilityState={{ selected }}
+      onPress={() => setStack([{ name: tab.name }])}
+      style={[wide ? styles.sidebarItem : styles.tabItem, selected && wide && styles.sidebarSelected]}
+    >
+      <Text style={[styles.tabLabel, selected && styles.tabLabelSelected]}>{tab.label}</Text>
+    </Pressable>
+  );
+});
+
+return (
+  <View style={[styles.root, wide && styles.rootWide]}>
+    {wide && (
+      <View accessibilityRole="tablist" style={styles.sidebar}>
+        <Text style={styles.brand}>PayDeck</Text>
+        {tabButtons}
+      </View>
+    )}
+    <View style={styles.content}>
+      {stack.length > 1 && <Button title="‹ Back" onPress={() => setStack(pop(stack))} />}
+      {screen}
+    </View>
+    {!wide && (
+      <View accessibilityRole="tablist" style={styles.tabBar}>
+        {tabButtons}
+      </View>
+    )}
+  </View>
+);
+```
+
+```tsx
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: '#f5f6fa' },
+  rootWide: { flexDirection: 'row' },
+  content: { flex: 1, padding: 24, gap: 12 },
+  title: { fontSize: 28, fontWeight: '700' },
+  sidebar: {
+    width: 200,
+    paddingTop: 24,
+    paddingHorizontal: 8,
+    gap: 2,
+    backgroundColor: '#ffffff',
+    borderRightWidth: 1,
+    borderRightColor: '#dfe1ea',
+  },
+  brand: { fontSize: 20, fontWeight: '800', paddingHorizontal: 12, marginBottom: 16 },
+  sidebarItem: { paddingVertical: 10, paddingHorizontal: 12, borderRadius: 8 },
+  sidebarSelected: { backgroundColor: '#f5f6fa' },
+  tabBar: { flexDirection: 'row', backgroundColor: '#ffffff', borderTopWidth: 1, borderTopColor: '#dfe1ea' },
+  tabItem: { flex: 1, alignItems: 'center', paddingVertical: 12 },
+  tabLabel: { fontSize: 15, color: '#5d6177' },
+  tabLabelSelected: { color: '#3c4fe0', fontWeight: '700' },
+});
+```
+
+How the two layouts come from one tree:
+
+- **Narrow:** `root` is a column. Its children are the content (with `flex: 1`, filling the height) and then the tab bar, so the tab bar sits at the bottom.
+- **Wide:** `rootWide` makes `root` a row. Its children are the sidebar (200 points wide) and then the content (with `flex: 1`, filling the rest of the width).
+
+Run it on the Mac and drag the window narrower than 720 points: the sidebar disappears and a tab bar appears at the bottom, and your place in the app is kept, because the stack is the same state either way.
+
+<Aside type="tip" title="Hooks before anything else">
+`useWindowDimensions` is a hook, so it must be called at the top level of `App`, on every render, like `useState` (lesson 10.5). Put it with the other hooks at the start of the function, not inside the `switch`.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: icons in the sidebar">
+Give each tab a one-character "icon" (for example `'◎'`, `'▭'`, `'≡'`) in the `tabs` list, shown before the label in the sidebar, and above the label in the tab bar.
+
+<Fragment slot="hint">Add `icon` to each tab object. In the tab button, put the icon and the label in a `View` whose `flexDirection` is `'row'` when wide and `'column'` when not.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+const tabs = [
+  { name: 'home', label: 'Wallet', icon: '◎' },
+  { name: 'cards', label: 'Cards', icon: '▭' },
+] as const;
+
+// inside the Pressable:
+<View style={{ flexDirection: wide ? 'row' : 'column', alignItems: 'center', gap: wide ? 8 : 2 }}>
+  <Text style={styles.tabLabel} accessibilityElementsHidden importantForAccessibility="no">
+    {tab.icon}
+  </Text>
+  <Text style={[styles.tabLabel, selected && styles.tabLabelSelected]}>{tab.label}</Text>
+</View>
+```
+
+The icon is decoration, so it is hidden from screen readers (`accessibilityElementsHidden` on Apple platforms, `importantForAccessibility="no"` on Android); the tab is still announced by its label.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Two separate sets of tab buttons">
+Writing the sidebar buttons and the tab bar buttons separately means every change has to be made twice, and they drift apart. Build them once from `tabs`.
+</Aside>
+
+<Aside type="caution" title="Choosing by Platform.OS">
+`Platform.OS === 'macos'` would give a sidebar to a narrow Mac window and never to an Android tablet. Choose by width.
+</Aside>
+
+## Recap
+
+- Describe tabs once as data; `as const` and `(typeof tabs)[number]['name']` give you their names as a type.
+- `useWindowDimensions` decides between sidebar (wide) and tab bar (narrow).
+- The same tab buttons go before the content in a row, or after it in a column.
+- The navigation stack survives the switch, because it is the same state.
+
+<Quiz
+	questions={[
+		{
+			question: 'What makes the sidebar appear on the left rather than at the bottom?',
+			options: ['position: left', "flexDirection: 'row' on the root, with the sidebar first", 'A separate Mac component'],
+			answer: 1,
+			explanation: 'In a row, the first child is on the left.',
+		},
+		{
+			question: 'Someone narrows the Mac window while on a card screen. What happens to the stack?',
+			options: ['It resets to the first tab', 'It stays the same; only the layout changes'],
+			answer: 1,
+			explanation: 'The stack is state; the width only changes how things are drawn.',
+		},
+	]}
+/>
+
+<MarkComplete />

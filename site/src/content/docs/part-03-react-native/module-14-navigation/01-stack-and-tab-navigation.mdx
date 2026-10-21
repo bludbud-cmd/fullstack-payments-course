@@ -1,0 +1,269 @@
+---
+title: "14.1 Stack and tab navigation on the phone"
+description: "Move between screens with a stack you can go back through, switch sections with a tab bar, and make Android's back button work."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can build an app with several screens: tabs at the bottom to switch section, screens that open on top of each other, and a back button (including Android's) that goes back one step.
+
+## Why it matters
+
+PayDeck has four main sections (Wallet, Cards, Activity, You) and screens that open from them, like a card's settings. People expect two things everywhere: tabs to jump between sections, and "back" to undo the last step. That pattern is called **stack and tab navigation**, and almost every phone app uses it.
+
+## The idea
+
+Think of the screens as a **stack** of cards on a table. The top card is what you see.
+
+- Opening a screen **pushes** a new card on top.
+- Going back **pops** the top card off.
+- Pressing a tab clears the table and starts a new stack with that tab's screen.
+
+In code, the stack is just an array of **routes**, where a route says which screen and what it needs:
+
+```ts
+type Route =
+  | { name: 'home' }
+  | { name: 'cards' }
+  | { name: 'card'; cardId: string };
+
+type NavState = Route[];
+```
+
+`Route` is a union of objects (Module 9), told apart by `name`. The `card` route carries the ID of the card to show.
+
+Four small, pure functions do all the work:
+
+```ts
+function push(stack: NavState, route: Route): NavState {
+  return [...stack, route];
+}
+
+function pop(stack: NavState): NavState {
+  return stack.length > 1 ? stack.slice(0, -1) : stack;
+}
+
+function switchTab(tab: 'home' | 'cards'): NavState {
+  return [{ name: tab }];
+}
+
+function current(stack: NavState): Route {
+  return stack[stack.length - 1];
+}
+```
+
+`slice(0, -1)` returns a copy without the last item. `pop` never empties the stack: there must always be a screen to show.
+
+The app keeps the stack in state and draws `current(stack)`. To pick the component for a route, use a **`switch`** statement, which compares one value against several cases:
+
+```tsx
+function renderScreen(route: Route) {
+  switch (route.name) {
+    case 'home':
+      return <HomeScreen />;
+    case 'cards':
+      return <CardsScreen />;
+    case 'card':
+      return <CardDetailScreen cardId={route.cardId} />;
+  }
+}
+```
+
+Inside `case 'card':`, TypeScript has narrowed `route` to the card route, so `route.cardId` is allowed. If you add a route and forget its case, TypeScript reports that the function can end without returning, as you saw in lesson 9.3.
+
+<Aside type="note" title="What about navigation libraries?">
+Most React Native apps use a library called **React Navigation**. It does much more, such as animations and deep links. PayDeck writes its own navigator instead, because it is short, it shows exactly how navigation works, and it has no native code, so it behaves the same on Android and macOS. Once you understand this one, React Navigation's documentation will make sense quickly.
+</Aside>
+
+## Worked example
+
+One file for now, to see the whole idea. Replace `App.tsx` in `HelloMe`:
+
+```tsx
+import { useEffect, useState } from 'react';
+import { BackHandler, Button, Pressable, StyleSheet, Text, View } from 'react-native';
+
+type Route =
+  | { name: 'home' }
+  | { name: 'cards' }
+  | { name: 'card'; cardId: string };
+
+type NavState = Route[];
+
+const push = (stack: NavState, route: Route): NavState => [...stack, route];
+const pop = (stack: NavState): NavState => (stack.length > 1 ? stack.slice(0, -1) : stack);
+const current = (stack: NavState): Route => stack[stack.length - 1];
+
+const cards = [
+  { id: 'c1', nickname: 'Everyday' },
+  { id: 'c2', nickname: 'Travel' },
+];
+
+export default function App() {
+  const [stack, setStack] = useState<NavState>([{ name: 'home' }]);
+  const route = current(stack);
+
+  // Android's back button goes back a screen instead of closing the app.
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (stack.length > 1) {
+        setStack(pop(stack));
+        return true;
+      }
+      return false;
+    });
+    return () => subscription.remove();
+  }, [stack]);
+
+  let screen;
+  switch (route.name) {
+    case 'home':
+      screen = <Text style={styles.title}>Wallet</Text>;
+      break;
+    case 'cards':
+      screen = (
+        <View style={{ gap: 8 }}>
+          <Text style={styles.title}>Cards</Text>
+          {cards.map((card) => (
+            <Button
+              key={card.id}
+              title={card.nickname}
+              onPress={() => setStack(push(stack, { name: 'card', cardId: card.id }))}
+            />
+          ))}
+        </View>
+      );
+      break;
+    case 'card':
+      screen = <Text style={styles.title}>Card {route.cardId}</Text>;
+      break;
+  }
+
+  return (
+    <View style={styles.root}>
+      <View style={styles.content}>
+        {stack.length > 1 && <Button title="‹ Back" onPress={() => setStack(pop(stack))} />}
+        {screen}
+        <Text style={styles.debug}>Stack: {stack.map((r) => r.name).join(' → ')}</Text>
+      </View>
+      <View style={styles.tabBar}>
+        {(['home', 'cards'] as const).map((tab) => (
+          <Pressable
+            key={tab}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: stack[0].name === tab }}
+            onPress={() => setStack([{ name: tab }])}
+            style={styles.tab}
+          >
+            <Text style={stack[0].name === tab && styles.selected}>
+              {tab === 'home' ? 'Wallet' : 'Cards'}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1 },
+  content: { flex: 1, padding: 24, gap: 12 },
+  title: { fontSize: 28, fontWeight: '700' },
+  debug: { color: 'gray', marginTop: 'auto' },
+  tabBar: { flexDirection: 'row', borderTopWidth: 1, borderTopColor: '#dfe1ea' },
+  tab: { flex: 1, alignItems: 'center', paddingVertical: 14 },
+  selected: { fontWeight: '700', color: '#3c4fe0' },
+});
+```
+
+Try it, watching the grey "Stack" line at the bottom:
+
+1. Tap **Cards**: `Stack: cards`.
+2. Tap **Travel**: `Stack: cards → card`, showing "Card c2".
+3. Tap **‹ Back**, or press the emulator's back button: `Stack: cards`.
+4. Open a card again, then tap **Wallet**: `Stack: home`. Switching tabs starts a fresh stack.
+
+The `BackHandler` effect returns `true` when it handled the press ("I went back, do nothing else"), and `false` on the first screen, so Android does its normal thing and closes the app. The `switch` here sets a variable with `break` after each case, because it is not inside its own function.
+
+`(['home', 'cards'] as const)` tells TypeScript this array holds exactly those two strings, not just any strings, so `{ name: tab }` is a valid route. `marginTop: 'auto'` pushes the debug line to the bottom of its column.
+
+## Try it
+
+<Exercise title="Try it: a third tab">
+Add an **Activity** tab with its own screen. Then add a "Top up" button on the Wallet screen that opens a `{ name: 'topUp' }` screen on top of the wallet, with a back button.
+
+<Fragment slot="hint">Add both routes to the `Route` type first, then follow the TypeScript errors: every `switch` and every list of tabs needs updating.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+type Route =
+  | { name: 'home' }
+  | { name: 'cards' }
+  | { name: 'activity' }
+  | { name: 'topUp' }
+  | { name: 'card'; cardId: string };
+
+// in the switch:
+case 'home':
+  screen = (
+    <View style={{ gap: 8 }}>
+      <Text style={styles.title}>Wallet</Text>
+      <Button title="Top up" onPress={() => setStack(push(stack, { name: 'topUp' }))} />
+    </View>
+  );
+  break;
+case 'activity':
+  screen = <Text style={styles.title}>Activity</Text>;
+  break;
+case 'topUp':
+  screen = <Text style={styles.title}>Top up</Text>;
+  break;
+
+// the tab bar:
+{(['home', 'cards', 'activity'] as const).map((tab) => ( ... ))}
+```
+
+and the tab label becomes `{tab === 'home' ? 'Wallet' : tab === 'cards' ? 'Cards' : 'Activity'}`. That label logic is getting clumsy; the next lesson replaces it with a list of tabs and their labels.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Changing the stack directly">
+`stack.push(route)` changes the array in place, so React does not notice (lesson 10.4). Always build a new array, as `push` and `pop` above do.
+</Aside>
+
+<Aside type="caution" title="The back button closes the app">
+The `BackHandler` listener must return `true` when it handled the press. Returning nothing counts as `false`.
+</Aside>
+
+## Recap
+
+- Navigation state is a stack (an array) of routes; the last one is on screen.
+- Push to open, pop to go back, replace the whole stack to switch tabs.
+- A route type lists every screen and what it needs, such as a `cardId`.
+- `BackHandler` makes Android's back button pop the stack.
+
+<Quiz
+	questions={[
+		{
+			question: 'The stack is [cards, card]. What is it after going back?',
+			options: ['[]', '[cards]', '[card]'],
+			answer: 1,
+			explanation: 'Going back removes the top (last) route.',
+		},
+		{
+			question: 'What happens to the stack when you press a tab?',
+			options: ['The tab screen is pushed on top', 'It is replaced by a new stack with just that tab', 'Nothing'],
+			answer: 1,
+			explanation: 'Each tab starts fresh.',
+		},
+	]}
+/>
+
+<MarkComplete />

@@ -1,0 +1,690 @@
+---
+title: "Mini-project: PayDeck screens with sample data"
+description: "Start the real PayDeck app: wallet, cards, card settings, activity and profile screens, a tab bar that becomes a sidebar, and cards that stay frozen after a restart."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside, FileTree } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+This is the start of PayDeck itself. Everything from Part 3 comes together: components, layout, forms, navigation and saved data. In Part 7 the sample data is replaced by the real API; until then, the app works entirely on the device.
+
+## What it does
+
+- **Wallet** (first tab): the balance, how many cards are active, the three most recent transactions, and a button to see all activity.
+- **Cards**: every card that is not cancelled, drawn with your payment card component. Tapping one opens its settings.
+- **Card settings** (opened from Cards): the card, a **Freeze card** / **Unfreeze card** button, and a **Cancel card** button that cancels it and goes back.
+- **Activity**: every transaction, newest first.
+- **You**: a placeholder until sign-in arrives in Part 8.
+- A tab bar on narrow screens, a sidebar on wide ones, and the Android back button working.
+- Freezing or cancelling a card survives quitting and reopening the app.
+
+## Requirements
+
+1. Create a new project for the real app, next to `HelloMe`, and add macOS, exactly as in lessons 11.1 and 11.2:
+
+   ```sh
+   cd ~/Projects/course
+   npx @react-native-community/cli@20 init PayDeck --version 0.83.10 --install-pods false
+   cd PayDeck
+   npx react-native-macos-init --version 0.83.0
+   npm install @react-native-async-storage/async-storage@2.2.0
+   cd macos && pod install && cd ..
+   npm pkg set scripts.macos="react-native run-macos"
+   ```
+
+2. Organise it as in lesson 14.4:
+
+   <FileTree>
+   - App.tsx
+   - src/
+     - types.ts
+     - money.ts
+     - data/sampleData.ts
+     - navigation/
+       - routes.ts
+       - NavigationContext.tsx
+       - AppNavigator.tsx
+     - state/
+       - useStoredState.ts
+       - WalletContext.tsx
+     - components/
+       - ActivityRow.tsx
+       - Button.tsx
+       - PaymentCard.tsx
+       - Screen.tsx
+     - screens/
+       - HomeScreen.tsx
+       - CardsScreen.tsx
+       - CardDetailScreen.tsx
+       - ActivityScreen.tsx
+       - ProfileScreen.tsx
+   </FileTree>
+
+3. The cards live in a **wallet context** (lesson 14.3), saved with `useStoredState` (lesson 14.5), so any screen can read them and the card settings screen can change a card's status.
+4. Screens get the card to show as a `cardId` route parameter and look it up.
+5. `npx tsc --noEmit` reports no errors.
+6. Commit it to Git and push it to a new GitHub repository called `paydeck`. You will keep building on it.
+
+<Exercise title="Check your work">
+On both platforms: freeze a card, cancel another, check the Wallet's "active cards" count, quit the app and reopen it. Resize the Mac window across 720 points wide. On Android, open a card and press the system back button.
+
+<Fragment slot="hint">Build in this order, checking the app runs after each step: types and sample data; routes and the navigator with placeholder screens; the wallet context; then each screen.</Fragment>
+<Fragment slot="hint2">The wallet context's provider uses `useStoredState('paydeck.cards', sampleCards)`, and changes a card's status with `map`, replacing just the matching card: `cards.map((card) => (card.id === cardId ? { ...card, status } : card))`.</Fragment>
+<Fragment slot="solution">
+
+The full solution, file by file. Copy `Button.tsx` from Module 13 into `src/components/`.
+
+`src/types.ts`:
+
+```ts
+export type CardStatus = 'ACTIVE' | 'FROZEN' | 'CANCELLED';
+
+export type Card = {
+  id: string;
+  nickname: string;
+  last4: string;
+  status: CardStatus;
+  spendingLimitCents: number | null;
+};
+
+export type Transaction = {
+  id: string;
+  description: string;
+  amountCents: number;
+  date: string;
+};
+```
+
+`src/data/sampleData.ts`:
+
+```ts
+import type { Card, Transaction } from '../types';
+
+export const sampleBalanceCents = 125050;
+
+export const sampleCards: Card[] = [
+  { id: 'c1', nickname: 'Everyday', last4: '4242', status: 'ACTIVE', spendingLimitCents: 50000 },
+  { id: 'c2', nickname: 'Travel', last4: '1881', status: 'FROZEN', spendingLimitCents: null },
+  { id: 'c3', nickname: 'Groceries', last4: '5100', status: 'ACTIVE', spendingLimitCents: 30000 },
+];
+
+export const sampleActivity: Transaction[] = [
+  { id: 't1', description: 'Top-up', amountCents: 100000, date: '2026-10-20' },
+  { id: 't2', description: 'Bean There Coffee', amountCents: -350, date: '2026-10-20' },
+  { id: 't3', description: 'City Rail', amountCents: -1200, date: '2026-10-19' },
+  { id: 't4', description: 'Fresh Market', amountCents: -4275, date: '2026-10-18' },
+];
+```
+
+`src/money.ts`:
+
+```ts
+export function formatMoney(cents: number): string {
+  return new Intl.NumberFormat('en', { style: 'currency', currency: 'USD' }).format(cents / 100);
+}
+
+export function formatSignedMoney(cents: number): string {
+  return (cents < 0 ? '−' : '+') + formatMoney(Math.abs(cents));
+}
+```
+
+`src/navigation/routes.ts`:
+
+```ts
+/** Every screen in the app, and what each one needs to know. */
+export type Route =
+  | { name: 'home' }
+  | { name: 'cards' }
+  | { name: 'activity' }
+  | { name: 'profile' }
+  | { name: 'card'; cardId: string };
+
+/** The screens in the tab bar (phone) or sidebar (Mac). */
+export const tabs = [
+  { name: 'home', label: 'Wallet' },
+  { name: 'cards', label: 'Cards' },
+  { name: 'activity', label: 'Activity' },
+  { name: 'profile', label: 'You' },
+] as const;
+
+export type TabName = (typeof tabs)[number]['name'];
+
+/** A stack of routes: the last one is on screen. */
+export type NavState = Route[];
+
+export function push(stack: NavState, route: Route): NavState {
+  return [...stack, route];
+}
+
+export function pop(stack: NavState): NavState {
+  return stack.length > 1 ? stack.slice(0, -1) : stack;
+}
+
+export function switchTab(tab: TabName): NavState {
+  return [{ name: tab }];
+}
+
+export function current(stack: NavState): Route {
+  return stack[stack.length - 1];
+}
+```
+
+`src/navigation/NavigationContext.tsx`:
+
+```tsx
+import { createContext, useContext } from 'react';
+import type { Route, TabName } from './routes';
+
+export type Navigation = {
+  navigate: (route: Route) => void;
+  goBack: () => void;
+  switchTab: (tab: TabName) => void;
+  canGoBack: boolean;
+};
+
+export const NavigationContext = createContext<Navigation | null>(null);
+
+export function useNavigation(): Navigation {
+  const navigation = useContext(NavigationContext);
+  if (navigation === null) {
+    throw new Error('useNavigation must be used inside <AppNavigator>');
+  }
+  return navigation;
+}
+```
+
+`src/navigation/AppNavigator.tsx`:
+
+```tsx
+import { useEffect, useState } from 'react';
+import { BackHandler, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { ActivityScreen } from '../screens/ActivityScreen';
+import { CardDetailScreen } from '../screens/CardDetailScreen';
+import { CardsScreen } from '../screens/CardsScreen';
+import { HomeScreen } from '../screens/HomeScreen';
+import { ProfileScreen } from '../screens/ProfileScreen';
+import { NavigationContext, type Navigation } from './NavigationContext';
+import { current, pop, push, switchTab, tabs, type NavState, type Route } from './routes';
+
+const WIDE_LAYOUT = 720;
+
+function renderScreen(route: Route) {
+  switch (route.name) {
+    case 'home':
+      return <HomeScreen />;
+    case 'cards':
+      return <CardsScreen />;
+    case 'activity':
+      return <ActivityScreen />;
+    case 'profile':
+      return <ProfileScreen />;
+    case 'card':
+      return <CardDetailScreen cardId={route.cardId} />;
+  }
+}
+
+export function AppNavigator() {
+  const { width } = useWindowDimensions();
+  const wide = width >= WIDE_LAYOUT;
+  const [stack, setStack] = useState<NavState>([{ name: 'home' }]);
+
+  const navigation: Navigation = {
+    navigate: (route) => setStack(push(stack, route)),
+    goBack: () => setStack(pop(stack)),
+    switchTab: (tab) => setStack(switchTab(tab)),
+    canGoBack: stack.length > 1,
+  };
+
+  // The Android back button goes back a screen instead of closing the app.
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (stack.length > 1) {
+        setStack(pop(stack));
+        return true;
+      }
+      return false;
+    });
+    return () => subscription.remove();
+  }, [stack]);
+
+  const activeTab = stack[0].name;
+  const tabButtons = tabs.map((tab) => {
+    const selected = tab.name === activeTab;
+    return (
+      <Pressable
+        key={tab.name}
+        accessibilityRole="tab"
+        accessibilityState={{ selected }}
+        onPress={() => navigation.switchTab(tab.name)}
+        style={[wide ? styles.sidebarItem : styles.tabItem, selected && wide && styles.sidebarSelected]}
+      >
+        <Text style={[styles.tabLabel, selected && styles.tabLabelSelected]}>{tab.label}</Text>
+      </Pressable>
+    );
+  });
+
+  return (
+    <NavigationContext.Provider value={navigation}>
+      <View style={[styles.root, wide && styles.rootWide]}>
+        {wide && (
+          <View accessibilityRole="tablist" style={styles.sidebar}>
+            <Text style={styles.brand}>PayDeck</Text>
+            {tabButtons}
+          </View>
+        )}
+        <View style={styles.content}>{renderScreen(current(stack))}</View>
+        {!wide && (
+          <View accessibilityRole="tablist" style={styles.tabBar}>
+            {tabButtons}
+          </View>
+        )}
+      </View>
+    </NavigationContext.Provider>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: '#f5f6fa' },
+  rootWide: { flexDirection: 'row' },
+  content: { flex: 1 },
+  sidebar: {
+    width: 200,
+    paddingTop: 24,
+    paddingHorizontal: 8,
+    gap: 2,
+    backgroundColor: '#ffffff',
+    borderRightWidth: 1,
+    borderRightColor: '#dfe1ea',
+  },
+  brand: { fontSize: 20, fontWeight: '800', paddingHorizontal: 12, marginBottom: 16 },
+  sidebarItem: { paddingVertical: 10, paddingHorizontal: 12, borderRadius: 8 },
+  sidebarSelected: { backgroundColor: '#f5f6fa' },
+  tabBar: {
+    flexDirection: 'row',
+    backgroundColor: '#ffffff',
+    borderTopWidth: 1,
+    borderTopColor: '#dfe1ea',
+  },
+  tabItem: { flex: 1, alignItems: 'center', paddingVertical: 12 },
+  tabLabel: { fontSize: 15, color: '#5d6177' },
+  tabLabelSelected: { color: '#3c4fe0', fontWeight: '700' },
+});
+```
+
+`src/state/useStoredState.ts`:
+
+```ts
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useEffect, useState } from 'react';
+
+/**
+ * Like useState, but the value is saved on the device under `key`
+ * and loaded again next time the app starts.
+ */
+export function useStoredState<T>(key: string, initial: T) {
+  const [value, setValue] = useState<T>(initial);
+  const [loaded, setLoaded] = useState(false);
+
+  // Load what was saved last time, once.
+  useEffect(() => {
+    AsyncStorage.getItem(key)
+      .then((saved) => {
+        if (saved !== null) {
+          setValue(JSON.parse(saved));
+        }
+      })
+      .catch(() => {
+        // Nothing could be read: keep the starting value.
+      })
+      .finally(() => setLoaded(true));
+  }, [key]);
+
+  // Save after every change, once loading has finished.
+  useEffect(() => {
+    if (loaded) {
+      AsyncStorage.setItem(key, JSON.stringify(value)).catch(() => {});
+    }
+  }, [key, value, loaded]);
+
+  return [value, setValue, loaded] as const;
+}
+```
+
+`src/state/WalletContext.tsx`:
+
+```tsx
+import { createContext, useContext, type ReactNode } from 'react';
+import { sampleActivity, sampleBalanceCents, sampleCards } from '../data/sampleData';
+import type { Card, CardStatus, Transaction } from '../types';
+import { useStoredState } from './useStoredState';
+
+type Wallet = {
+  balanceCents: number;
+  cards: Card[];
+  activity: Transaction[];
+  setCardStatus: (cardId: string, status: CardStatus) => void;
+};
+
+const WalletContext = createContext<Wallet | null>(null);
+
+export function WalletProvider({ children }: { children: ReactNode }) {
+  const [cards, setCards, loaded] = useStoredState('paydeck.cards', sampleCards);
+
+  function setCardStatus(cardId: string, status: CardStatus) {
+    setCards(cards.map((card) => (card.id === cardId ? { ...card, status } : card)));
+  }
+
+  if (!loaded) {
+    return null;
+  }
+
+  return (
+    <WalletContext.Provider
+      value={{ balanceCents: sampleBalanceCents, cards, activity: sampleActivity, setCardStatus }}
+    >
+      {children}
+    </WalletContext.Provider>
+  );
+}
+
+export function useWallet(): Wallet {
+  const wallet = useContext(WalletContext);
+  if (wallet === null) {
+    throw new Error('useWallet must be used inside <WalletProvider>');
+  }
+  return wallet;
+}
+```
+
+`src/components/Screen.tsx`:
+
+```tsx
+import type { ReactNode } from 'react';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useNavigation } from '../navigation/NavigationContext';
+
+type ScreenProps = {
+  title: string;
+  children: ReactNode;
+};
+
+/** The frame every screen shares: a back button when there is somewhere to go back to, a title, and scrolling content. */
+export function Screen({ title, children }: ScreenProps) {
+  const { canGoBack, goBack } = useNavigation();
+
+  return (
+    <ScrollView contentContainerStyle={styles.page}>
+      <View style={styles.header}>
+        {canGoBack && (
+          <Pressable accessibilityRole="button" onPress={goBack} hitSlop={12}>
+            <Text style={styles.back}>‹ Back</Text>
+          </Pressable>
+        )}
+        <Text accessibilityRole="header" style={styles.title}>
+          {title}
+        </Text>
+      </View>
+      {children}
+    </ScrollView>
+  );
+}
+
+const styles = StyleSheet.create({
+  page: { padding: 24, gap: 16, width: '100%', maxWidth: 640, alignSelf: 'center' },
+  header: { gap: 8 },
+  back: { color: '#3c4fe0', fontSize: 16 },
+  title: { fontSize: 28, fontWeight: '700', color: '#14162b' },
+});
+```
+
+`src/components/PaymentCard.tsx`:
+
+```tsx
+import { StyleSheet, Text, View } from 'react-native';
+import { formatMoney } from '../money';
+import type { Card } from '../types';
+
+const statusLabel = { ACTIVE: 'Active', FROZEN: 'Frozen', CANCELLED: 'Cancelled' };
+const statusColour = { ACTIVE: '#3c4fe0', FROZEN: '#7b8bb0', CANCELLED: '#9a9cab' };
+
+export function PaymentCard({ card }: { card: Card }) {
+  const limit = card.spendingLimitCents === null ? 'No limit' : `Limit ${formatMoney(card.spendingLimitCents)}`;
+  return (
+    <View
+      accessible
+      accessibilityLabel={`${card.nickname} card ending ${card.last4}, ${statusLabel[card.status]}, ${limit}`}
+      style={[styles.card, { backgroundColor: statusColour[card.status] }]}
+    >
+      <View style={styles.row}>
+        <Text style={styles.nickname}>{card.nickname}</Text>
+        <Text style={styles.small}>{statusLabel[card.status]}</Text>
+      </View>
+      <Text style={styles.number}>•••• •••• •••• {card.last4}</Text>
+      <Text style={styles.small}>{limit}</Text>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  card: { width: '100%', maxWidth: 380, aspectRatio: 1.586, borderRadius: 16, padding: 20, justifyContent: 'space-between' },
+  row: { flexDirection: 'row', justifyContent: 'space-between' },
+  nickname: { color: '#ffffff', fontSize: 18, fontWeight: '700' },
+  number: { color: '#ffffff', fontSize: 20, letterSpacing: 2 },
+  small: { color: 'rgba(255, 255, 255, 0.85)', fontSize: 13 },
+});
+```
+
+`src/components/ActivityRow.tsx`:
+
+```tsx
+import { StyleSheet, Text, View } from 'react-native';
+import { formatSignedMoney } from '../money';
+import type { Transaction } from '../types';
+
+export function ActivityRow({ item }: { item: Transaction }) {
+  return (
+    <View style={styles.row}>
+      <View style={styles.grow}>
+        <Text style={styles.description}>{item.description}</Text>
+        <Text style={styles.date}>{item.date}</Text>
+      </View>
+      <Text style={[styles.amount, item.amountCents > 0 && styles.positive]}>
+        {formatSignedMoney(item.amountCents)}
+      </Text>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10 },
+  grow: { flex: 1 },
+  description: { fontSize: 16, color: '#14162b' },
+  date: { color: '#5d6177' },
+  amount: { fontSize: 16, color: '#14162b' },
+  positive: { color: '#1d7a46' },
+});
+```
+
+`src/screens/HomeScreen.tsx`:
+
+```tsx
+import { StyleSheet, Text } from 'react-native';
+import { ActivityRow } from '../components/ActivityRow';
+import { Button } from '../components/Button';
+import { Screen } from '../components/Screen';
+import { formatMoney } from '../money';
+import { useNavigation } from '../navigation/NavigationContext';
+import { useWallet } from '../state/WalletContext';
+
+export function HomeScreen() {
+  const { balanceCents, cards, activity } = useWallet();
+  const { switchTab } = useNavigation();
+  const activeCards = cards.filter((card) => card.status === 'ACTIVE').length;
+
+  return (
+    <Screen title="Wallet">
+      <Text style={styles.muted}>Balance</Text>
+      <Text style={styles.balance}>{formatMoney(balanceCents)}</Text>
+      <Text style={styles.muted}>
+        {activeCards} active {activeCards === 1 ? 'card' : 'cards'}
+      </Text>
+      <Text style={styles.heading}>Recent activity</Text>
+      {activity.slice(0, 3).map((item) => (
+        <ActivityRow key={item.id} item={item} />
+      ))}
+      <Button title="See all activity" variant="secondary" onPress={() => switchTab('activity')} />
+    </Screen>
+  );
+}
+
+const styles = StyleSheet.create({
+  muted: { color: '#5d6177' },
+  balance: { fontSize: 40, fontWeight: '700', color: '#14162b' },
+  heading: { fontSize: 18, fontWeight: '600', marginTop: 8 },
+});
+```
+
+`src/screens/CardsScreen.tsx`:
+
+```tsx
+import { Pressable } from 'react-native';
+import { PaymentCard } from '../components/PaymentCard';
+import { Screen } from '../components/Screen';
+import { useNavigation } from '../navigation/NavigationContext';
+import { useWallet } from '../state/WalletContext';
+
+export function CardsScreen() {
+  const { cards } = useWallet();
+  const { navigate } = useNavigation();
+  const open = cards.filter((card) => card.status !== 'CANCELLED');
+
+  return (
+    <Screen title="Cards">
+      {open.map((card) => (
+        <Pressable
+          key={card.id}
+          accessibilityRole="button"
+          onPress={() => navigate({ name: 'card', cardId: card.id })}
+        >
+          <PaymentCard card={card} />
+        </Pressable>
+      ))}
+    </Screen>
+  );
+}
+```
+
+`src/screens/CardDetailScreen.tsx`:
+
+```tsx
+import { Text } from 'react-native';
+import { Button } from '../components/Button';
+import { PaymentCard } from '../components/PaymentCard';
+import { Screen } from '../components/Screen';
+import { useNavigation } from '../navigation/NavigationContext';
+import { useWallet } from '../state/WalletContext';
+
+export function CardDetailScreen({ cardId }: { cardId: string }) {
+  const { cards, setCardStatus } = useWallet();
+  const { goBack } = useNavigation();
+  const card = cards.find((c) => c.id === cardId);
+
+  if (card === undefined) {
+    return (
+      <Screen title="Card">
+        <Text>This card no longer exists.</Text>
+      </Screen>
+    );
+  }
+
+  const frozen = card.status === 'FROZEN';
+
+  return (
+    <Screen title={card.nickname}>
+      <PaymentCard card={card} />
+      <Button
+        title={frozen ? 'Unfreeze card' : 'Freeze card'}
+        variant="secondary"
+        onPress={() => setCardStatus(card.id, frozen ? 'ACTIVE' : 'FROZEN')}
+      />
+      <Button
+        title="Cancel card"
+        variant="danger"
+        onPress={() => {
+          setCardStatus(card.id, 'CANCELLED');
+          goBack();
+        }}
+      />
+    </Screen>
+  );
+}
+```
+
+`src/screens/ActivityScreen.tsx`:
+
+```tsx
+import { ActivityRow } from '../components/ActivityRow';
+import { Screen } from '../components/Screen';
+import { useWallet } from '../state/WalletContext';
+
+export function ActivityScreen() {
+  const { activity } = useWallet();
+
+  return (
+    <Screen title="Activity">
+      {activity.map((item) => (
+        <ActivityRow key={item.id} item={item} />
+      ))}
+    </Screen>
+  );
+}
+```
+
+`src/screens/ProfileScreen.tsx`:
+
+```tsx
+import { Text } from 'react-native';
+import { Screen } from '../components/Screen';
+
+export function ProfileScreen() {
+  return (
+    <Screen title="You">
+      <Text>Signing in arrives in Part 8. For now, PayDeck uses sample data.</Text>
+    </Screen>
+  );
+}
+```
+
+`App.tsx`:
+
+```tsx
+import { AppNavigator } from './src/navigation/AppNavigator';
+import { WalletProvider } from './src/state/WalletContext';
+
+export default function App() {
+  return (
+    <WalletProvider>
+      <AppNavigator />
+    </WalletProvider>
+  );
+}
+```
+
+Things worth noticing:
+
+- `WalletProvider` returns `null` until the saved cards have loaded, so no screen ever shows the sample data and then jumps.
+- `useWallet` and `useNavigation` follow the same pattern: a context, a provider near the top, and a hook that fails clearly outside it.
+- Only the cards are stored. The balance and activity are fixed sample data for now; top-ups arrive with the real API in Part 7.
+- `formatSignedMoney` uses the real minus sign `−` (lesson 13.6).
+</Fragment>
+</Exercise>
+
+<Aside type="tip" title="You built an app">
+This is a real, two-platform app with navigation, shared state and persistence. The course's own version of PayDeck, in the `app` folder of the course repository, grew from exactly this structure. From Part 4 on you build the server it will talk to.
+</Aside>
+
+<MarkComplete />

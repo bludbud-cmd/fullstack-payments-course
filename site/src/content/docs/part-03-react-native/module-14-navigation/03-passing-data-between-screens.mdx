@@ -1,0 +1,242 @@
+---
+title: "14.3 Passing data between screens"
+description: "Send an ID to the screen you open, share navigation with every screen through React context, and look data up instead of copying it."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson screens in their own components can open other screens and pass them what they need, using route parameters and a `useNavigation` hook built on React context.
+
+## Why it matters
+
+Tap a card in PayDeck and its settings open: the settings screen needs to know **which** card. And the card list, deep inside the app, needs a way to say "open this screen". Passing those things down as props through every layer gets messy fast. React's **context** solves the second problem; **route parameters** solve the first.
+
+## The idea
+
+### Route parameters
+
+The route itself carries what the next screen needs: `{ name: 'card', cardId: 'c2' }`. The navigator passes it to the screen as a prop: `<CardDetailScreen cardId={route.cardId} />`.
+
+Pass the **ID**, not the whole card object. The screen looks the card up in the app's data. That way, if the card changes (it is frozen, or renamed), the screen shows the current version, not an old copy from the moment it was opened.
+
+### Context
+
+Props travel one level at a time, from parent to child. When many components at different depths need the same thing, React offers **context**: a value that a component near the top **provides**, and any component below can **read** directly.
+
+```tsx
+// 1. Create it, with a starting value for "nobody provided one"
+const NavigationContext = createContext<Navigation | null>(null);
+
+// 2. Provide it, high in the tree
+<NavigationContext.Provider value={navigation}>
+  ...the whole app...
+</NavigationContext.Provider>
+
+// 3. Read it, in any component below
+const navigation = useContext(NavigationContext);
+```
+
+When the provided value changes, every component reading it re-renders. A little hook of your own makes reading it tidy and safe:
+
+```tsx
+export function useNavigation(): Navigation {
+  const navigation = useContext(NavigationContext);
+  if (navigation === null) {
+    throw new Error('useNavigation must be used inside <AppNavigator>');
+  }
+  return navigation;
+}
+```
+
+`throw new Error(...)` stops with a clear message if someone uses the hook outside the provider, instead of failing later in a confusing way. After the check, TypeScript knows `navigation` is not `null`.
+
+## Worked example
+
+`NavigationContext.tsx`:
+
+```tsx
+import { createContext, useContext } from 'react';
+
+export type Route =
+  | { name: 'cards' }
+  | { name: 'card'; cardId: string };
+
+export type Navigation = {
+  navigate: (route: Route) => void;
+  goBack: () => void;
+  canGoBack: boolean;
+};
+
+export const NavigationContext = createContext<Navigation | null>(null);
+
+export function useNavigation(): Navigation {
+  const navigation = useContext(NavigationContext);
+  if (navigation === null) {
+    throw new Error('useNavigation must be used inside <AppNavigator>');
+  }
+  return navigation;
+}
+```
+
+`App.tsx`, with the screens as separate components:
+
+```tsx
+import { useState } from 'react';
+import { Button, Text, View } from 'react-native';
+import { NavigationContext, useNavigation, type Navigation, type Route } from './NavigationContext';
+
+const cards = [
+  { id: 'c1', nickname: 'Everyday', last4: '4242' },
+  { id: 'c2', nickname: 'Travel', last4: '1881' },
+];
+
+function CardsScreen() {
+  const { navigate } = useNavigation();
+  return (
+    <View style={{ gap: 8 }}>
+      <Text style={{ fontSize: 28, fontWeight: '700' }}>Cards</Text>
+      {cards.map((card) => (
+        <Button
+          key={card.id}
+          title={card.nickname}
+          onPress={() => navigate({ name: 'card', cardId: card.id })}
+        />
+      ))}
+    </View>
+  );
+}
+
+function CardDetailScreen({ cardId }: { cardId: string }) {
+  const { goBack } = useNavigation();
+  const card = cards.find((c) => c.id === cardId);
+
+  if (card === undefined) {
+    return <Text>This card no longer exists.</Text>;
+  }
+
+  return (
+    <View style={{ gap: 8 }}>
+      <Button title="‹ Back" onPress={goBack} />
+      <Text style={{ fontSize: 28, fontWeight: '700' }}>{card.nickname}</Text>
+      <Text>Card ending {card.last4}</Text>
+    </View>
+  );
+}
+
+function renderScreen(route: Route) {
+  switch (route.name) {
+    case 'cards':
+      return <CardsScreen />;
+    case 'card':
+      return <CardDetailScreen cardId={route.cardId} />;
+  }
+}
+
+export default function App() {
+  const [stack, setStack] = useState<Route[]>([{ name: 'cards' }]);
+
+  const navigation: Navigation = {
+    navigate: (route) => setStack([...stack, route]),
+    goBack: () => setStack(stack.length > 1 ? stack.slice(0, -1) : stack),
+    canGoBack: stack.length > 1,
+  };
+
+  return (
+    <NavigationContext.Provider value={navigation}>
+      <View style={{ flex: 1, padding: 24 }}>{renderScreen(stack[stack.length - 1])}</View>
+    </NavigationContext.Provider>
+  );
+}
+```
+
+Follow a tap on **Travel**:
+
+1. `CardsScreen` calls `navigate({ name: 'card', cardId: 'c2' })`. It got `navigate` from context; `App` never passed it any props.
+2. `App`'s stack becomes `[cards, card c2]`, and it re-renders.
+3. `renderScreen` draws `<CardDetailScreen cardId="c2" />`.
+4. `CardDetailScreen` finds the card by ID, and gets `goBack` from context too.
+
+`cards.find(...)` returns `undefined` when nothing matches, so the screen handles that case. It can happen for real: a card could be deleted while its screen is open.
+
+<Aside type="note" title="Not everything belongs in context">
+Context is for things many screens need: navigation, the theme, who is signed in, the wallet's data. Data only one or two components use is clearer as plain props.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a pay screen">
+Add a route `{ name: 'pay'; cardId: string }` and a `PayScreen` that says "Pay with Travel •••• 1881" and has a back button. Open it from a "Pay with this card" button on `CardDetailScreen`. Going back from the pay screen should return to the card, and back again to the list.
+
+<Fragment slot="hint">Add the route to the `Route` type, a case to `renderScreen`, and call `navigate({ name: 'pay', cardId: card.id })` from the detail screen.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+export type Route =
+  | { name: 'cards' }
+  | { name: 'card'; cardId: string }
+  | { name: 'pay'; cardId: string };
+
+function PayScreen({ cardId }: { cardId: string }) {
+  const { goBack } = useNavigation();
+  const card = cards.find((c) => c.id === cardId);
+  return (
+    <View style={{ gap: 8 }}>
+      <Button title="‹ Back" onPress={goBack} />
+      <Text>{card ? `Pay with ${card.nickname} •••• ${card.last4}` : 'Card not found'}</Text>
+    </View>
+  );
+}
+
+// in CardDetailScreen:
+const { goBack, navigate } = useNavigation();
+<Button title="Pay with this card" onPress={() => navigate({ name: 'pay', cardId: card.id })} />
+
+// in renderScreen:
+case 'pay':
+  return <PayScreen cardId={route.cardId} />;
+```
+
+The stack goes `[cards]` → `[cards, card]` → `[cards, card, pay]`, and back again. PayDeck has exactly this route, used in Module 32.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="useNavigation must be used inside AppNavigator">
+Your own error message, doing its job: a component called `useNavigation` but is not inside the `NavigationContext.Provider`. Check it is drawn by the navigator, not beside it.
+</Aside>
+
+<Aside type="caution" title="Passing the whole object in the route">
+`navigate({ name: 'card', card })` works until the card changes, then the screen shows stale data. Pass `cardId` and look it up.
+</Aside>
+
+## Recap
+
+- Routes carry parameters, such as `cardId`, to the screen they open.
+- Pass IDs and look data up, so screens always show the current version.
+- Context shares a value with every component below its provider; `useContext` reads it.
+- A `useNavigation` hook wraps the context and fails clearly when used in the wrong place.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why pass a cardId rather than the card object?',
+			options: ['IDs are shorter to type', 'The screen can look up the current version of the card', 'Objects cannot be passed'],
+			answer: 1,
+			explanation: 'A copied object goes stale when the card changes.',
+		},
+		{
+			question: 'What problem does context solve?',
+			options: ['Passing a value through many layers of components that do not use it', 'Saving data on the device', 'Styling'],
+			answer: 0,
+			explanation: 'Any component below the provider can read the value directly.',
+		},
+	]}
+/>
+
+<MarkComplete />
