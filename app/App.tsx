@@ -4,14 +4,23 @@
  * @format
  */
 
-import React from 'react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import React, { useState } from 'react';
 import { AppNavigator } from './src/navigation/AppNavigator';
-import { WalletProvider } from './src/state/WalletContext';
+import { WelcomeScreen } from './src/screens/WelcomeScreen';
+import { AccountIdGate } from './src/state/AccountIdContext';
 
-export default function App() {
+export default function App({
+  queryClient: given,
+}: {
+  queryClient?: QueryClient;
+}) {
+  const [queryClient] = useState(() => given ?? new QueryClient());
   return (
-    <WalletProvider>
-      <AppNavigator />
-    </WalletProvider>
+    <QueryClientProvider client={queryClient}>
+      <AccountIdGate welcome={WelcomeScreen}>
+        <AppNavigator />
+      </AccountIdGate>
+    </QueryClientProvider>
   );
 }

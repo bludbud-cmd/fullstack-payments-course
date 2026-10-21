@@ -1,7 +1,7 @@
 import type { Currency } from './money';
 
 // These match the JSON the PayDeck API sends, so the screens will not need
-// to change when sample data is swapped for the real API in Part 7.
+// to change when they move from sample data to the real API in Part 7.
 
 export type Account = {
   id: string;

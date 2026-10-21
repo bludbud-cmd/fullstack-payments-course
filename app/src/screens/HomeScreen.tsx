@@ -1,22 +1,36 @@
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
+import { useAccount, useActivity, useCards } from '../api/hooks';
 import { ActivityRow } from '../components/ActivityRow';
 import { Button } from '../components/Button';
+import { QueryState } from '../components/QueryState';
 import { Screen } from '../components/Screen';
 import { formatMoney } from '../money';
 import { useNavigation } from '../navigation/NavigationContext';
-import { useWallet } from '../state/WalletContext';
 import { spacing, useTheme } from '../theme';
 
 export function HomeScreen() {
   const theme = useTheme();
   const { navigate, switchTab } = useNavigation();
-  const { state } = useWallet();
-  const { account, activity, cards } = state;
-  const activeCards = cards.filter(card => card.status === 'ACTIVE').length;
+  const account = useAccount();
+  const activity = useActivity();
+  const cards = useCards();
+
+  if (!account.data || !activity.data || !cards.data) {
+    return (
+      <Screen title="Wallet">
+        <QueryState queries={[account, activity, cards]} />
+      </Screen>
+    );
+  }
+
+  const { ownerName, balanceCents, currency } = account.data;
+  const activeCards = cards.data.filter(
+    card => card.status === 'ACTIVE',
+  ).length;
 
   return (
-    <Screen title={`Hi, ${account.ownerName}`}>
+    <Screen title={`Hi, ${ownerName}`}>
       <View
         style={[
           styles.balance,
@@ -25,7 +39,7 @@ export function HomeScreen() {
       >
         <Text style={{ color: theme.muted }}>Balance</Text>
         <Text testID="balance" style={[styles.amount, { color: theme.text }]}>
-          {formatMoney(account.balanceCents, account.currency)}
+          {formatMoney(balanceCents, currency)}
         </Text>
         <Text style={{ color: theme.muted }}>
           {activeCards} active {activeCards === 1 ? 'card' : 'cards'}
@@ -50,15 +64,21 @@ export function HomeScreen() {
       <Text style={[styles.heading, { color: theme.text }]}>
         Recent activity
       </Text>
-      <View>
-        {activity.slice(0, 3).map(item => (
-          <ActivityRow
-            key={item.transactionId}
-            item={item}
-            currency={account.currency}
-          />
-        ))}
-      </View>
+      {activity.data.length === 0 ? (
+        <Text style={{ color: theme.muted }}>
+          No transactions yet. Top up to get started.
+        </Text>
+      ) : (
+        <View>
+          {activity.data.slice(0, 3).map(item => (
+            <ActivityRow
+              key={item.transactionId}
+              item={item}
+              currency={currency}
+            />
+          ))}
+        </View>
+      )}
       <Button
         title="See all activity"
         variant="secondary"
