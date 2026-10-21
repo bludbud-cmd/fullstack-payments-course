@@ -1,0 +1,174 @@
+---
+title: "12.3 Images"
+description: "Show images from your project and from the internet, size them, crop or fit them, and provide sharp versions for every screen."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can show local and online images at the right size, choose how they fit their box, and keep them sharp on high-resolution screens.
+
+## Why it matters
+
+Merchant logos in the activity list, a profile photo, an illustration on an empty screen: images make an app feel finished. Done carelessly they come out blurry, stretched, or invisible.
+
+## The idea
+
+`Image` shows a picture from one of two places:
+
+```tsx
+// Part of your project: bundled into the app
+<Image source={require('./assets/logo.png')} style={{ width: 120, height: 40 }} />
+
+// From the internet: downloaded when shown
+<Image source={{ uri: 'https://example.com/photo.jpg' }} style={{ width: 80, height: 80 }} />
+```
+
+- **Local images** use `require` with a path relative to the file. Metro bundles the image into the app, so it works offline, and React Native knows its size.
+- **Network images** use `{ uri: '...' }`. They **must** have a width and height in their style (or an `aspectRatio` plus one of them), because the size is unknown until the download finishes.
+
+When an image's shape differs from its box, `resizeMode` decides what happens:
+
+| `resizeMode` | Result |
+| --- | --- |
+| `'cover'` (default) | Fills the box, cropping the edges. Good for photos |
+| `'contain'` | Fits inside the box, leaving empty space. Good for logos |
+| `'stretch'` | Squashes the image to the box. Rarely what you want |
+| `'center'` | Shows it at its own size, centred |
+
+### Sharp on every screen
+
+Screens have different **densities**: a modern phone squeezes 3 real pixels into each point. A 120×40 point image needs 360×120 pixels to look sharp there. Provide versions with suffixes, and React Native picks the right one:
+
+```
+assets/
+  logo.png       120 × 40 pixels
+  logo@2x.png    240 × 80 pixels
+  logo@3x.png    360 × 120 pixels
+```
+
+Your code still says `require('./assets/logo.png')`.
+
+## Worked example
+
+Create an `assets` folder in `HelloMe`, and put any photo in it as `assets/photo.jpg`. Then:
+
+```tsx
+import { Image, StyleSheet, Text, View } from 'react-native';
+
+export default function App() {
+  return (
+    <View style={styles.screen}>
+      <Text>cover (default): fills and crops</Text>
+      <Image source={require('./assets/photo.jpg')} style={styles.wide} />
+
+      <Text>contain: fits, with space around</Text>
+      <Image source={require('./assets/photo.jpg')} style={styles.wide} resizeMode="contain" />
+
+      <Text>Round avatar</Text>
+      <Image
+        source={require('./assets/photo.jpg')}
+        style={styles.avatar}
+        accessibilityLabel="My profile photo"
+      />
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  screen: { flex: 1, padding: 24, gap: 8 },
+  wide: { width: '100%', height: 120, backgroundColor: '#dfe1ea' },
+  avatar: { width: 80, height: 80, borderRadius: 40 },
+});
+```
+
+The grey `backgroundColor` shows the image's box, so you can see where `contain` leaves space. Resize the Mac window: the wide images follow the window's width because their width is `'100%'`.
+
+<Aside type="note" title="Adding new images needs a reload, sometimes a restart">
+Metro notices new image files, but if one does not appear, stop Metro with <kbd>Ctrl</kbd> + <kbd>C</kbd>, run `npm start`, and reload.
+</Aside>
+
+### Keeping a shape with aspectRatio
+
+`aspectRatio` is width divided by height. Set the width, and the height follows:
+
+```tsx
+<Image source={{ uri: card.artUrl }} style={{ width: '100%', aspectRatio: 16 / 9 }} />
+```
+
+PayDeck's card component uses the same trick without an image: `aspectRatio: 1.586`, the shape of every real bank card.
+
+## Try it
+
+<Exercise title="Try it: a logo row">
+Show a row of three square merchant "logos" 48 points wide, with rounded corners of 12, and the merchant name under each. Use `https://picsum.photos/seed/coffee/96`, `.../seed/books/96` and `.../seed/train/96` as the images (that site returns a random picture for each seed).
+
+<Fragment slot="hint">Each logo is a column (`Image` then `Text`) with `alignItems: 'center'`; the three columns sit in a row. The images are 96 pixels so they look sharp at 48 points on a 2× screen.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+const merchants = [
+  { name: 'Coffee', seed: 'coffee' },
+  { name: 'Books', seed: 'books' },
+  { name: 'Train', seed: 'train' },
+];
+
+<View style={{ flexDirection: 'row', gap: 24 }}>
+  {merchants.map((m) => (
+    <View key={m.seed} style={{ alignItems: 'center', gap: 4 }}>
+      <Image
+        source={{ uri: `https://picsum.photos/seed/${m.seed}/96` }}
+        style={{ width: 48, height: 48, borderRadius: 12 }}
+        accessibilityLabel={`${m.name} logo`}
+      />
+      <Text>{m.name}</Text>
+    </View>
+  ))}
+</View>
+```
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="A network image that never appears">
+It has no `width` and `height`. Network images are 0×0 until you size them.
+</Aside>
+
+<Aside type="caution" title="require with a variable">
+``require(`./assets/${name}.png`)`` does not work: Metro must see every image path when it bundles the app. Write each `require` out in full, for example in an object that maps names to images.
+</Aside>
+
+<Aside type="caution" title="Images from http:// addresses">
+Finished apps on Android and macOS refuse plain `http://` downloads, even if they work while you develop. Use `https://` addresses.
+</Aside>
+
+## Recap
+
+- Local images: `source={require('./path.png')}`. Network images: `source={{ uri: 'https://...' }}` with a size.
+- `resizeMode` chooses between cropping (`cover`) and fitting (`contain`).
+- Provide `@2x` and `@3x` versions of local images for sharp results.
+- `aspectRatio` keeps a shape as the width changes.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which resizeMode is best for a company logo that must never be cut off?',
+			options: ['cover', 'contain', 'stretch'],
+			answer: 1,
+			explanation: 'contain fits the whole image inside the box.',
+		},
+		{
+			question: 'You want a 100-point-wide image to look sharp on a 3× screen. How many pixels wide should the @3x file be?',
+			options: ['100', '300', '33'],
+			answer: 1,
+			explanation: 'Each point is 3 real pixels on a 3× screen.',
+		},
+	]}
+/>
+
+<MarkComplete />

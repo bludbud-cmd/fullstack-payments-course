@@ -1,0 +1,189 @@
+---
+title: "12.2 StyleSheet"
+description: "Organise styles with StyleSheet.create, combine and switch styles, and use colours, text styles, borders and shadows."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can keep a component's styles in a `StyleSheet`, combine several styles, change a style based on state, and use the common style properties.
+
+## Why it matters
+
+A screen with styles written inline everywhere is hard to read and hard to change. PayDeck keeps each component's styles at the bottom of its file, and shared values (colours, spacing) in one place, so changing the brand colour is one edit, not fifty.
+
+## The idea
+
+React Native styles look like CSS from web pages, written as JavaScript objects with **camelCase** names: `backgroundColor`, not `background-color`.
+
+`StyleSheet.create` collects a component's styles in one object:
+
+```tsx
+const styles = StyleSheet.create({
+  box: { padding: 16, borderRadius: 12, backgroundColor: 'white' },
+  title: { fontSize: 18, fontWeight: '600' },
+});
+
+<View style={styles.box}>
+  <Text style={styles.title}>Everyday</Text>
+</View>
+```
+
+It does not do anything magic, but it gives every style a name, and TypeScript checks the property names and values (a typo like `fontWieght` is an error).
+
+The `style` prop also takes an **array**. Later styles win, and `false`, `null` and `undefined` are skipped, which makes conditional styles easy:
+
+```tsx
+<View style={[styles.card, frozen && styles.frozen, { marginTop: 8 }]} />
+```
+
+Common properties, beyond the Flexbox ones:
+
+| Group | Properties |
+| --- | --- |
+| Colour | `color` (text), `backgroundColor`, `opacity`. Colours are names (`'white'`), hex (`'#3c4fe0'`) or `'rgba(0,0,0,0.5)'` |
+| Text | `fontSize`, `fontWeight` (`'400'` normal, `'600'` semi-bold, `'700'` or `'bold'`), `textAlign`, `lineHeight`, `letterSpacing` |
+| Size | `width`, `height`, `minWidth`, `maxWidth`, `aspectRatio`; numbers are points, strings like `'50%'` are percentages |
+| Border | `borderWidth`, `borderColor`, `borderRadius`, and per side: `borderTopWidth` and so on |
+| Shadow | `elevation` on Android; `shadowColor`, `shadowOffset`, `shadowOpacity` and `shadowRadius` on the Mac. Set both and each platform uses its own |
+
+Text styles only work on `Text`, and a `Text` inside another `Text` **inherits** its parent's text styles. A `View` does not pass text styles to the `Text`s inside it.
+
+## Worked example
+
+A card tile that changes when frozen:
+
+```tsx
+import { useState } from 'react';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+
+export default function App() {
+  const [frozen, setFrozen] = useState(false);
+
+  return (
+    <View style={styles.screen}>
+      <Pressable
+        accessibilityRole="button"
+        onPress={() => setFrozen(!frozen)}
+        style={[styles.card, frozen && styles.frozen]}
+      >
+        <Text style={styles.name}>Everyday</Text>
+        <Text style={styles.hint}>
+          {frozen ? 'Frozen. Tap to unfreeze.' : 'Tap to freeze'}
+        </Text>
+      </Pressable>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  screen: { flex: 1, padding: 24, backgroundColor: '#f5f6fa' },
+  card: {
+    padding: 20,
+    borderRadius: 16,
+    backgroundColor: '#3c4fe0',
+    elevation: 4,
+    shadowColor: '#14162b',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 12,
+  },
+  frozen: { backgroundColor: '#7b8bb0', elevation: 0, shadowOpacity: 0 },
+  name: { color: 'white', fontSize: 20, fontWeight: '700' },
+  hint: { color: 'rgba(255, 255, 255, 0.85)', marginTop: 4 },
+});
+```
+
+Tap the card: `frozen && styles.frozen` adds the grey style on top of the blue one, so the later `backgroundColor` wins.
+
+### Shared values
+
+Put values used in many files in one module. PayDeck's `src/theme.ts` has:
+
+```ts
+export const spacing = { xs: 4, s: 8, m: 16, l: 24, xl: 32 };
+```
+
+and components write `padding: spacing.m` instead of `16`. A consistent set of sizes makes screens look tidy without you thinking about it.
+
+<Aside type="note" title="Not quite CSS">
+If you have seen web CSS: there are no style sheets that apply to every `Text` on a screen, no `px` units, and no hover styles. Each component gets exactly the styles you pass it.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a badge component">
+Write a `Badge` component with props `label` and `tone` (`'positive' | 'negative' | 'neutral'`). It shows the label in small, bold text inside a pill shape (rounded ends), green for positive, red for negative and grey for neutral. Show three badges in a row.
+
+<Fragment slot="hint">Make one base style for the pill, and one style per tone. `styles[tone]` picks a style by name, if the style names match the tone values.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+type BadgeProps = { label: string; tone: 'positive' | 'negative' | 'neutral' };
+
+function Badge({ label, tone }: BadgeProps) {
+  return (
+    <View style={[styles.badge, styles[tone]]}>
+      <Text style={styles.badgeText}>{label}</Text>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  badge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, alignSelf: 'flex-start' },
+  badgeText: { color: 'white', fontSize: 12, fontWeight: '700' },
+  positive: { backgroundColor: '#1d7a46' },
+  negative: { backgroundColor: '#b3261e' },
+  neutral: { backgroundColor: '#5d6177' },
+});
+
+// <View style={{ flexDirection: 'row', gap: 8 }}>
+//   <Badge label="Approved" tone="positive" />
+//   <Badge label="Declined" tone="negative" />
+//   <Badge label="Pending" tone="neutral" />
+// </View>
+```
+
+A very large `borderRadius` gives fully rounded ends whatever the height. `alignSelf: 'flex-start'` stops the badge from stretching to the full width of a column.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Text colour on a View">
+`<View style={{ color: 'white' }}><Text>Hi</Text></View>` leaves the text black. Put text styles on the `Text`.
+</Aside>
+
+<Aside type="caution" title="A shadow that does not show">
+A shadow needs a `backgroundColor` on the same view. On Android, `elevation` draws the shadow and the `shadow...` properties (apart from `shadowColor`) are ignored.
+</Aside>
+
+## Recap
+
+- Styles are objects with camelCase names; `StyleSheet.create` names and checks them.
+- `style={[a, b, condition && c]}` combines styles; later ones win.
+- Text styles go on `Text`; nested `Text` inherits them.
+- Keep shared values such as spacing and colours in one module.
+
+<Quiz
+	questions={[
+		{
+			question: 'With `style={[styles.card, styles.frozen]}`, both set backgroundColor. Which one shows?',
+			options: ['styles.card', 'styles.frozen', 'Neither, it is an error'],
+			answer: 1,
+			explanation: 'In a style array, later styles override earlier ones.',
+		},
+		{
+			question: 'What does `frozen && styles.frozen` add to a style array when frozen is false?',
+			options: ['An error', 'Nothing: false is skipped', 'The frozen style anyway'],
+			answer: 1,
+			explanation: 'false, null and undefined are ignored in style arrays.',
+		},
+	]}
+/>
+
+<MarkComplete />

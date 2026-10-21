@@ -1,0 +1,160 @@
+---
+title: "12.4 Light and dark mode"
+description: "Follow the phone's or Mac's light or dark setting with useColorScheme, and keep every colour in one theme."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can make a screen that switches between light and dark colours with the system setting, using a theme and your own `useTheme` hook.
+
+## Why it matters
+
+Many people run their phone and Mac in dark mode. An app that stays bright white at night feels broken, and black text on a dark background is unreadable. PayDeck follows the system setting on both platforms with a few lines of code.
+
+## The idea
+
+`useColorScheme()` from React Native returns `'light'` or `'dark'`, following the device's setting. When the person changes the setting, every component using it re-renders. (It can also return `null` if the platform does not say, so treat anything but `'dark'` as light.)
+
+Rather than sprinkling `scheme === 'dark' ? ... : ...` everywhere, define a **theme**: one object of named colours for light mode and one for dark, with the same names.
+
+```ts
+const light = { background: '#f5f6fa', surface: '#ffffff', text: '#14162b', muted: '#5d6177', accent: '#3c4fe0' };
+const dark: typeof light = { background: '#0f1020', surface: '#1a1c33', text: '#f1f2f8', muted: '#a3a7c2', accent: '#8f9bff' };
+```
+
+`typeof light` is TypeScript's way of saying "the same shape as `light`". If you add a colour to `light` and forget it in `dark`, the checker complains.
+
+Then wrap the choice in your own hook. Remember, a hook is just a function whose name starts with `use` and which calls other hooks:
+
+```ts
+export function useTheme() {
+  return useColorScheme() === 'dark' ? dark : light;
+}
+```
+
+Components call `const theme = useTheme();` and use `theme.text`, `theme.surface` and so on. They never name a colour directly.
+
+## Worked example
+
+Create `theme.ts` in `HelloMe`:
+
+```ts
+import { useColorScheme } from 'react-native';
+
+const light = {
+  background: '#f5f6fa',
+  surface: '#ffffff',
+  text: '#14162b',
+  muted: '#5d6177',
+  accent: '#3c4fe0',
+};
+
+const dark: typeof light = {
+  background: '#0f1020',
+  surface: '#1a1c33',
+  text: '#f1f2f8',
+  muted: '#a3a7c2',
+  accent: '#8f9bff',
+};
+
+export type Theme = typeof light;
+
+export function useTheme(): Theme {
+  return useColorScheme() === 'dark' ? dark : light;
+}
+```
+
+And `App.tsx`:
+
+```tsx
+import { StyleSheet, Text, View } from 'react-native';
+import { useTheme } from './theme';
+
+export default function App() {
+  const theme = useTheme();
+
+  return (
+    <View style={[styles.screen, { backgroundColor: theme.background }]}>
+      <View style={[styles.box, { backgroundColor: theme.surface }]}>
+        <Text style={{ color: theme.muted }}>Balance</Text>
+        <Text style={[styles.amount, { color: theme.text }]}>$125.50</Text>
+      </View>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  screen: { flex: 1, padding: 16 },
+  box: { padding: 16, borderRadius: 12 },
+  amount: { fontSize: 32, fontWeight: 'bold' },
+});
+```
+
+The `StyleSheet` keeps everything that does **not** change (sizes, spacing, shapes); the theme colours are added on top in a style array.
+
+Now switch modes:
+
+- **Mac:** System Settings → Appearance → Dark. The app changes immediately.
+- **Android emulator:** pull down the quick settings from the top of the screen and tap **Dark theme**, or Settings → Display → Dark theme.
+
+<Aside type="tip" title="Dark is not just inverted">
+Good dark themes use dark grey-blue rather than pure black, slightly softer white text, and lighter versions of the accent colour, because bright saturated colours glare on dark backgrounds. Compare `accent` in the two themes above.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: add a colour">
+Add a `positive` colour to the theme (green for money coming in) and use it for a line "+$100.00 top-up" under the balance. Pick a darker green for light mode and a lighter green for dark mode. What happens if you add it to `light` only?
+
+<Fragment slot="hint">Try `#1d7a46` for light mode and `#5fd394` for dark mode.</Fragment>
+<Fragment slot="solution">
+Add `positive: '#1d7a46'` to `light` and `positive: '#5fd394'` to `dark`, then:
+
+```tsx
+<Text style={{ color: theme.positive }}>+$100.00 top-up</Text>
+```
+
+If you add it to `light` only, TypeScript reports that `dark` is missing the property `positive`, because `dark` must have the same shape as `light`. That is the reason for `typeof light`.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Forgetting the background">
+If the outer `View` has no background colour, you get the platform's default, which may not match your theme. Set `theme.background` on the outermost view of every screen.
+</Aside>
+
+<Aside type="caution" title="Colours inside StyleSheet.create">
+`StyleSheet.create` runs once, when the file loads, so it cannot follow the current mode. Keep colours out of it and add them from `useTheme()` in the component.
+</Aside>
+
+## Recap
+
+- `useColorScheme()` returns `'dark'` or `'light'` and re-renders when the setting changes.
+- Define a light and a dark theme with the same names; `typeof light` keeps them in step.
+- A `useTheme` hook returns the right one; components only use theme names.
+- Static styles go in `StyleSheet.create`; colours come from the theme.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why put colours in a theme object rather than writing them in each component?',
+			options: ['It is faster to run', 'One place to change, and light/dark handled in one spot', 'React Native requires it'],
+			answer: 1,
+			explanation: 'Components ask for "text" or "surface", and the theme decides the actual colour.',
+		},
+		{
+			question: 'What does `const dark: typeof light = {...}` guarantee?',
+			options: ['dark has the same properties as light', 'dark is darker than light', 'dark is used at night'],
+			answer: 0,
+			explanation: 'TypeScript checks that dark has exactly the shape of light.',
+		},
+	]}
+/>
+
+<MarkComplete />

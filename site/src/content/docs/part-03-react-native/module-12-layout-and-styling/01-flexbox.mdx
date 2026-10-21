@@ -1,0 +1,165 @@
+---
+title: "12.1 Flexbox"
+description: "Arrange components in rows and columns, spread them out, line them up, and let parts of the screen grow to fill the space."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can lay out a screen with Flexbox: rows and columns, spacing, alignment, and areas that grow.
+
+## Why it matters
+
+Every screen is boxes inside boxes: a header row with a title on the left and a button on the right, a list that fills the middle, a tab bar at the bottom. **Flexbox** is the set of rules React Native uses to place those boxes. Once it clicks, you can build any layout in PayDeck.
+
+## The idea
+
+Every `View` lays out its children in a line. A handful of style properties control how:
+
+| Property | What it does | Common values |
+| --- | --- | --- |
+| `flexDirection` | Which way the line goes | `'column'` (top to bottom, the default), `'row'` (left to right) |
+| `justifyContent` | Where children go **along** the line | `'flex-start'`, `'center'`, `'flex-end'`, `'space-between'`, `'space-around'` |
+| `alignItems` | Where children go **across** the line | `'stretch'` (the default), `'flex-start'`, `'center'`, `'flex-end'` |
+| `flex` | How much of the leftover space a child takes | `1` means "grow to fill" |
+| `gap` | Space between children | a number |
+| `padding` / `margin` | Space inside / outside a box's border | a number, or `paddingHorizontal`, `marginTop` and so on |
+
+The hardest part is remembering that `justifyContent` and `alignItems` swap meaning when you change `flexDirection`. In a **column**, `justifyContent` is up-and-down; in a **row**, it is left-and-right. `alignItems` is always the other direction.
+
+Sizes are in **points**, not pixels. A point is roughly the same physical size on every screen, so `fontSize: 16` looks similar on a small phone and a large Mac display.
+
+## Worked example
+
+A typical app screen: header, content that fills the middle, footer.
+
+```tsx
+import { Button, StyleSheet, Text, View } from 'react-native';
+
+export default function App() {
+  return (
+    <View style={styles.screen}>
+      <View style={styles.header}>
+        <Text style={styles.title}>Wallet</Text>
+        <Button title="Top up" onPress={() => {}} />
+      </View>
+      <View style={styles.content}>
+        <Text>Your balance and cards go here.</Text>
+      </View>
+      <View style={styles.footer}>
+        <Text>Wallet</Text>
+        <Text>Cards</Text>
+        <Text>You</Text>
+      </View>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  screen: { flex: 1 },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 16,
+  },
+  title: { fontSize: 24, fontWeight: 'bold' },
+  content: { flex: 1, padding: 16 },
+  footer: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    paddingVertical: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#ddd',
+  },
+});
+```
+
+(`StyleSheet.create` is just a tidy place to keep styles; the next lesson explains it.)
+
+How it works:
+
+- `screen` has `flex: 1`, so it fills the whole window. It is a column, so its three children stack top to bottom.
+- `header` is a **row**. `space-between` pushes the title to the left edge and the button to the right. `alignItems: 'center'` lines them up vertically, even though the button is taller than the text.
+- `content` has `flex: 1`: it takes all the height that the header and footer do not need. That pushes the footer to the bottom.
+- `footer` is a row with `space-around`, spreading the three labels evenly.
+
+Run it on the emulator and on the Mac, and resize the Mac window: the footer stays at the bottom and the button stays on the right.
+
+<Aside type="tip" title="See the boxes">
+When a layout confuses you, give each `View` a bright `backgroundColor` for a minute (`'pink'`, `'lightblue'`). You will see exactly how big each box is and where it sits.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a transaction row">
+Build one row of a transaction list: on the left, a round 40×40 coloured circle with the first letter of the merchant; next to it, the merchant name with the date underneath in grey; on the far right, the amount. Everything should be vertically centred.
+
+<Fragment slot="hint">The row is `flexDirection: 'row'` with `alignItems: 'center'` and a `gap`. Put the name and date in their own `View` (a column) with `flex: 1`, so it takes the free space and pushes the amount to the right.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+<View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, padding: 16 }}>
+  <View
+    style={{
+      width: 40,
+      height: 40,
+      borderRadius: 20,
+      backgroundColor: '#3c4fe0',
+      justifyContent: 'center',
+      alignItems: 'center',
+    }}
+  >
+    <Text style={{ color: 'white', fontWeight: 'bold' }}>B</Text>
+  </View>
+  <View style={{ flex: 1 }}>
+    <Text style={{ fontSize: 16 }}>Bean There Coffee</Text>
+    <Text style={{ color: 'gray' }}>21 Oct</Text>
+  </View>
+  <Text style={{ fontSize: 16 }}>−$3.50</Text>
+</View>
+```
+
+A circle is a square with `borderRadius` set to half its width. Centring the letter takes both `justifyContent` and `alignItems`. This is almost exactly PayDeck's `ActivityRow` component.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="A screen that is blank or squashed">
+The outer `View` needs `flex: 1` to fill the window. Without it, it is only as tall as its content, and `flex: 1` on its children has no space to grow into.
+</Aside>
+
+<Aside type="caution" title="justifyContent seems to do nothing">
+Check the direction. In a column, `justifyContent: 'center'` centres vertically, which only shows if the box is taller than its content. For left-to-right centring in a column, use `alignItems`.
+</Aside>
+
+## Recap
+
+- Children line up in a column by default; `flexDirection: 'row'` lines them up side by side.
+- `justifyContent` places children along that line, `alignItems` across it.
+- `flex: 1` makes a box take the leftover space.
+- `gap`, `padding` and `margin` add space, in points.
+
+<Quiz
+	questions={[
+		{
+			question: 'In a row, which property centres the children vertically?',
+			options: ['justifyContent', 'alignItems', 'flexDirection'],
+			answer: 1,
+			explanation: 'alignItems works across the line; in a row, across is vertical.',
+		},
+		{
+			question: 'A header, a list and a footer are in a column. How do you make the list fill the space between them?',
+			options: ['Give the list flex: 1', 'Give the footer flex: 1', 'Give the list a height of 500'],
+			answer: 0,
+			explanation: 'flex: 1 makes it grow into whatever space is left, on any screen size.',
+		},
+	]}
+/>
+
+<MarkComplete />
