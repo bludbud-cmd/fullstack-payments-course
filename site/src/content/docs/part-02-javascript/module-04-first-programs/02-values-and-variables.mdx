@@ -1,0 +1,129 @@
+---
+title: "4.2 Values and variables"
+description: "Store values in variables with const and let, and choose good names."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can store values in variables, update them, and know when to use `const` and when to use `let`.
+
+## Why it matters
+
+Programs remember things while they run: the amount someone typed, the balance the server sent, whether a card is frozen. They keep each of these in a **variable**. The PayDeck app has hundreds of them, and good names are what make that code readable.
+
+## The idea
+
+A **value** is a piece of data: `25`, `"Corner Café"`, `true`. A **variable** is a name for a value, like a labelled box.
+
+```js
+const cardName = "Everyday";
+```
+
+Read it as: "create a box called `cardName` and put the string `"Everyday"` in it". The `=` means **put into**, not "equals" as in maths.
+
+JavaScript has two ways to make a variable:
+
+| Keyword | Can you put a new value in later? | Use it for |
+| --- | --- | --- |
+| `const` | No | Almost everything. Values that will not change |
+| `let` | Yes | Values that must change, such as a running total |
+
+Use `const` by default. When you read code and see `const`, you know that name means the same thing all the way down, which makes code much easier to follow. Switch to `let` only when you need to.
+
+### Naming
+
+- Names are written in **camelCase**: first word lowercase, each following word capitalised: `balanceCents`, `isFrozen`, `spendingLimit`.
+- Make names say what they hold: `topUpAmountCents` beats `x` or `amt2`.
+- Names are case-sensitive: `total` and `Total` are different variables.
+- Names cannot start with a number or contain spaces or dashes.
+
+## Worked example
+
+Create `wallet.js`:
+
+```js
+const ownerName = "Asha";
+let balanceCents = 10000;
+
+console.log(ownerName, "has", balanceCents, "cents");
+
+balanceCents = balanceCents + 2550;
+console.log("After a top-up:", balanceCents);
+
+balanceCents = balanceCents - 1200;
+console.log("After coffee:", balanceCents);
+```
+
+Run it with `node wallet.js`:
+
+```
+Asha has 10000 cents
+After a top-up: 12550
+After coffee: 11350
+```
+
+Line by line:
+
+- `const ownerName = "Asha";` The owner never changes, so `const`.
+- `let balanceCents = 10000;` The balance will change, so `let`. It is in **cents** (10000 cents is $100.00); you will see why in the next lesson.
+- `balanceCents = balanceCents + 2550;` Read the right side first: take the current value (10000), add 2550, then put the result (12550) back into the box. There is no `let` this time: the box already exists.
+
+## Try it
+
+<Exercise title="Try it: break it on purpose">
+Add this line to the end of `wallet.js` and run it. Read the error, then fix the program so it works, without deleting the line.
+
+```js
+ownerName = "Ben";
+```
+
+<Fragment slot="hint">The error says `TypeError: Assignment to constant variable.` Which keyword made `ownerName` a constant?</Fragment>
+<Fragment slot="solution">`const` boxes cannot be given a new value. If the owner really can change, declare it with `let ownerName = "Asha";` at the top. (In real code, ask yourself first whether the value *should* change. Often the error is protecting you.)</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="ReferenceError: balance is not defined">
+You used a name that was never created, often a typo (`balance` instead of `balanceCents`), or a variable used before the line that creates it. Code runs top to bottom.
+</Aside>
+
+<Aside type="caution" title="SyntaxError: Identifier 'balanceCents' has already been declared">
+You wrote `let balanceCents` twice. Create a variable once with `let` or `const`; after that, just use its name.
+</Aside>
+
+## Recap
+
+- A **variable** is a name for a value. `=` puts a value into it.
+- Use `const` by default and `let` only for values that must change.
+- Name variables in camelCase, saying what they hold.
+- To update a `let`, write `name = new value` without the keyword.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which keyword would you use for the ID of the card being shown on a screen?',
+			options: ['const', 'let'],
+			answer: 0,
+			explanation: 'The ID of the card on that screen does not change, so `const`.',
+		},
+		{
+			question: 'What is in `total` after this runs? `let total = 5; total = total + 3;`',
+			options: ['5', '8', '53'],
+			answer: 1,
+			explanation: 'The right side is worked out first: 5 + 3 is 8, which is then stored in `total`.',
+		},
+		{
+			question: 'Which is the best variable name?',
+			options: ['x', 'spendinglimit', 'spendingLimitCents'],
+			answer: 2,
+			explanation: 'camelCase, and it says what it holds, including the unit.',
+		},
+	]}
+/>
+
+<MarkComplete />

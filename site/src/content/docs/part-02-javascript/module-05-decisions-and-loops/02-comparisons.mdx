@@ -1,0 +1,141 @@
+---
+title: "5.2 Comparisons"
+description: "Compare values safely with ===, combine conditions, and understand truthy and falsy values."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can write precise conditions, combine them, and avoid JavaScript's comparison traps.
+
+## Why it matters
+
+A condition that is slightly wrong is one of the hardest bugs to see: the code runs, it just makes the wrong decision sometimes. "Is the amount at most the limit, or under it?" is a one-character difference (`<=` or `<`) and a real customer complaint.
+
+## The idea
+
+| Operator | Means | Example | Result |
+| --- | --- | --- | --- |
+| `===` | equal | `5 === 3` | `false` |
+| `!==` | not equal | `5 !== 3` | `true` |
+| `>` | greater than | `5 > 3` | `true` |
+| `<` | less than | `5 < 3` | `false` |
+| `>=` | greater than or equal | `5 >= 5` | `true` |
+| `<=` | less than or equal | `5 <= 3` | `false` |
+
+### Always use three equals signs
+
+JavaScript also has `==` (two equals), which converts types before comparing: `5 == "5"` is `true`. That sounds helpful but causes bugs, because a number and a string are not the same thing. `===` compares type and value: `5 === "5"` is `false`. **Always use `===` and `!==`.**
+
+### Combining conditions
+
+```js
+const canPay = status === "ACTIVE" && amountCents <= balanceCents;
+const needsReview = amountCents > 100000 || isNewCustomer;
+```
+
+- `&&`: both must be true.
+- `||`: at least one must be true.
+- `!`: the opposite. `!isFrozen` reads "not frozen".
+
+A condition is just a boolean value, so you can store it in a well-named variable, like `canPay` above. That often makes `if` statements read like English.
+
+### Truthy and falsy
+
+`if` accepts any value, not just booleans. These count as **false** (they are "falsy"): `false`, `0`, `""` (an empty string), `null`, `undefined` and `NaN`. Everything else counts as true ("truthy"), including `"0"` and `"false"`.
+
+That is handy for checking that someone typed something:
+
+```js
+const nickname = "";
+if (!nickname) {
+  console.log("Give the card a name.");
+}
+```
+
+## Worked example: is the amount valid?
+
+```js
+const typed = "25";
+const amountCents = Number(typed) * 100;
+const limitCents = 2500;
+
+const isNumber = !Number.isNaN(amountCents);
+const isPositive = amountCents > 0;
+const withinLimit = amountCents <= limitCents;
+
+if (isNumber && isPositive && withinLimit) {
+  console.log("OK:", amountCents);
+} else {
+  console.log("Please enter an amount between $0.01 and $25.00");
+}
+```
+
+- `Number("25")` turns the typed string into the number 25. `Number("lots")` gives `NaN`, "not a number".
+- `Number.isNaN(...)` checks for that. You cannot test `amountCents === NaN`, because `NaN` is not equal to anything, not even itself.
+- `<=` means exactly $25.00 is allowed. With `<` it would be refused, and the message would be lying.
+
+## Try it
+
+<Exercise title="Try it: who may unfreeze?">
+In PayDeck, a card can be unfrozen by its account owner or by support staff, but never if the card is cancelled. Given these variables, write one condition `canUnfreeze` and print it.
+
+```js
+const isOwner = false;
+const isSupport = true;
+const isCancelled = false;
+```
+
+<Fragment slot="hint">You need `||` for "owner or support" and `&&` with `!` for "and not cancelled". Brackets make the grouping clear.</Fragment>
+<Fragment slot="solution">
+
+```js
+const canUnfreeze = (isOwner || isSupport) && !isCancelled;
+console.log(canUnfreeze); // true
+```
+
+Without the brackets, `isOwner || isSupport && !isCancelled` would mean `isOwner || (isSupport && !isCancelled)`, because `&&` binds tighter than `||`. Then an owner could unfreeze a cancelled card.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Comparing strings with different case">
+`"active" === "ACTIVE"` is `false`. Strings must match exactly. When comparing what people type, convert both sides first: `typed.toLowerCase() === "yes"`.
+</Aside>
+
+## Recap
+
+- Use `===` and `!==`, never `==` and `!=`.
+- `<=` and `<` differ exactly at the boundary. Decide on purpose.
+- `&&` (and), `||` (or) and `!` (not) combine conditions; brackets make the grouping clear.
+- Falsy values are `false`, `0`, `""`, `null`, `undefined` and `NaN`. Everything else is truthy.
+
+<Quiz
+	questions={[
+		{
+			question: 'What is `5 === "5"`?',
+			options: ['true', 'false'],
+			answer: 1,
+			explanation: 'One is a number and one is a string, and `===` checks the type too.',
+		},
+		{
+			question: 'Which of these is truthy?',
+			options: ['0', '""', '"0"'],
+			answer: 2,
+			explanation: 'Any non-empty string is truthy, even "0".',
+		},
+		{
+			question: 'A limit is $25.00. Which condition allows exactly $25.00?',
+			options: ['amountCents < 2500', 'amountCents <= 2500', 'amountCents === 2499'],
+			answer: 1,
+			explanation: '`<=` includes the boundary itself.',
+		},
+	]}
+/>
+
+<MarkComplete />
