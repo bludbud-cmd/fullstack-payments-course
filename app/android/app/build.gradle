@@ -92,15 +92,27 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        // Your own upload key for Google Play (Module 36). The file and its
+        // passwords come from ~/.gradle/gradle.properties or the environment
+        // (ORG_GRADLE_PROJECT_PAYDECK_UPLOAD_STORE_FILE and so on), never git.
+        if (findProperty('PAYDECK_UPLOAD_STORE_FILE')) {
+            release {
+                storeFile file(findProperty('PAYDECK_UPLOAD_STORE_FILE'))
+                storePassword findProperty('PAYDECK_UPLOAD_STORE_PASSWORD')
+                keyAlias findProperty('PAYDECK_UPLOAD_KEY_ALIAS')
+                keyPassword findProperty('PAYDECK_UPLOAD_KEY_PASSWORD')
+            }
+        }
     }
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
         }
         release {
-            // Caution! In production, you need to generate your own keystore file.
-            // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
+            // Signed with your upload key when you have set one up. Otherwise
+            // with the debug key: fine for trying a release build on your own
+            // phone, but Google Play will not accept it.
+            signingConfig signingConfigs.findByName('release') ?: signingConfigs.debug
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }
