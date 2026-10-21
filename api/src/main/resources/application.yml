@@ -21,3 +21,13 @@ management:
 springdoc:
   swagger-ui:
     path: /docs
+
+paydeck:
+  auth:
+    # Signs access tokens. Anyone who knows it can sign in as anyone, so set a
+    # long random JWT_SECRET in production. This default is for your own Mac only.
+    jwt-secret: ${JWT_SECRET:change-me-this-is-only-for-local-development}
+    # People who register with one of these emails become admins.
+    admin-emails: ${PAYDECK_ADMIN_EMAILS:}
+    # Where "Sign in with Google" may send people back to: the app's own link.
+    app-redirect-uris: ${PAYDECK_APP_REDIRECT_URIS:paydeck://auth}

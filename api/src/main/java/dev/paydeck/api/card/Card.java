@@ -41,6 +41,9 @@ public class Card {
     @Column(nullable = false)
     private CardStatus status;
 
+    /** Who carries this card, if the account owner gave it to someone else. {@code null} means the owner. */
+    private UUID cardholderUserId;
+
     /** The most one payment can be, or {@code null} for no limit. */
     private Long spendingLimitCents;
 
@@ -52,8 +55,13 @@ public class Card {
     }
 
     public static Card issue(UUID accountId, String nickname, Long spendingLimitCents) {
+        return issue(accountId, nickname, spendingLimitCents, null);
+    }
+
+    public static Card issue(UUID accountId, String nickname, Long spendingLimitCents, UUID cardholderUserId) {
         Card card = new Card();
         card.accountId = accountId;
+        card.cardholderUserId = cardholderUserId;
         card.nickname = nickname;
         card.last4 = String.format("%04d", RANDOM.nextInt(10_000));
         card.status = CardStatus.ACTIVE;
@@ -103,6 +111,10 @@ public class Card {
 
     public UUID getAccountId() {
         return accountId;
+    }
+
+    public UUID getCardholderUserId() {
+        return cardholderUserId;
     }
 
     public String getNickname() {

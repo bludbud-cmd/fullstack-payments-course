@@ -20,7 +20,7 @@ class MoneyApiTest extends ApiTestSupport {
     void aNewAccountStartsEmpty() throws Exception {
         UUID account = openAccount("Asha", "INR");
 
-        mvc.perform(get("/api/accounts/{id}", account))
+        mvc.perform(get("/api/accounts/{id}", account).with(asOwnerOf(account)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.ownerName").value("Asha"))
                 .andExpect(jsonPath("$.currency").value("INR"))
@@ -33,7 +33,7 @@ class MoneyApiTest extends ApiTestSupport {
 
         topUp(account, 2_500);
 
-        mvc.perform(get("/api/accounts/{id}", account)).andExpect(jsonPath("$.balanceCents").value(2_500));
+        mvc.perform(get("/api/accounts/{id}", account).with(asOwnerOf(account))).andExpect(jsonPath("$.balanceCents").value(2_500));
     }
 
     @Test
@@ -47,9 +47,9 @@ class MoneyApiTest extends ApiTestSupport {
                 .andExpect(jsonPath("$.type").value("TRANSFER"))
                 .andExpect(header().string("Idempotent-Replayed", "false"));
 
-        mvc.perform(get("/api/accounts/{id}", from)).andExpect(jsonPath("$.balanceCents").value(7_000));
-        mvc.perform(get("/api/accounts/{id}", to)).andExpect(jsonPath("$.balanceCents").value(3_000));
-        mvc.perform(get("/api/accounts/{id}/transactions", from))
+        mvc.perform(get("/api/accounts/{id}", from).with(asOwnerOf(from))).andExpect(jsonPath("$.balanceCents").value(7_000));
+        mvc.perform(get("/api/accounts/{id}", to).with(asOwnerOf(to))).andExpect(jsonPath("$.balanceCents").value(3_000));
+        mvc.perform(get("/api/accounts/{id}/transactions", from).with(asOwnerOf(from)))
                 .andExpect(jsonPath("$", hasSize(2)))
                 .andExpect(jsonPath("$[0].type").value("TRANSFER"))
                 .andExpect(jsonPath("$[0].amountCents").value(-3_000));
@@ -65,7 +65,7 @@ class MoneyApiTest extends ApiTestSupport {
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.code").value("INSUFFICIENT_FUNDS"));
 
-        mvc.perform(get("/api/accounts/{id}", from)).andExpect(jsonPath("$.balanceCents").value(1_000));
+        mvc.perform(get("/api/accounts/{id}", from).with(asOwnerOf(from))).andExpect(jsonPath("$.balanceCents").value(1_000));
     }
 
     @Test
@@ -93,7 +93,7 @@ class MoneyApiTest extends ApiTestSupport {
                 .andExpect(header().string("Idempotent-Replayed", "true"))
                 .andExpect(jsonPath("$.id").value(com.jayway.jsonpath.JsonPath.<String>read(firstId, "$.id")));
 
-        mvc.perform(get("/api/accounts/{id}", from)).andExpect(jsonPath("$.balanceCents").value(6_000));
+        mvc.perform(get("/api/accounts/{id}", from).with(asOwnerOf(from))).andExpect(jsonPath("$.balanceCents").value(6_000));
     }
 
     @Test
@@ -106,14 +106,14 @@ class MoneyApiTest extends ApiTestSupport {
         transfer(from, to, 4_000, key).andExpect(status().isCreated());
         transfer(from, to, 5_000, key).andExpect(status().isConflict());
 
-        mvc.perform(get("/api/accounts/{id}", from)).andExpect(jsonPath("$.balanceCents").value(6_000));
+        mvc.perform(get("/api/accounts/{id}", from).with(asOwnerOf(from))).andExpect(jsonPath("$.balanceCents").value(6_000));
     }
 
     @Test
     void moneyRequestsNeedAnIdempotencyKey() throws Exception {
         UUID account = openAccount("Asha", "USD");
 
-        mvc.perform(post("/api/accounts/{id}/top-ups", account)
+        mvc.perform(post("/api/accounts/{id}/top-ups", account).with(asOwnerOf(account))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"amountCents": 100, "description": "No key"}
@@ -126,7 +126,7 @@ class MoneyApiTest extends ApiTestSupport {
     void amountsMustBePositive() throws Exception {
         UUID account = openAccount("Asha", "USD");
 
-        mvc.perform(post("/api/accounts/{id}/top-ups", account)
+        mvc.perform(post("/api/accounts/{id}/top-ups", account).with(asOwnerOf(account))
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -138,12 +138,14 @@ class MoneyApiTest extends ApiTestSupport {
 
     @Test
     void systemAccountsAreHidden() throws Exception {
-        mvc.perform(get("/api/accounts/{id}", "00000000-0000-0000-0000-000000000840"))
+        TestUser asha = register("Asha");
+        mvc.perform(get("/api/accounts/{id}", "00000000-0000-0000-0000-000000000840").with(as(asha)))
                 .andExpect(status().isNotFound());
     }
 
     private ResultActions transfer(UUID from, UUID to, long amountCents, String key) throws Exception {
         return mvc.perform(post("/api/transfers")
+                .with(asOwnerOf(from))
                 .header("Idempotency-Key", key)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("""

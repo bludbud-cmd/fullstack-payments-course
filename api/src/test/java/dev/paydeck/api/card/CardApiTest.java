@@ -20,8 +20,10 @@ class CardApiTest extends ApiTestSupport {
     @Test
     void aCardCanBeIssuedFrozenLimitedAndCancelled() throws Exception {
         UUID account = openAccount("Asha", "GBP");
+        TestUser asha = ownerOf(account);
 
         String issued = mvc.perform(post("/api/accounts/{id}/cards", account)
+                        .with(as(asha))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"nickname": "Groceries", "spendingLimitCents": 5000}
@@ -32,16 +34,17 @@ class CardApiTest extends ApiTestSupport {
                 .andReturn().getResponse().getContentAsString();
         String card = JsonPath.read(issued, "$.id");
 
-        mvc.perform(post("/api/cards/{id}/freeze", card))
+        mvc.perform(post("/api/cards/{id}/freeze", card).with(as(asha)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("FROZEN"));
-        mvc.perform(post("/api/cards/{id}/freeze", card))
+        mvc.perform(post("/api/cards/{id}/freeze", card).with(as(asha)))
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.code").value("CARD_NOT_ACTIVE"));
-        mvc.perform(post("/api/cards/{id}/unfreeze", card))
+        mvc.perform(post("/api/cards/{id}/unfreeze", card).with(as(asha)))
                 .andExpect(jsonPath("$.status").value("ACTIVE"));
 
         mvc.perform(patch("/api/cards/{id}", card)
+                        .with(as(asha))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"nickname": "Food", "removeSpendingLimit": true}
@@ -50,15 +53,17 @@ class CardApiTest extends ApiTestSupport {
                 .andExpect(jsonPath("$.nickname").value("Food"))
                 .andExpect(jsonPath("$.spendingLimitCents").doesNotExist());
 
-        mvc.perform(get("/api/accounts/{id}/cards", account)).andExpect(jsonPath("$", hasSize(1)));
+        mvc.perform(get("/api/accounts/{id}/cards", account).with(as(asha))).andExpect(jsonPath("$", hasSize(1)));
 
-        mvc.perform(delete("/api/cards/{id}", card)).andExpect(status().isNoContent());
-        mvc.perform(get("/api/cards/{id}", card)).andExpect(jsonPath("$.status").value("CANCELLED"));
+        mvc.perform(delete("/api/cards/{id}", card).with(as(asha))).andExpect(status().isNoContent());
+        mvc.perform(get("/api/cards/{id}", card).with(as(asha))).andExpect(jsonPath("$.status").value("CANCELLED"));
     }
 
     @Test
     void anUnknownAccountCannotGetACard() throws Exception {
+        TestUser asha = register("Asha");
         mvc.perform(post("/api/accounts/{id}/cards", UUID.randomUUID())
+                        .with(as(asha))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"nickname": "Travel"}

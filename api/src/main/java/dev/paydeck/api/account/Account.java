@@ -22,6 +22,9 @@ public class Account {
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
+    /** The user who owns this account. {@code null} for SYSTEM accounts. */
+    private UUID ownerUserId;
+
     @Column(nullable = false)
     private String ownerName;
 
@@ -40,8 +43,9 @@ public class Account {
         // For JPA
     }
 
-    public static Account openCustomerAccount(String ownerName, SupportedCurrency currency) {
+    public static Account openCustomerAccount(UUID ownerUserId, String ownerName, SupportedCurrency currency) {
         Account account = new Account();
+        account.ownerUserId = ownerUserId;
         account.ownerName = ownerName;
         account.currency = currency;
         account.kind = AccountKind.CUSTOMER;
@@ -51,6 +55,10 @@ public class Account {
 
     public UUID getId() {
         return id;
+    }
+
+    public UUID getOwnerUserId() {
+        return ownerUserId;
     }
 
     public String getOwnerName() {

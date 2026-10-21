@@ -4,9 +4,9 @@ import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
-import dev.paydeck.api.account.AccountKind;
-import dev.paydeck.api.account.AccountRepository;
-import dev.paydeck.api.common.NotFoundException;
+import dev.paydeck.api.access.AccessPolicy;
+import dev.paydeck.api.access.AccountAction;
+import dev.paydeck.api.auth.CurrentUser;
 import dev.paydeck.api.ledger.AccountActivity;
 import dev.paydeck.api.ledger.LedgerService;
 import dev.paydeck.api.ledger.LedgerTransaction;
@@ -49,20 +49,22 @@ public class MoneyController {
     }
 
     private final MoneyMovementService money;
-    private final AccountRepository accounts;
+    private final AccessPolicy access;
     private final LedgerService ledger;
 
-    public MoneyController(MoneyMovementService money, AccountRepository accounts, LedgerService ledger) {
+    public MoneyController(MoneyMovementService money, AccessPolicy access, LedgerService ledger) {
         this.money = money;
-        this.accounts = accounts;
+        this.access = access;
         this.ledger = ledger;
     }
 
     @PostMapping("/api/accounts/{accountId}/top-ups")
     public ResponseEntity<TransactionResponse> topUp(
+            CurrentUser user,
             @PathVariable UUID accountId,
             @RequestHeader("Idempotency-Key") @Size(min = 1, max = 100) String idempotencyKey,
             @Valid @RequestBody TopUpRequest request) {
+        access.account(user, accountId, AccountAction.MOVE_MONEY);
         MovementResult result = money.topUp(accountId, request.amountCents(), request.description().strip(),
                 idempotencyKey);
         return respond(result, request.amountCents());
@@ -70,18 +72,19 @@ public class MoneyController {
 
     @PostMapping("/api/transfers")
     public ResponseEntity<TransactionResponse> transfer(
+            CurrentUser user,
             @RequestHeader("Idempotency-Key") @Size(min = 1, max = 100) String idempotencyKey,
             @Valid @RequestBody TransferRequest request) {
+        // Only the owner can send money out. Anyone can receive it.
+        access.account(user, request.fromAccountId(), AccountAction.MOVE_MONEY);
         MovementResult result = money.transfer(request.fromAccountId(), request.toAccountId(),
                 request.amountCents(), request.description().strip(), idempotencyKey);
         return respond(result, request.amountCents());
     }
 
     @GetMapping("/api/accounts/{accountId}/transactions")
-    public List<AccountActivity> history(@PathVariable UUID accountId) {
-        accounts.findById(accountId)
-                .filter(account -> account.getKind() == AccountKind.CUSTOMER)
-                .orElseThrow(() -> new NotFoundException("Account", accountId));
+    public List<AccountActivity> history(CurrentUser user, @PathVariable UUID accountId) {
+        access.account(user, accountId, AccountAction.VIEW);
         return ledger.activityOf(accountId);
     }
 

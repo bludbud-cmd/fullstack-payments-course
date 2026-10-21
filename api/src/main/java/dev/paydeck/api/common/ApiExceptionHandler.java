@@ -32,6 +32,27 @@ public class ApiExceptionHandler {
         return problem;
     }
 
+    @ExceptionHandler(ForbiddenException.class)
+    ProblemDetail forbidden(ForbiddenException e) {
+        ProblemDetail problem = problem(HttpStatus.FORBIDDEN, "Not allowed", e.getMessage());
+        problem.setProperty("code", "FORBIDDEN");
+        return problem;
+    }
+
+    @ExceptionHandler(InvalidCredentialsException.class)
+    ProblemDetail invalidCredentials(InvalidCredentialsException e) {
+        ProblemDetail problem = problem(HttpStatus.UNAUTHORIZED, "Cannot sign in", e.getMessage());
+        problem.setProperty("code", "INVALID_CREDENTIALS");
+        return problem;
+    }
+
+    @ExceptionHandler(ConflictException.class)
+    ProblemDetail conflict(ConflictException e) {
+        ProblemDetail problem = problem(HttpStatus.CONFLICT, "Conflict", e.getMessage());
+        problem.setProperty("code", e.getCode());
+        return problem;
+    }
+
     @ExceptionHandler(IdempotencyConflictException.class)
     ProblemDetail idempotencyConflict(IdempotencyConflictException e) {
         return problem(HttpStatus.CONFLICT, "Idempotency key reused", e.getMessage());
@@ -39,7 +60,7 @@ public class ApiExceptionHandler {
 
     /** Two requests raced to do the same thing, for example both using one Idempotency-Key. */
     @ExceptionHandler(DataIntegrityViolationException.class)
-    ProblemDetail conflict(DataIntegrityViolationException e) {
+    ProblemDetail raced(DataIntegrityViolationException e) {
         return problem(HttpStatus.CONFLICT, "Conflict",
                 "Another request changed the same data at the same time. Please try again.");
     }
