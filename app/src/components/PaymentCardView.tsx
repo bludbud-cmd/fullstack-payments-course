@@ -1,6 +1,6 @@
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import { formatMoney, type Currency } from '../money';
+import { formatMoney } from '../money';
 import { spacing, useTheme } from '../theme';
 import type { Card } from '../types';
 
@@ -11,13 +11,7 @@ const statusLabel = {
 } as const;
 
 /** A virtual card drawn like a real one. Only the last four digits are ever shown. */
-export function PaymentCardView({
-  card,
-  currency,
-}: {
-  card: Card;
-  currency: Currency;
-}) {
+export function PaymentCardView({ card }: { card: Card }) {
   const theme = useTheme();
   const background =
     card.status === 'ACTIVE'
@@ -44,7 +38,7 @@ export function PaymentCardView({
         <Text style={styles.small}>
           {card.spendingLimitCents === null
             ? 'No limit'
-            : `Limit ${formatMoney(card.spendingLimitCents, currency)}`}
+            : `Limit ${formatMoney(card.spendingLimitCents, card.currency)}`}
         </Text>
       </View>
     </View>

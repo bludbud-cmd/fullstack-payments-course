@@ -1,14 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useAccountId } from '../state/AccountIdContext';
+import { useAccountId } from '../state/AccountContext';
+import { getMe } from './auth';
 import * as api from './paydeck';
 
 // TanStack Query fetches data, caches it, and refetches it when it may have
 // changed. Each "key" names one piece of cached data.
-const keys = {
+export const keys = {
+  me: ['me'] as const,
   account: (id: string) => ['account', id] as const,
   activity: (id: string) => ['activity', id] as const,
   cards: (id: string) => ['cards', id] as const,
 };
+
+/** The signed-in person, their accounts, and cards shared with them. */
+export function useMe() {
+  return useQuery({ queryKey: keys.me, queryFn: getMe });
+}
 
 export function useAccount() {
   const accountId = useAccountId();
@@ -54,22 +61,34 @@ export function useTopUp() {
   });
 }
 
-/** Every change to a card refreshes the card list. */
+/** Every change to a card refreshes the card list, and the cards shared with you. */
 function useCardMutation<T>(change: (input: T) => Promise<unknown>) {
   const accountId = useAccountId();
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: change,
     onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: keys.cards(accountId) }),
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: keys.cards(accountId) }),
+        queryClient.invalidateQueries({ queryKey: keys.me }),
+      ]),
   });
 }
 
 export function useIssueCard() {
   const accountId = useAccountId();
   return useCardMutation(
-    (input: { nickname: string; spendingLimitCents: number | null }) =>
-      api.issueCard(accountId, input.nickname, input.spendingLimitCents),
+    (input: {
+      nickname: string;
+      spendingLimitCents: number | null;
+      cardholderEmail: string | null;
+    }) =>
+      api.issueCard(
+        accountId,
+        input.nickname,
+        input.spendingLimitCents,
+        input.cardholderEmail,
+      ),
   );
 }
 

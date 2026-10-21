@@ -15,6 +15,7 @@ import { CardDetailScreen } from '../screens/CardDetailScreen';
 import { CardsScreen } from '../screens/CardsScreen';
 import { HomeScreen } from '../screens/HomeScreen';
 import { IssueCardScreen } from '../screens/IssueCardScreen';
+import { ProfileScreen } from '../screens/ProfileScreen';
 import { TopUpScreen } from '../screens/TopUpScreen';
 import { spacing, useTheme } from '../theme';
 import { NavigationContext, type Navigation } from './NavigationContext';
@@ -40,6 +41,8 @@ function renderScreen(route: Route) {
       return <CardsScreen />;
     case 'activity':
       return <ActivityScreen />;
+    case 'profile':
+      return <ProfileScreen />;
     case 'card':
       return <CardDetailScreen cardId={route.cardId} />;
     case 'topUp':
@@ -52,7 +55,9 @@ function renderScreen(route: Route) {
 /** Which tab a screen belongs to, so the right tab is highlighted. */
 function tabFor(stack: NavState): TabName {
   const first = stack[0].name;
-  return first === 'cards' || first === 'activity' ? first : 'home';
+  return first === 'cards' || first === 'activity' || first === 'profile'
+    ? first
+    : 'home';
 }
 
 export function AppNavigator() {

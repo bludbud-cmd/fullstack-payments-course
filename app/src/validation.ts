@@ -41,3 +41,30 @@ export function limitError(text: string): string | null {
 export function parseLimit(text: string): number | null {
   return text.trim() === '' ? null : parseMoneyInput(text);
 }
+
+/** A light check that catches typos. The API does the full check. */
+export function emailError(text: string): string | null {
+  const trimmed = text.trim();
+  if (trimmed === '') {
+    return 'Enter your email';
+  }
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)
+    ? null
+    : 'That does not look like an email address';
+}
+
+/** Matches the API: long passwords are what keep accounts safe, not odd symbols. */
+export function passwordError(text: string): string | null {
+  if (text.length < 10) {
+    return 'Use at least 10 characters';
+  }
+  if (text.length > 128) {
+    return 'Use 128 characters or fewer';
+  }
+  return null;
+}
+
+/** Optional on a new card: empty means you keep the card yourself. */
+export function cardholderEmailError(text: string): string | null {
+  return text.trim() === '' ? null : emailError(text);
+}

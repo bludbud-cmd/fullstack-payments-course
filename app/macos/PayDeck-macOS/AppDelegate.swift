@@ -29,6 +29,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     reactNativeFactory = RCTReactNativeFactory(delegate: delegate)
     super.init()
   }
+
+  // macOS calls this when a paydeck:// link is opened, for example when the
+  // browser comes back from "Sign in with Google". Passing it on as this
+  // notification makes it arrive in JavaScript through Linking's "url" event.
+  func application(_ application: NSApplication, open urls: [URL]) {
+    for url in urls {
+      NotificationCenter.default.post(
+        name: NSNotification.Name("RCTOpenURLNotification"),
+        object: self,
+        userInfo: ["url": url.absoluteString]
+      )
+    }
+  }
 }
 
 // MARK: - React Native Delegate
