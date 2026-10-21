@@ -1,0 +1,88 @@
+---
+title: "Mini-project: port the tip calculator to Java"
+description: "Rewrite the Module 4 tip calculator in Java 25, reading the numbers from the keyboard and keeping every amount in whole cents."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Rewriting a program you know in a new language is the fastest way to learn the language: you already know **what** to do, so all your attention goes to **how** Java does it.
+
+## What it does
+
+```
+Bill in cents: 4875
+Tip percent: 18
+Number of people: 3
+Bill:      $48.75
+Tip (18%): $8.78
+Total:     $57.53
+Each pays: $19.18
+```
+
+The same numbers as your JavaScript version in [Module 4](../../../part-02-javascript/module-04-first-programs/project/).
+
+## Requirements
+
+1. Write it in `TipCalculator.java` and run it with `java TipCalculator.java`.
+2. Read the bill (in cents), the tip percentage and the number of people with `IO.readln`.
+3. If the bill or the number of people is not more than 0, or the tip is negative, print a helpful message and stop. (`return;` inside `main` ends the program.)
+4. Keep every amount as a `long` number of cents. Round the tip to the nearest cent, and round each person's share **up**, so together they never pay less than the total.
+5. Print amounts with a `money` method that always shows two digits of cents.
+
+<Exercise title="Check your work">
+Try the example above, then: a bill of 1000 split between 3 people with no tip (each pays $3.34), a bill of 9 cents with a 10% tip, and 0 people.
+
+<Fragment slot="hint">`Math.round(billCents * tipPercent / 100.0)` rounds the tip. Dividing by `100.0` rather than `100` makes it a decimal division first, so the rounding has something to round.</Fragment>
+<Fragment slot="hint2">For dividing whole numbers and rounding up, `(amount + parts - 1) / parts` works without any decimals: adding `parts - 1` pushes any remainder over to the next whole number before the division drops it.</Fragment>
+<Fragment slot="solution">
+
+```java
+void main() {
+    long billCents = Long.parseLong(IO.readln("Bill in cents: "));
+    int tipPercent = Integer.parseInt(IO.readln("Tip percent: "));
+    int people = Integer.parseInt(IO.readln("Number of people: "));
+
+    if (billCents <= 0 || tipPercent < 0 || people <= 0) {
+        IO.println("The bill and the number of people must be more than 0, and the tip cannot be negative.");
+        return;
+    }
+
+    long tipCents = Math.round(billCents * tipPercent / 100.0);
+    long totalCents = billCents + tipCents;
+    long eachCents = divideRoundingUp(totalCents, people);
+
+    IO.println("Bill:      " + money(billCents));
+    IO.println("Tip (" + tipPercent + "%): " + money(tipCents));
+    IO.println("Total:     " + money(totalCents));
+    IO.println("Each pays: " + money(eachCents));
+}
+
+/** Divides whole numbers, rounding up, so the people together never pay less than the total. */
+long divideRoundingUp(long amount, int parts) {
+    return (amount + parts - 1) / parts;
+}
+
+String money(long cents) {
+    return "$%d.%02d".formatted(cents / 100, cents % 100);
+}
+```
+
+Compared with the JavaScript version:
+
+- Every variable has a type, and money is `long`, never `double`.
+- `Math.ceil` on a decimal is replaced by whole-number arithmetic, so no rounding error can creep in.
+- `/** ... */` is a **Javadoc comment**: a comment that describes a method. IntelliJ shows it when you hover over a call to the method.
+- Typing letters instead of numbers still crashes with a `NumberFormatException`. Module 17 shows how to catch it and ask again.
+</Fragment>
+</Exercise>
+
+<Aside type="tip" title="Run it in IntelliJ too">
+Open the file in IntelliJ and press the green ▶ next to `void main()`. Input is typed into the **Run** panel at the bottom.
+</Aside>
+
+<MarkComplete />

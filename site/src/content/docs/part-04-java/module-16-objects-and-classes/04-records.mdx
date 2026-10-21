@@ -1,0 +1,212 @@
+---
+title: "16.4 Records"
+description: "Describe a piece of data in one line with a record, check its values in a compact constructor, and add methods that return new values instead of changing old ones."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can declare a record, validate its values, give it methods, and explain when to choose a record over a class.
+
+## Why it matters
+
+Many things in a payments system are just **values**: an amount of money, a transaction on a statement, the body of a web request. They do not change after they are made; you make a new one instead. Writing a full class for each (private final fields, a constructor, accessor methods, `toString`, `equals`) is a lot of typing. A **record** does all of that in one line, and the PayDeck API uses records for every request and response it sends.
+
+## The idea
+
+```java
+record Money(long cents, String currency) {}
+```
+
+That single line gives you:
+
+- two `private final` fields, `cents` and `currency`;
+- a constructor `new Money(350, "USD")`;
+- accessor methods `cents()` and `currency()` (note the brackets, and no `get` in front);
+- a `toString` that prints `Money[cents=350, currency=USD]`;
+- an `equals` that says two `Money` values are equal when their fields are equal.
+
+Records are **immutable**: once made, a record's fields never change. To "change" one, you create a new record.
+
+### Checking the values
+
+A record can have a **compact constructor**: a constructor with no brackets after the name. It runs before the fields are set, and is the place to refuse bad values:
+
+```java
+record Money(long cents, String currency) {
+    Money {
+        if (currency.length() != 3) {
+            throw new IllegalArgumentException("Currency must be a 3-letter code, not " + currency);
+        }
+    }
+}
+```
+
+You do not write `this.cents = cents;`: Java does that for you after your checks.
+
+### Methods
+
+Records can have methods, like any class. Because a record cannot change, methods that "modify" it return a **new** record:
+
+```java
+Money plus(Money other) {
+    return new Money(cents + other.cents, currency);
+}
+```
+
+<Aside type="note" title="Records or classes?">
+Use a **record** for a value that never changes: an amount, a transaction, a request. Use a **class** for a thing with a life of its own that changes over time, like an `Account` whose balance goes up and down. The bank project at the end of this module uses both.
+</Aside>
+
+## Worked example
+
+Make a folder `~/Projects/course/java/money` and create `Money.java`:
+
+```java
+/** An amount of money: whole cents plus a currency code, such as USD. */
+record Money(long cents, String currency) {
+    Money {
+        if (currency.length() != 3) {
+            throw new IllegalArgumentException("Currency must be a 3-letter code, not " + currency);
+        }
+    }
+
+    Money plus(Money other) {
+        if (!currency.equals(other.currency)) {
+            throw new IllegalArgumentException("Cannot add " + other.currency + " to " + currency);
+        }
+        return new Money(cents + other.cents, currency);
+    }
+
+    String format() {
+        String sign = cents < 0 ? "-" : "";
+        long whole = Math.abs(cents);
+        return "%s %s%d.%02d".formatted(currency, sign, whole / 100, whole % 100);
+    }
+}
+```
+
+The `/** ... */` Javadoc comment, which you met in the Module 15 mini-project, works on records and classes too: IntelliJ shows it when you hover over `Money` anywhere in your code.
+
+`Main.java`:
+
+```java
+void main() {
+    Money coffee = new Money(350, "USD");
+    Money lunch = new Money(1200, "USD");
+    Money total = coffee.plus(lunch);
+
+    IO.println(coffee);
+    IO.println(total.format());
+    IO.println(total.cents());
+    IO.println(coffee.equals(new Money(350, "USD")));
+
+    Money euros = new Money(500, "EUR");
+    IO.println(coffee.plus(euros));
+}
+```
+
+```
+Money[cents=350, currency=USD]
+USD 15.50
+1550
+true
+Exception in thread "main" java.lang.IllegalArgumentException: Cannot add EUR to USD
+	at Money.plus(Money.java:11)
+	at Main.main(Main.java:12)
+```
+
+- `coffee.plus(lunch)` did not change `coffee`; it returned a new `Money`, which we called `total`.
+- `equals` compares the values: a different object with the same cents and currency is equal. (With a plain class, `equals` would have said `false`, as `==` does.)
+- Adding dollars to euros is refused instead of silently producing a nonsense number.
+
+`format` handles negative amounts on purpose: without the `sign`, -50 cents would print as `USD 0.-50`. Try `new Money(-50, "USD").format()` and you get `USD -0.50`.
+
+Now try to change a record. Add this line to `main`, just after the line that creates `total`:
+
+```java
+coffee.cents = 5;
+```
+
+```
+Main.java:5: error: cents has private access in Money
+```
+
+Records protect their fields exactly like the private fields you wrote by hand in lesson 16.2.
+
+## Try it
+
+<Exercise title="Try it: times">
+Add a method `Money times(int quantity)` that returns the amount multiplied by a quantity, for example three coffees. Then make the compact constructor also refuse a `null` currency with a clear message, and check that `new Money(100, null)` gives your message instead of a `NullPointerException`.
+
+<Fragment slot="hint">Put the `null` check **first** in the compact constructor: `currency.length()` on a `null` currency is what throws the `NullPointerException`.</Fragment>
+<Fragment slot="solution">
+
+```java
+record Money(long cents, String currency) {
+    Money {
+        if (currency == null) {
+            throw new IllegalArgumentException("A currency is required");
+        }
+        if (currency.length() != 3) {
+            throw new IllegalArgumentException("Currency must be a 3-letter code, not " + currency);
+        }
+    }
+
+    Money times(int quantity) {
+        return new Money(cents * quantity, currency);
+    }
+
+    // plus and format as before
+}
+```
+
+`coffee.times(3).format()` prints `USD 10.50`. Checking for `null` with `==` is correct: `null` is not an object, so there is nothing to call `.equals` on.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="cannot assign a value to final variable cents">
+Record fields are final. Make a new record instead, for example with a method such as `plus` or `times`.
+</Aside>
+
+<Aside type="caution" title="cannot find symbol: method getCents()">
+Record accessors are named after the field, without `get`: `money.cents()`, not `money.getCents()`.
+</Aside>
+
+## Recap
+
+- `record Name(Type field, ...) {}` creates an immutable value with a constructor, accessors, `toString` and `equals`.
+- A compact constructor, `Name { ... }`, checks the values before they are stored.
+- Methods on a record return new records instead of changing the old one.
+- Records are for values; classes are for things that change over time.
+
+<Quiz
+	questions={[
+		{
+			question: 'How do you read the cents of a Money record called total?',
+			options: ['total.cents', 'total.getCents()', 'total.cents()'],
+			answer: 2,
+			explanation: 'Records generate an accessor method with the same name as the field.',
+		},
+		{
+			question: 'After `Money total = coffee.plus(lunch);`, what is coffee?',
+			options: ['Unchanged: plus returned a new Money', 'The total', 'null'],
+			answer: 0,
+			explanation: 'Records are immutable. Methods return new values.',
+		},
+		{
+			question: 'Which is the better fit for a record?',
+			options: ['A bank account whose balance changes', 'A line on a statement that never changes'],
+			answer: 1,
+			explanation: 'Records are for values that never change after they are made.',
+		},
+	]}
+/>
+
+<MarkComplete />

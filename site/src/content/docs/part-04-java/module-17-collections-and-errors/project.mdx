@@ -1,0 +1,247 @@
+---
+title: "Mini-project: library catalogue"
+description: "Build a small library catalogue with maps, streams, Optional and a custom exception: add books, search them, lend them out and refuse what should be refused."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside, FileTree } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+A library is a good warm-up for a payments API: things are looked up by a unique code, they move between owners, and some requests must be refused with a clear reason. You will keep this project: in Module 18 you turn it into a proper Maven project and prove it works with tests.
+
+## What it does
+
+A demo program adds five books, searches them, lends some out, and tries five things that should fail:
+
+```
+5 books
+Search 'java':
+  Java by the Sea (Lena Park, 2021)
+Search 'park':
+  Java by the Sea (Lena Park, 2021)
+  The Pocket Ledger (Lena Park, 2017)
+Asha has:
+  Java by the Sea (Lena Park, 2021)
+  Notes on Money (Tom Okafor, 2015)
+Available:
+  Small Change (Ines Duarte, 2023)
+  The Pocket Ledger (Lena Park, 2017)
+Refused: Java by the Sea is already on loan to Asha
+Refused: Small Change is not on loan
+Refused: No book with ISBN 978-9-999-99999-9
+Refused: ISBN 978-1-000-00002-8 is already in the catalogue
+Refused: A book needs a title
+Java by the Sea available: true
+```
+
+(The books are made up.)
+
+## The files
+
+<FileTree>
+- library/
+  - Main.java the demo (given below)
+  - Book.java you write this
+  - BookNotFoundException.java you write this
+  - Catalogue.java you write this
+</FileTree>
+
+## Starter code
+
+Make a folder `~/Projects/course/java/library` with this `Main.java`:
+
+```java
+void main() {
+    Catalogue catalogue = new Catalogue();
+    catalogue.add(new Book("978-1-000-00001-1", "Java by the Sea", "Lena Park", 2021));
+    catalogue.add(new Book("978-1-000-00002-8", "Spring Mornings", "Omar Haddad", 2019));
+    catalogue.add(new Book("978-1-000-00003-5", "The Pocket Ledger", "Lena Park", 2017));
+    catalogue.add(new Book("978-1-000-00004-2", "Small Change", "Ines Duarte", 2023));
+    catalogue.add(new Book("978-1-000-00005-9", "Notes on Money", "Tom Okafor", 2015));
+    IO.println(catalogue.size() + " books");
+
+    IO.println("Search 'java':");
+    print(catalogue.search("java"));
+    IO.println("Search 'park':");
+    print(catalogue.search("park"));
+
+    catalogue.lend("978-1-000-00001-1", "Asha");
+    catalogue.lend("978-1-000-00005-9", "Asha");
+    catalogue.lend("978-1-000-00002-8", "Ben");
+    IO.println("Asha has:");
+    print(catalogue.borrowedBy("Asha"));
+    IO.println("Available:");
+    print(catalogue.available());
+
+    attempt(() -> catalogue.lend("978-1-000-00001-1", "Ben"));
+    attempt(() -> catalogue.giveBack("978-1-000-00004-2"));
+    attempt(() -> catalogue.lend("978-9-999-99999-9", "Ben"));
+    attempt(() -> catalogue.add(new Book("978-1-000-00002-8", "Spring Mornings", "Omar Haddad", 2024)));
+    attempt(() -> catalogue.add(new Book("978-1-000-00006-6", " ", "Nobody", 2020)));
+
+    catalogue.giveBack("978-1-000-00001-1");
+    IO.println("Java by the Sea available: " + catalogue.isAvailable("978-1-000-00001-1"));
+}
+
+void print(List<Book> books) {
+    for (Book book : books) {
+        IO.println("  " + book.title() + " (" + book.author() + ", " + book.year() + ")");
+    }
+}
+
+/** Runs one action and prints the problem if it throws, so the demo can carry on. */
+void attempt(Runnable action) {
+    try {
+        action.run();
+    } catch (RuntimeException e) {
+        IO.println("Refused: " + e.getMessage());
+    }
+}
+```
+
+`attempt` takes a lambda. `Runnable` is a built-in interface with one method, `run()`, for "an action with no inputs and no result". Wherever Java expects an interface with exactly one method, you can pass a lambda, and the lambda becomes that method. That is all lambdas really are, and it is why `filter` and `orElseThrow` accept them too.
+
+## Requirements
+
+1. **`Book`** is a record with `String isbn`, `String title`, `String author` and `int year`. It refuses a missing or blank ISBN ("A book needs an ISBN") or title ("A book needs a title").
+2. **`BookNotFoundException`** is an unchecked exception whose message is "No book with ISBN " followed by the ISBN.
+3. **`Catalogue`** keeps the books in a `Map` from ISBN to `Book`, and who has borrowed what in a second `Map` from ISBN to borrower name. It has:
+   - `add(Book)`: refuses a duplicate ISBN with `IllegalArgumentException`;
+   - `size()`;
+   - `find(String isbn)`: returns an `Optional<Book>`;
+   - `get(String isbn)`: returns the `Book`, or throws `BookNotFoundException`;
+   - `search(String text)`: books whose title **or** author contains the text, ignoring upper and lower case, sorted by title;
+   - `lend(String isbn, String borrower)` and `giveBack(String isbn)`: refuse a book that is already on loan, or not on loan, with `IllegalStateException`;
+   - `isAvailable(String isbn)`, `available()` (sorted by title) and `borrowedBy(String borrower)`.
+4. Every method that takes an ISBN throws `BookNotFoundException` for an unknown one.
+5. Use streams for `search`, `available` and `borrowedBy`.
+
+<Exercise title="Build it">
+Write the three files, run `java Main.java`, and compare with the output above.
+
+<Fragment slot="hint">`Optional.ofNullable(books.get(isbn))` turns "the book, or null" into an `Optional`. Then `get` can be one line, using `orElseThrow` as in lesson 17.4. Most other methods can start by calling `get(isbn)`, which takes care of requirement 4 for free.</Fragment>
+<Fragment slot="hint2">`books.values()` is a collection of all the books, so `books.values().stream()` streams them. To sort books by title, use `.sorted(Comparator.comparing(Book::title))`. Remember that `Catalogue.java` is a class file and needs `import` lines for `Map`, `List`, `Optional` and the rest.</Fragment>
+<Fragment slot="solution">
+
+`Book.java`:
+
+```java
+/** A book in the catalogue. The ISBN is the book's unique code, printed on the back cover. */
+record Book(String isbn, String title, String author, int year) {
+    Book {
+        if (isbn == null || isbn.isBlank()) {
+            throw new IllegalArgumentException("A book needs an ISBN");
+        }
+        if (title == null || title.isBlank()) {
+            throw new IllegalArgumentException("A book needs a title");
+        }
+    }
+}
+```
+
+`BookNotFoundException.java`:
+
+```java
+/** Thrown when no book in the catalogue has the given ISBN. */
+class BookNotFoundException extends RuntimeException {
+    BookNotFoundException(String isbn) {
+        super("No book with ISBN " + isbn);
+    }
+}
+```
+
+`Catalogue.java`:
+
+```java
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+/** The library's books, and who has borrowed which. */
+class Catalogue {
+    private final Map<String, Book> books = new LinkedHashMap<>();
+    private final Map<String, String> borrowers = new HashMap<>();
+
+    void add(Book book) {
+        if (books.containsKey(book.isbn())) {
+            throw new IllegalArgumentException("ISBN " + book.isbn() + " is already in the catalogue");
+        }
+        books.put(book.isbn(), book);
+    }
+
+    int size() {
+        return books.size();
+    }
+
+    Optional<Book> find(String isbn) {
+        return Optional.ofNullable(books.get(isbn));
+    }
+
+    Book get(String isbn) {
+        return find(isbn).orElseThrow(() -> new BookNotFoundException(isbn));
+    }
+
+    List<Book> search(String text) {
+        String wanted = text.toLowerCase();
+        return books.values().stream()
+                .filter(b -> b.title().toLowerCase().contains(wanted) || b.author().toLowerCase().contains(wanted))
+                .sorted(Comparator.comparing(Book::title))
+                .toList();
+    }
+
+    void lend(String isbn, String borrower) {
+        Book book = get(isbn);
+        if (borrowers.containsKey(isbn)) {
+            throw new IllegalStateException(book.title() + " is already on loan to " + borrowers.get(isbn));
+        }
+        borrowers.put(isbn, borrower);
+    }
+
+    void giveBack(String isbn) {
+        Book book = get(isbn);
+        if (!borrowers.containsKey(isbn)) {
+            throw new IllegalStateException(book.title() + " is not on loan");
+        }
+        borrowers.remove(isbn);
+    }
+
+    boolean isAvailable(String isbn) {
+        get(isbn);
+        return !borrowers.containsKey(isbn);
+    }
+
+    List<Book> available() {
+        return books.values().stream()
+                .filter(b -> !borrowers.containsKey(b.isbn()))
+                .sorted(Comparator.comparing(Book::title))
+                .toList();
+    }
+
+    List<Book> borrowedBy(String borrower) {
+        return books.values().stream()
+                .filter(b -> borrower.equals(borrowers.get(b.isbn())))
+                .toList();
+    }
+}
+```
+
+Things worth noticing:
+
+- A `LinkedHashMap` keeps the books in the order they were added, which is why "Asha has" lists them in that order.
+- `isAvailable` calls `get(isbn)` and ignores the result. It is there only for its side effect: throwing for an unknown ISBN rather than saying "available".
+- `borrower.equals(borrowers.get(b.isbn()))` is written that way round on purpose. For a book nobody has borrowed, `borrowers.get(...)` is `null`, and `null.equals(...)` would throw. `"Asha".equals(null)` is simply `false`.
+- The exceptions say exactly what went wrong, using the book's title, not just its code. In Part 6, messages like these go straight back to the app.
+</Fragment>
+</Exercise>
+
+<Aside type="tip" title="Keep this folder">
+Module 18 starts from these exact files.
+</Aside>
+
+<MarkComplete />

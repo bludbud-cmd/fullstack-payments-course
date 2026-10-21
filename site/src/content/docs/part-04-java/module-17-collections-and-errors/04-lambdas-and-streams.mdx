@@ -1,0 +1,227 @@
+---
+title: "17.4 Lambdas and streams"
+description: "Pass small functions around with lambdas, and filter, transform, sort and total collections with streams, Java's version of filter and map."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can write lambdas and method references, and use streams to filter, transform, sort, count and total a list.
+
+## Why it matters
+
+"Total spent on groceries this month", "the three biggest payments", "is any card frozen?": questions like these are asked of lists all the time. In JavaScript you answered them with `filter`, `map` and `reduce` (Module 7). Java's **streams** are the same idea, and you will see them throughout the PayDeck API, for example to turn a list of database rows into a list of responses for the app.
+
+## The idea
+
+### Lambdas
+
+A **lambda** is a small function written inline, exactly like a JavaScript arrow function:
+
+| JavaScript | Java |
+| --- | --- |
+| `p => p.cents > 1000` | `p -> p.cents() > 1000` |
+| `(a, b) => a + b` | `(a, b) -> a + b` |
+| `() => new Error("...")` | `() -> new IllegalArgumentException("...")` |
+
+Java uses a thin arrow `->`. You rarely write the parameter types; Java works them out from where the lambda is used.
+
+A **method reference** is a shortcut for a lambda that just calls one method: `Purchase::merchant` means `p -> p.merchant()`.
+
+### Streams
+
+`list.stream()` starts a **stream**: a pipeline the items flow through, one step at a time. Each step returns a new stream, so you chain them, one per line:
+
+```java
+List<String> merchants = purchases.stream()   // start with all the purchases
+        .filter(p -> p.cents() >= 1000)       // keep only some
+        .map(Purchase::merchant)              // turn each into something else
+        .sorted()                             // put in order
+        .toList();                            // collect the results into a List
+```
+
+Nothing happens until the last step, which asks for a result. Common steps:
+
+- **In the middle:** `filter`, `map`, `sorted`, `distinct` (drop duplicates), `limit(n)` (keep the first n).
+- **At the end:** `toList()`, `count()`, `anyMatch(...)`, `forEach(...)`, `findFirst()`.
+- **For numbers:** `mapToLong(Purchase::cents)` makes a stream of `long`s, which has `.sum()`.
+
+The original list is never changed. A stream makes a new result and leaves the list as it was.
+
+### Optional
+
+`findFirst()` might not find anything, so it does not return a `Purchase`. It returns an `Optional<Purchase>`: a box that holds one value or is empty. You open the box with, for example, `.orElseThrow(() -> new SomeException(...))`: "give me the value, or throw this if there is none". Spring's database code returns `Optional` all the time, so this line will become very familiar:
+
+```java
+Card card = cards.findById(id).orElseThrow(() -> new CardNotFoundException(id));
+```
+
+## Worked example
+
+In a new folder `~/Projects/course/java/streams`, create `Purchase.java`:
+
+```java
+record Purchase(String merchant, String category, long cents) {}
+```
+
+And `Main.java`:
+
+```java
+void main() {
+    List<Purchase> purchases = List.of(
+            new Purchase("Corner Cafe", "Eating out", 350),
+            new Purchase("FreshMart", "Groceries", 4250),
+            new Purchase("Metro", "Transport", 275),
+            new Purchase("Bookshop", "Shopping", 1899),
+            new Purchase("FreshMart", "Groceries", 990),
+            new Purchase("Corner Cafe", "Eating out", 420));
+
+    List<Purchase> big = purchases.stream()
+            .filter(p -> p.cents() >= 1000)
+            .toList();
+    IO.println(big);
+
+    List<String> merchants = purchases.stream()
+            .map(Purchase::merchant)
+            .distinct()
+            .sorted()
+            .toList();
+    IO.println(merchants);
+
+    long total = purchases.stream()
+            .mapToLong(Purchase::cents)
+            .sum();
+    IO.println("Total: " + total);
+
+    long groceries = purchases.stream()
+            .filter(p -> p.category().equals("Groceries"))
+            .mapToLong(Purchase::cents)
+            .sum();
+    IO.println("Groceries: " + groceries);
+
+    purchases.stream()
+            .sorted(Comparator.comparingLong(Purchase::cents).reversed())
+            .limit(3)
+            .forEach(p -> IO.println(p.merchant() + " " + p.cents()));
+
+    IO.println(purchases.stream().anyMatch(p -> p.category().equals("Rent")));
+
+    Purchase firstTaxi = purchases.stream()
+            .filter(p -> p.merchant().equals("Taxi"))
+            .findFirst()
+            .orElseThrow(() -> new IllegalArgumentException("No taxi rides this month"));
+}
+```
+
+```
+[Purchase[merchant=FreshMart, category=Groceries, cents=4250], Purchase[merchant=Bookshop, category=Shopping, cents=1899]]
+[Bookshop, Corner Cafe, FreshMart, Metro]
+Total: 8184
+Groceries: 5240
+FreshMart 4250
+Bookshop 1899
+FreshMart 990
+false
+Exception in thread "main" java.lang.IllegalArgumentException: No taxi rides this month
+	at Main.lambda$main$5(Main.java:43)
+	at java.base/java.util.Optional.orElseThrow(Optional.java:403)
+	at Main.main(Main.java:43)
+```
+
+- `sorted()` with nothing in the brackets uses the natural order: alphabetical for strings.
+- To sort objects, say what to sort by. `Comparator.comparingLong(Purchase::cents)` sorts by cents, smallest first; `.reversed()` flips it to biggest first.
+- There are no taxi rides, so `findFirst()` gives an empty `Optional`, and `orElseThrow` throws the exception we asked for. The stack trace shows it was thrown inside a lambda (`lambda$main$5`).
+
+Compare the groceries total with the loop you would have written before:
+
+```java
+long groceries = 0;
+for (Purchase p : purchases) {
+    if (p.category().equals("Groceries")) {
+        groceries += p.cents();
+    }
+}
+```
+
+Both are correct. The stream says **what** you want (filter, take the cents, sum) rather than **how** to get it, which is easier to read once you are used to it. Use whichever is clearer; loops are not wrong.
+
+## Try it
+
+<Exercise title="Try it: small purchases and category totals">
+Using the same purchases:
+
+1. Count the purchases under 500 cents and print "3 small purchases".
+2. Make a `Map<String, Long>` of the total spent per category, sorted by category name.
+
+<Fragment slot="hint">Part 1 is `filter` and `count()`. For part 2, a stream can collect into a map: `.collect(Collectors.groupingBy(Purchase::category, TreeMap::new, Collectors.summingLong(Purchase::cents)))`. Read it as "group by category, into a TreeMap, adding up the cents in each group".</Fragment>
+<Fragment slot="solution">
+
+```java
+long small = purchases.stream()
+        .filter(p -> p.cents() < 500)
+        .count();
+IO.println(small + " small purchases");
+
+Map<String, Long> byCategory = purchases.stream()
+        .collect(Collectors.groupingBy(Purchase::category, TreeMap::new, Collectors.summingLong(Purchase::cents)));
+IO.println(byCategory);
+```
+
+```
+3 small purchases
+{Eating out=770, Groceries=5240, Shopping=1899, Transport=275}
+```
+
+You could also build `byCategory` with a `for` loop and `getOrDefault`, as in lesson 17.1. `groupingBy` is the stream way of saying the same thing.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="incompatible types: Stream<Purchase> cannot be converted to List<Purchase>">
+You forgot the last step. A stream is a pipeline, not a list: finish it with `.toList()`.
+</Aside>
+
+<Aside type="caution" title="local variables referenced from a lambda expression must be final or effectively final">
+A lambda tried to change a local variable, for example `purchases.forEach(p -> count++)`. Lambdas can read local variables but not change them. Use a stream step that produces the answer instead, such as `.count()` or `.sum()`.
+</Aside>
+
+<Aside type="caution" title="Calling get() on an empty Optional">
+`optional.get()` throws `NoSuchElementException: No value present` when the box is empty, with no useful message. Prefer `orElseThrow(() -> new YourException(...))`, which says what was missing.
+</Aside>
+
+## Recap
+
+- A lambda is an inline function: `p -> p.cents() > 1000`. `Purchase::merchant` is a method reference.
+- `list.stream()`, then steps such as `filter`, `map`, `sorted`, `distinct`, `limit`, then an ending such as `toList()`, `count()`, `sum()`, `anyMatch` or `forEach`.
+- Streams never change the original list.
+- `findFirst()` returns an `Optional`; open it with `orElseThrow(...)`.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which is the Java version of JavaScript\'s `x => x * 2`?',
+			options: ['x => x * 2', 'x -> x * 2', 'function(x) { x * 2 }'],
+			answer: 1,
+			explanation: 'Java lambdas use a thin arrow.',
+		},
+		{
+			question: 'What does purchases.stream().filter(...).toList() do to purchases?',
+			options: ['Removes the items that do not match', 'Nothing: it returns a new list', 'Sorts it'],
+			answer: 1,
+			explanation: 'Streams leave the original collection unchanged.',
+		},
+		{
+			question: 'Why does findFirst() return an Optional?',
+			options: ['Because nothing might match', 'Because it is faster', 'Because it returns several items'],
+			answer: 0,
+			explanation: 'Optional makes "maybe nothing" part of the type, so you must decide what happens.',
+		},
+	]}
+/>
+
+<MarkComplete />

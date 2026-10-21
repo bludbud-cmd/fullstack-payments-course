@@ -1,0 +1,199 @@
+---
+title: "17.1 Lists and maps"
+description: "Keep any number of values in a List, look values up by a key in a Map, and know when each one fits."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can create, change and loop over a `List` and a `Map`, and choose between them.
+
+## Why it matters
+
+A wallet has many transactions; a user has many cards; the API looks up an account by its ID hundreds of times a second. Arrays from lesson 15.4 have a fixed size, which is rarely what you want. Java's **collections** grow and shrink as needed. The two you will use constantly are `List` (things in order, like a JavaScript array) and `Map` (look a value up by its key, like a JavaScript object used as a dictionary).
+
+## The idea
+
+### List
+
+```java
+List<String> categories = new ArrayList<>();
+categories.add("Groceries");
+categories.get(0);               // "Groceries": positions start at 0
+categories.size();               // 1
+categories.contains("Rent");     // false
+categories.remove("Groceries");
+```
+
+- `List<String>` reads "a list of strings". The type in angle brackets says what the list holds; the compiler will not let anything else in. (The next lesson explains these brackets.)
+- `List` is the **interface** (lesson 16.3): what a list can do. `ArrayList` is the class that does it. You write the interface on the left and pick the class on the right. The empty `<>` on the right means "the same type as on the left".
+- `List.of("USD", "EUR")` makes a list you **cannot change**: handy for fixed data, and safe to share.
+
+### Map
+
+```java
+Map<String, Long> spentCents = new HashMap<>();
+spentCents.put("Groceries", 4250L);     // add, or replace if the key is already there
+spentCents.get("Groceries");            // 4250
+spentCents.get("Rent");                 // null: no such key
+spentCents.getOrDefault("Rent", 0L);    // 0
+spentCents.containsKey("Groceries");    // true
+```
+
+A `Map<String, Long>` maps **keys** (here, category names) to **values** (cents). Each key appears at most once; putting the same key again replaces its value.
+
+### Long, not long
+
+Collections can only hold objects, so for numbers you write the object version of the type: `Long` for `long`, `Integer` for `int`, `Boolean` for `boolean`. Java converts between `long` and `Long` for you automatically, so in practice you only notice it in the angle brackets.
+
+<Aside type="note" title="No imports in compact files">
+Compact source files, like the ones with `void main()` you have been writing, can use `List`, `Map` and the rest of `java.util` straight away. A class in its own file, such as `Account.java` in the bank project, needs `import java.util.List;` (and so on) at the top.
+</Aside>
+
+## Worked example
+
+`Spending.java`:
+
+```java
+void main() {
+    List<String> categories = new ArrayList<>();
+    categories.add("Groceries");
+    categories.add("Transport");
+    categories.add("Eating out");
+
+    IO.println(categories);
+    IO.println(categories.size());
+    IO.println(categories.get(0));
+    IO.println(categories.contains("Transport"));
+
+    categories.remove("Transport");
+    IO.println(categories);
+
+    Map<String, Long> spentCents = new HashMap<>();
+    spentCents.put("Groceries", 4250L);
+    spentCents.put("Eating out", 1800L);
+    spentCents.put("Groceries", spentCents.get("Groceries") + 990);
+
+    IO.println(spentCents.get("Groceries"));
+    IO.println(spentCents.get("Rent"));
+    IO.println(spentCents.getOrDefault("Rent", 0L));
+    IO.println(spentCents.containsKey("Eating out"));
+
+    for (Map.Entry<String, Long> entry : spentCents.entrySet()) {
+        IO.println(entry.getKey() + ": " + entry.getValue() + " cents");
+    }
+}
+```
+
+```
+[Groceries, Transport, Eating out]
+3
+Groceries
+true
+[Groceries, Eating out]
+5240
+null
+0
+true
+Groceries: 5240 cents
+Eating out: 1800 cents
+```
+
+- Lists print in square brackets, in order.
+- The third `put` reads the old Groceries total, adds 990 and stores the result under the same key.
+- To loop over a map, loop over its `entrySet()`: each `Map.Entry` has `getKey()` and `getValue()`.
+
+<Aside type="caution" title="A HashMap has no order">
+A `HashMap` does not remember the order you added things, and may print them in any order. Use a `LinkedHashMap` to keep the order you added them, or a `TreeMap` to keep the keys sorted. All three are `Map`s, so only the right-hand side changes: `Map<String, Long> spentCents = new TreeMap<>();`.
+</Aside>
+
+### List or Map?
+
+- Do you go through the items in order, or care about position? **List**. (A statement's transactions.)
+- Do you look items up by a name or ID? **Map**. (An account by its ID.)
+
+## Try it
+
+<Exercise title="Try it: count the visits">
+Given this list of merchants from a month of card payments, build a `Map<String, Integer>` that counts how many times each one appears, and print it sorted by merchant name:
+
+```java
+List<String> merchants = List.of("Corner Cafe", "Metro", "Corner Cafe", "Bookshop", "Corner Cafe", "Metro");
+```
+
+<Fragment slot="hint">For each merchant, store "the count so far plus one". `getOrDefault(merchant, 0)` gives the count so far, or 0 the first time.</Fragment>
+<Fragment slot="solution">
+
+```java
+void main() {
+    List<String> merchants = List.of("Corner Cafe", "Metro", "Corner Cafe", "Bookshop", "Corner Cafe", "Metro");
+
+    Map<String, Integer> visits = new TreeMap<>();
+    for (String merchant : merchants) {
+        visits.put(merchant, visits.getOrDefault(merchant, 0) + 1);
+    }
+    IO.println(visits);
+}
+```
+
+```
+{Bookshop=1, Corner Cafe=3, Metro=2}
+```
+
+A `TreeMap` keeps the keys in alphabetical order. Maps print in curly braces as `key=value`.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="unexpected type, required: reference, found: long">
+You wrote `List<long>`. Collections hold objects: use `List<Long>`.
+</Aside>
+
+<Aside type="caution" title="java.lang.UnsupportedOperationException">
+You tried to `add` to, or `remove` from, a list made with `List.of(...)`, which cannot change. If you need to change it, copy it into an `ArrayList` first: `new ArrayList<>(List.of(...))`.
+</Aside>
+
+<Aside type="caution" title="IndexOutOfBoundsException: Index: 2 Size: 2">
+Positions start at 0, so a list of 2 items has positions 0 and 1. In JavaScript, `list[2]` quietly gave `undefined`; Java stops.
+</Aside>
+
+<Aside type="caution" title={`NullPointerException: Cannot invoke "java.lang.Long.longValue()"`}>
+You put `map.get(key)` straight into a `long` and the key was not in the map. `get` returned `null`, which cannot become a number. Use `getOrDefault(key, 0L)`, or check with `containsKey` first.
+</Aside>
+
+## Recap
+
+- `List<T>` holds items in order; `new ArrayList<>()` to change it, `List.of(...)` for fixed data.
+- `Map<K, V>` looks values up by key; `put`, `get`, `getOrDefault`, `containsKey`, and loop over `entrySet()`.
+- `HashMap` has no order, `LinkedHashMap` keeps the order you added, `TreeMap` sorts by key.
+- Collections hold objects: `Long`, `Integer` and `Boolean` instead of `long`, `int` and `boolean`.
+
+<Quiz
+	questions={[
+		{
+			question: 'You need to find an account quickly by its ID. Which collection fits?',
+			options: ['List<Account>', 'Map<String, Account>', 'An array'],
+			answer: 1,
+			explanation: 'A map looks values up by key directly.',
+		},
+		{
+			question: 'What does map.get("missing") return when the key is not there?',
+			options: ['0', 'An exception is thrown', 'null'],
+			answer: 2,
+			explanation: 'get returns null; getOrDefault lets you choose a fallback.',
+		},
+		{
+			question: 'Which declaration compiles?',
+			options: ['List<long> amounts', 'List<Long> amounts', 'List[long] amounts'],
+			answer: 1,
+			explanation: 'Collections hold objects, so use the object type Long.',
+		},
+	]}
+/>
+
+<MarkComplete />

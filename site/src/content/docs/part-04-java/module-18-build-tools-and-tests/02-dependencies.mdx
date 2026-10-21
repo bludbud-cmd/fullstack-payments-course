@@ -1,0 +1,214 @@
+---
+title: "18.2 Dependencies"
+description: "Use a library someone else wrote by adding it to pom.xml: find its coordinates, let Maven download it, and see what else it brings along."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can add a library to a Maven project, use it from your code, and explain where Maven gets it from and what a scope is.
+
+## Why it matters
+
+Nobody writes a payments API from scratch. The PayDeck API's `pom.xml` lists about twenty **dependencies**: Spring for the web server, a PostgreSQL driver for the database, Stripe's library for payments, and more. Each one is a few lines of XML. In this lesson you add one yourself: **Jackson**, the library that turns Java objects into JSON and back. It is the same library Spring uses to send JSON to the PayDeck app.
+
+## The idea
+
+Every published Java library has three **coordinates**, the same three fields as your own project:
+
+```xml
+<dependency>
+    <groupId>tools.jackson.core</groupId>
+    <artifactId>jackson-databind</artifactId>
+    <version>3.1.5</version>
+</dependency>
+```
+
+Dependencies go inside a `<dependencies>` tag in `pom.xml`. The next time you build, Maven:
+
+1. downloads the library from **Maven Central**, the public store of Java libraries (search it at [central.sonatype.com](https://central.sonatype.com));
+2. keeps a copy in `~/.m2/repository` on your Mac, so it is only downloaded once for all your projects;
+3. downloads the libraries **that** library needs (its **transitive dependencies**), and theirs, and so on;
+4. makes them all available when compiling and running your code.
+
+`npm install` did the same for React Native, with `package.json` and `node_modules`.
+
+### Scopes
+
+A dependency can have a `<scope>` that says when it is needed:
+
+| Scope | Used when | Example |
+| --- | --- | --- |
+| *(none)*, meaning `compile` | Always | Jackson, Spring |
+| `test` | Only when compiling and running tests | JUnit (lesson 18.4) |
+| `runtime` | Only when the program runs, not when compiling | The PostgreSQL driver |
+
+## Worked example
+
+Continue in `hello-maven`. Add this between `</properties>` and `<build>` in `pom.xml`:
+
+```xml
+<dependencies>
+    <dependency>
+        <groupId>tools.jackson.core</groupId>
+        <artifactId>jackson-databind</artifactId>
+        <version>3.1.5</version>
+    </dependency>
+</dependencies>
+```
+
+Create `src/main/java/Payment.java`:
+
+```java
+/** One card payment. */
+record Payment(String merchant, long cents, String currency) {}
+```
+
+Replace `Hello.java`:
+
+```java
+import tools.jackson.databind.json.JsonMapper;
+
+public class Hello {
+    void main() {
+        JsonMapper json = JsonMapper.builder().build();
+
+        Payment coffee = new Payment("Corner Cafe", 350, "USD");
+        String text = json.writeValueAsString(coffee);
+        IO.println(text);
+
+        Payment metro = json.readValue("""
+                {"merchant": "Metro", "cents": 275, "currency": "USD"}
+                """, Payment.class);
+        IO.println(metro);
+        IO.println(metro.cents() + coffee.cents());
+    }
+}
+```
+
+```sh
+mvn -q compile exec:java
+```
+
+```
+{"merchant":"Corner Cafe","cents":350,"currency":"USD"}
+Payment[merchant=Metro, cents=275, currency=USD]
+625
+```
+
+- `import tools.jackson.databind.json.JsonMapper;` brings in a class from the library. Libraries are organised in **packages** (lesson 18.3), and `import` names the package and class.
+- `writeValueAsString` turned the record into JSON, using the record's field names as the keys.
+- `readValue(text, Payment.class)` went the other way: it read JSON and built a real `Payment`, with `cents` as a real `long`. `Payment.class` tells Jackson which type to build.
+- `"""` starts a **text block**: a string that can span several lines and contain `"` without escaping. It ends at the next `"""`.
+
+Now see what came along with Jackson:
+
+```sh
+mvn dependency:tree
+```
+
+```
+[INFO] com.example:hello-maven:jar:1.0-SNAPSHOT
+[INFO] \- tools.jackson.core:jackson-databind:jar:3.1.5:compile
+[INFO]    +- com.fasterxml.jackson.core:jackson-annotations:jar:2.21:compile
+[INFO]    \- tools.jackson.core:jackson-core:jar:3.1.5:compile
+```
+
+You asked for one library and got three. In the PayDeck API the tree has well over a hundred, and Maven keeps track of them all.
+
+<Aside type="note" title="Which version?">
+Search Maven Central for the library and use the latest stable version (avoid ones with `alpha`, `beta` or `RC` in their names). In Part 6, Spring Boot chooses compatible versions of most libraries for you, so you will write dependencies without a `<version>` at all.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a list from JSON">
+Read this JSON array into a `List<Payment>` and print how many payments there are and their total, "3 payments, 4875 cents":
+
+```json
+[
+  {"merchant": "Corner Cafe", "cents": 350, "currency": "USD"},
+  {"merchant": "FreshMart", "cents": 4250, "currency": "USD"},
+  {"merchant": "Metro", "cents": 275, "currency": "USD"}
+]
+```
+
+<Fragment slot="hint">Jackson can read an array of payments with `Payment[].class`. `List.of(array)` turns an array into a list. `Hello.java` is a normal class file, so it needs `import java.util.List;`.</Fragment>
+<Fragment slot="solution">
+
+```java
+import java.util.List;
+
+import tools.jackson.databind.json.JsonMapper;
+
+public class Hello {
+    void main() {
+        JsonMapper json = JsonMapper.builder().build();
+
+        String text = """
+                [
+                  {"merchant": "Corner Cafe", "cents": 350, "currency": "USD"},
+                  {"merchant": "FreshMart", "cents": 4250, "currency": "USD"},
+                  {"merchant": "Metro", "cents": 275, "currency": "USD"}
+                ]
+                """;
+        List<Payment> payments = List.of(json.readValue(text, Payment[].class));
+        long total = payments.stream().mapToLong(Payment::cents).sum();
+        IO.println(payments.size() + " payments, " + total + " cents");
+    }
+}
+```
+
+Then try a payment with `"cents": "abc"`. Jackson refuses it: "Cannot deserialize value of type `long` from String "abc"". When run through `exec:java`, an uncaught exception appears in Maven's `[ERROR]` lines rather than as a stack trace. In Part 6 Spring turns exactly this error into a "400 Bad Request" for the app.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="package tools.jackson.databind.json does not exist">
+The `import` names a library that is not in `pom.xml`, or the `<dependency>` is outside the `<dependencies>` tag. In IntelliJ, after changing `pom.xml`, click the small Maven reload button that appears so the editor knows about the new library.
+</Aside>
+
+<Aside type="caution" title="Could not resolve dependencies ... was not found">
+A coordinate is misspelled, or the version does not exist. Copy coordinates from Maven Central rather than typing them.
+</Aside>
+
+<Aside type="caution" title="cannot find symbol: class List">
+Inside a class file, `java.util` classes need an `import`, as they did in `Account.java` in Module 16. Only compact source files import them automatically.
+</Aside>
+
+## Recap
+
+- A dependency is three coordinates, `groupId`, `artifactId` and `version`, inside `<dependencies>` in `pom.xml`.
+- Maven downloads it from Maven Central into `~/.m2/repository`, along with its own dependencies.
+- `mvn dependency:tree` shows everything that came along.
+- `<scope>test</scope>` means "only for tests".
+
+<Quiz
+	questions={[
+		{
+			question: 'Where does Maven keep the libraries it downloads?',
+			options: ['In target', 'In ~/.m2/repository, shared by all projects', 'In node_modules'],
+			answer: 1,
+			explanation: 'One copy per version, reused across projects.',
+		},
+		{
+			question: 'You add one dependency and Maven downloads five. Why?',
+			options: ['A bug', 'Transitive dependencies: the library needs other libraries', 'Maven downloads extra versions just in case'],
+			answer: 1,
+			explanation: 'Libraries depend on other libraries; Maven fetches the whole tree.',
+		},
+		{
+			question: 'Which scope suits a testing library?',
+			options: ['compile', 'test', 'runtime'],
+			answer: 1,
+			explanation: 'It is only needed to compile and run the tests, never by the finished program.',
+		},
+	]}
+/>
+
+<MarkComplete />

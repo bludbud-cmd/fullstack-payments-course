@@ -1,0 +1,214 @@
+---
+title: "16.2 Constructors"
+description: "Create objects that are valid from the start with constructors, protect their data with private and final, and describe them with toString."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can write constructors that refuse bad values, hide fields with `private`, make them unchangeable with `final`, and give a class its own `toString`.
+
+## Why it matters
+
+With the `Card` from the last lesson, anyone can write `card.nickname = null` or `account.balanceCents = 1_000_000`. In a bank, that is the whole problem. Good classes **protect** their data: they are valid from the moment they are created, and they only change through methods that keep the rules. This idea is called **encapsulation**, and the PayDeck API relies on it everywhere.
+
+## The idea
+
+A **constructor** runs when an object is created with `new`. It has the class's name and no return type:
+
+```java
+class Account {
+    private final String owner;
+    private long balanceCents;
+
+    Account(String owner, long openingBalanceCents) {
+        if (owner.isBlank()) {
+            throw new IllegalArgumentException("An account needs an owner");
+        }
+        this.owner = owner;
+        this.balanceCents = openingBalanceCents;
+    }
+}
+```
+
+- `this.owner = owner` copies the parameter into the field. `this` means "the object being built"; it tells apart the field `this.owner` from the parameter `owner`, which have the same name.
+- `throw new IllegalArgumentException("...")` refuses to create the object at all, with a message. A bad account never exists.
+- **`private`** means only code inside `Account` can see or change the field. Everyone else must use the methods you provide.
+- **`final`** means the field is set once, in the constructor, and never again. An account's owner does not change.
+
+A class can have several constructors with different parameters. One can call another with `this(...)`:
+
+```java
+Account(String owner) {
+    this(owner, 0);     // "start with nothing"
+}
+```
+
+Since fields are private, you add methods to read them. By convention they are named after the field: `owner()` and `balanceCents()`. There is deliberately no `setBalanceCents`: the balance changes only through `deposit`, which checks the amount.
+
+### toString
+
+Every class can say how it should be printed by defining a method called `toString`:
+
+```java
+@Override
+public String toString() {
+    return owner + " has " + balanceCents + " cents";
+}
+```
+
+`@Override` says "I am replacing a method every Java object already has". `public` is required here because the original is public; the next lesson explains why.
+
+## Worked example
+
+In your `cards` folder, `Account.java`:
+
+```java
+class Account {
+    private final String owner;
+    private long balanceCents;
+
+    Account(String owner, long openingBalanceCents) {
+        if (owner.isBlank()) {
+            throw new IllegalArgumentException("An account needs an owner");
+        }
+        if (openingBalanceCents < 0) {
+            throw new IllegalArgumentException("The opening balance cannot be negative");
+        }
+        this.owner = owner;
+        this.balanceCents = openingBalanceCents;
+    }
+
+    Account(String owner) {
+        this(owner, 0);
+    }
+
+    void deposit(long amountCents) {
+        if (amountCents <= 0) {
+            throw new IllegalArgumentException("Deposit a positive amount");
+        }
+        balanceCents += amountCents;
+    }
+
+    String owner() {
+        return owner;
+    }
+
+    long balanceCents() {
+        return balanceCents;
+    }
+
+    @Override
+    public String toString() {
+        return owner + " has " + balanceCents + " cents";
+    }
+}
+```
+
+Replace `Main.java`:
+
+```java
+void main() {
+    Account asha = new Account("Asha", 5000);
+    Account ben = new Account("Ben");
+
+    asha.deposit(2500);
+    IO.println(asha);
+    IO.println(ben);
+    IO.println(asha.owner() + "'s balance: " + asha.balanceCents());
+
+    Account nobody = new Account(" ");
+}
+```
+
+```
+Asha has 7500 cents
+Ben has 0 cents
+Asha's balance: 7500
+Exception in thread "main" java.lang.IllegalArgumentException: An account needs an owner
+	at Account.<init>(Account.java:7)
+	at Account.<init>(Account.java:17)
+	at Main.main(Main.java:10)
+```
+
+The stack trace shows the path: `main` called the one-argument constructor (line 17), which called the two-argument one (line 7), which refused. `<init>` is how Java names constructors in stack traces.
+
+Now try to cheat, by adding to `main`:
+
+```java
+asha.balanceCents = 1_000_000;
+```
+
+```
+Main.java:11: error: balanceCents has private access in Account
+```
+
+The compiler refuses. The only way to add money is `deposit`, and `deposit` checks the amount.
+
+## Try it
+
+<Exercise title="Try it: withdraw">
+Add `void withdraw(long amountCents)` to `Account`. It refuses (throws `IllegalArgumentException`) amounts that are not positive, and throws `IllegalStateException("Not enough money")` if the amount is more than the balance. Test it with 1000 and then 1_000_000 from Asha's account.
+
+<Fragment slot="hint">`IllegalStateException` is the usual choice when the input is fine but the object is not in a state to do it: 1_000_000 is a valid amount, Asha just does not have it.</Fragment>
+<Fragment slot="solution">
+
+```java
+void withdraw(long amountCents) {
+    if (amountCents <= 0) {
+        throw new IllegalArgumentException("Withdraw a positive amount");
+    }
+    if (amountCents > balanceCents) {
+        throw new IllegalStateException("Not enough money");
+    }
+    balanceCents -= amountCents;
+}
+```
+
+`asha.withdraw(1000)` leaves 6500; `asha.withdraw(1_000_000)` stops the program with `java.lang.IllegalStateException: Not enough money`. Module 17 shows how to catch that and carry on.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="no suitable constructor found for Account(no arguments)">
+Once a class has a constructor, Java no longer provides the empty `new Account()`. Pass the arguments one of your constructors expects.
+</Aside>
+
+<Aside type="caution" title="cannot assign a value to final variable owner">
+A `final` field can only be set in a constructor. If it really needs to change, it should not be `final`; usually, though, the error is telling you something useful.
+</Aside>
+
+<Aside type="caution" title="Forgetting this.">
+`owner = owner;` in a constructor assigns the parameter to itself and leaves the field `null`. Write `this.owner = owner;`.
+</Aside>
+
+## Recap
+
+- A constructor sets up a new object; it can refuse bad values by throwing an exception.
+- `private` fields can only be changed by the class's own methods; `final` fields never change after construction.
+- Methods such as `deposit` are the only way in, and they keep the rules.
+- `toString` controls how an object prints.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why make balanceCents private?',
+			options: ['It is faster', 'So the balance can only change through methods that check the rules', 'Java requires it'],
+			answer: 1,
+			explanation: 'Encapsulation keeps objects valid.',
+		},
+		{
+			question: 'What does `this(owner, 0)` do inside a constructor?',
+			options: ['Creates a second account', 'Calls another constructor of the same class', 'Sets owner to 0'],
+			answer: 1,
+			explanation: 'It reuses the two-argument constructor, with 0 as the opening balance.',
+		},
+	]}
+/>
+
+<MarkComplete />

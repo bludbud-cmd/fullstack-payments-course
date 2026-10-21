@@ -1,0 +1,271 @@
+---
+title: "18.4 Unit tests with JUnit"
+description: "Write automated tests with JUnit, run them with mvn test, and read a failing test's report to find the bug."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can add JUnit to a Maven project, write tests that check results and exceptions, and use a failing test to find a bug.
+
+## Why it matters
+
+Up to now you checked your code by running it and reading the output. That works once. But every time you change something, everything you checked before could break, and nobody re-reads a hundred lines of output after every change. A **unit test** is a small program that checks one thing and says "pass" or "fail" by itself. The PayDeck API has tests that prove, among other things, that twenty simultaneous payments can never overspend an account. Every change to the API must pass them all before it is accepted, on every computer and on GitHub.
+
+## The idea
+
+A test class lives in `src/test/java`, in the **same package** as the class it tests, so it can use everything that is not `private`. By convention it is named after that class, plus `Test`: `CatalogueTest` tests `Catalogue`.
+
+```java
+class CatalogueTest {
+    @Test
+    void lendingABookMakesItUnavailable() {
+        Catalogue catalogue = new Catalogue();                                      // arrange
+        catalogue.add(new Book("978-1-000-00001-1", "Java by the Sea", "Lena Park", 2021));
+
+        catalogue.lend("978-1-000-00001-1", "Asha");                                // act
+
+        assertFalse(catalogue.isAvailable("978-1-000-00001-1"));                    // assert
+    }
+}
+```
+
+- `@Test` is an **annotation**: a label, starting with `@`, that tools read. JUnit runs every method labelled `@Test`. (You met `@Override` in lesson 16.2. Spring uses annotations everywhere.)
+- The method name says, in plain words, what should be true. When a test fails, its name is the first thing you read.
+- Most tests have three parts: **arrange** (set things up), **act** (do the one thing being tested) and **assert** (check the result). A blank line between them makes them easy to see.
+
+The common checks, called **assertions**:
+
+| Assertion | Passes when |
+| --- | --- |
+| `assertEquals(expected, actual)` | The two are equal (using `equals`) |
+| `assertTrue(condition)` / `assertFalse(condition)` | The condition is true / false |
+| `assertThrows(SomeException.class, () -> ...)` | The lambda throws that exception; it returns the exception so you can check its message |
+
+`assertEquals` takes the **expected** value first. Swap them and the test still works, but its failure message will say the opposite of the truth.
+
+`@BeforeEach` marks a method that runs before **every** test. Each test gets a fresh start, so tests never depend on each other or on the order they run in.
+
+## Worked example
+
+Continue in `library-maven`.
+
+1. Add JUnit to `pom.xml`, between `</properties>` and `<build>`:
+
+   ```xml
+   <dependencies>
+       <dependency>
+           <groupId>org.junit.jupiter</groupId>
+           <artifactId>junit-jupiter</artifactId>
+           <version>6.0.3</version>
+           <scope>test</scope>
+       </dependency>
+   </dependencies>
+   ```
+
+   And add the Surefire plugin, which runs the tests, inside `<plugins>` next to the exec plugin:
+
+   ```xml
+   <plugin>
+       <groupId>org.apache.maven.plugins</groupId>
+       <artifactId>maven-surefire-plugin</artifactId>
+       <version>3.5.6</version>
+   </plugin>
+   ```
+
+   Maven already knows about Surefire. Naming a version makes sure you get a recent one that understands this version of JUnit.
+
+2. Create `src/test/java/com/example/library/CatalogueTest.java`:
+
+   ```java
+   package com.example.library;
+
+   import static org.junit.jupiter.api.Assertions.assertEquals;
+   import static org.junit.jupiter.api.Assertions.assertFalse;
+   import static org.junit.jupiter.api.Assertions.assertThrows;
+   import static org.junit.jupiter.api.Assertions.assertTrue;
+
+   import org.junit.jupiter.api.BeforeEach;
+   import org.junit.jupiter.api.Test;
+
+   class CatalogueTest {
+       static final String ISBN = "978-1-000-00001-1";
+
+       Catalogue catalogue;
+       Book book;
+
+       @BeforeEach
+       void setUp() {
+           catalogue = new Catalogue();
+           book = new Book(ISBN, "Java by the Sea", "Lena Park", 2021);
+           catalogue.add(book);
+       }
+
+       @Test
+       void addedBooksCanBeFound() {
+           assertEquals(1, catalogue.size());
+           assertEquals(book, catalogue.get(ISBN));
+       }
+
+       @Test
+       void lendingABookMakesItUnavailable() {
+           assertTrue(catalogue.isAvailable(ISBN));
+
+           catalogue.lend(ISBN, "Asha");
+
+           assertFalse(catalogue.isAvailable(ISBN));
+       }
+
+       @Test
+       void aBookCannotBeLentTwice() {
+           catalogue.lend(ISBN, "Asha");
+
+           IllegalStateException e = assertThrows(IllegalStateException.class, () -> catalogue.lend(ISBN, "Ben"));
+
+           assertEquals("Java by the Sea is already on loan to Asha", e.getMessage());
+       }
+   }
+   ```
+
+   - `import static` imports a **method** rather than a class, so you can write `assertEquals(...)` instead of `Assertions.assertEquals(...)`.
+   - `static final String ISBN` is a **constant**: one fixed value shared by the whole class. Constants are named in capitals.
+   - `catalogue` and `book` are fields, set afresh by `setUp` before each test.
+
+3. Run the tests:
+
+   ```sh
+   mvn test
+   ```
+
+   ```
+   [INFO] -------------------------------------------------------
+   [INFO]  T E S T S
+   [INFO] -------------------------------------------------------
+   [INFO] Running com.example.library.CatalogueTest
+   [INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.067 s -- in com.example.library.CatalogueTest
+   [INFO]
+   [INFO] Results:
+   [INFO]
+   [INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0
+   [INFO]
+   [INFO] BUILD SUCCESS
+   ```
+
+   With `mvn -q test`, a passing run prints nothing at all. Silence means success.
+
+### When a test fails
+
+Now break the catalogue on purpose. In `Catalogue.lend`, add a line after `borrowers.put(isbn, borrower);`:
+
+```java
+borrowers.remove(isbn);
+```
+
+This is the kind of mistake that is easy to make while changing something else. Run `mvn test`:
+
+```
+[ERROR] Failures:
+[ERROR]   CatalogueTest.aBookCannotBeLentTwice:43 Expected java.lang.IllegalStateException to be thrown, but nothing was thrown.
+[ERROR]   CatalogueTest.lendingABookMakesItUnavailable:36 expected: <false> but was: <true>
+[INFO]
+[ERROR] Tests run: 3, Failures: 2, Errors: 0, Skipped: 0
+[INFO]
+[INFO] BUILD FAILURE
+```
+
+Read it like this: **which test** (`lendingABookMakesItUnavailable`), **which line** of the test (`36`), **what was wrong** (expected `false`, got `true`). The test names alone tell you lending is broken. Remove the bad line and the build is green again.
+
+A **failure** means an assertion was wrong. An **error** means the test itself crashed with an unexpected exception. Both mean something needs fixing.
+
+<Aside type="tip" title="Tests in IntelliJ">
+A green ▶ appears next to each test method and next to the class. Click it to run one test or all of them; results show as a tree of ticks and crosses, and clicking a failure jumps to the line.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: two more tests">
+Add two tests to `CatalogueTest`:
+
+1. `givingABookBackMakesItAvailableAgain`: lend the book, give it back, and check it is available.
+2. `anUnknownIsbnIsRefused`: `get` with an ISBN that is not in the catalogue throws `BookNotFoundException` with the message "No book with ISBN 978-9-999-99999-9".
+
+Run `mvn test` and check that it says `Tests run: 5`.
+
+<Fragment slot="hint">Copy the shape of `aBookCannotBeLentTwice` for the second test: `assertThrows` returns the exception, and `assertEquals` checks its message.</Fragment>
+<Fragment slot="solution">
+
+```java
+@Test
+void givingABookBackMakesItAvailableAgain() {
+    catalogue.lend(ISBN, "Asha");
+
+    catalogue.giveBack(ISBN);
+
+    assertTrue(catalogue.isAvailable(ISBN));
+}
+
+@Test
+void anUnknownIsbnIsRefused() {
+    BookNotFoundException e = assertThrows(BookNotFoundException.class, () -> catalogue.get("978-9-999-99999-9"));
+
+    assertEquals("No book with ISBN 978-9-999-99999-9", e.getMessage());
+}
+```
+
+```
+[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0
+```
+
+To be sure a new test can fail, break the code it checks for a moment (for example, make `giveBack` do nothing) and watch it go red. A test that can never fail proves nothing.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Tests run: 0">
+Maven found no tests. Check that the test class is under `src/test/java` (not `src/main/java`), that its name ends in `Test`, and that the methods have `@Test`.
+</Aside>
+
+<Aside type="caution" title="package org.junit.jupiter.api does not exist">
+JUnit is missing from `pom.xml`, or the test file is in `src/main/java`, where `test`-scoped libraries are not available.
+</Aside>
+
+<Aside type="caution" title="Tests that depend on each other">
+If one test only passes when another runs first, it will fail at random, because JUnit does not promise any order. Set everything up in `@BeforeEach` or in the test itself.
+</Aside>
+
+## Recap
+
+- Tests go in `src/test/java`, in the same package as the class they test, named `SomethingTest`.
+- `@Test` marks a test; `@BeforeEach` runs before each one.
+- Arrange, act, assert. `assertEquals(expected, actual)`, `assertTrue`, `assertFalse`, `assertThrows`.
+- `mvn test` runs them all; read a failure as test name, line, expected versus actual.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which order does assertEquals take?',
+			options: ['actual, expected', 'expected, actual', 'Either, it makes no difference to the message'],
+			answer: 1,
+			explanation: 'Expected first, so the failure message reads correctly.',
+		},
+		{
+			question: 'What does @BeforeEach do?',
+			options: ['Runs once before all tests', 'Runs before every test, giving each a fresh start', 'Runs only before failing tests'],
+			answer: 1,
+			explanation: 'Each test starts from the same, fresh setup.',
+		},
+		{
+			question: 'How do you check that code throws an exception?',
+			options: ['Wrap it in try and catch and do nothing', 'assertThrows(TheException.class, () -> code)', 'You cannot test exceptions'],
+			answer: 1,
+			explanation: 'assertThrows fails the test if nothing, or the wrong exception, is thrown.',
+		},
+	]}
+/>
+
+<MarkComplete />

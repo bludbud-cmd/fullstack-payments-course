@@ -1,0 +1,195 @@
+---
+title: "15.1 Installing JDK 25 and IntelliJ IDEA"
+description: "Install Java 25 and the IntelliJ IDEA editor, keep Android builds on Java 17, and run your first Java program."
+sidebar:
+  order: 1
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you have Java 25 and IntelliJ IDEA installed, your Android builds still work, and you have run a Java program from the terminal and from IntelliJ.
+
+## Why it matters
+
+The PayDeck API, the server that holds everyone's money, is written in **Java**. Java is one of the most used languages for servers, especially at banks and payment companies, because it is fast, has strong types (like TypeScript, but checked strictly), and has twenty-five years of tools and libraries. Java 25 is the current long-term-support version.
+
+## The idea
+
+You need two things:
+
+- The **JDK** (Java Development Kit): the `java` command that runs programs, the `javac` compiler, and Java's standard library. You install **Temurin**, a free build of the JDK from the Eclipse Foundation.
+- **IntelliJ IDEA**: an editor made for Java. VS Code can edit Java too, but IntelliJ understands Java deeply: it finds errors as you type, completes code, and refactors safely. Most Java developers use it. The free edition is all this course needs.
+
+Java code is **compiled** before it runs: `javac` turns your `.java` source into **bytecode**, which the **JVM** (Java Virtual Machine) runs. For a single file, `java File.java` does both steps in one go, which is what you will use in this Part. From Module 18 on, a build tool does it for whole projects.
+
+### Two Javas on one Mac
+
+In Module 11 you installed Java 17, because Android's build tools need it. Your own Java code will use Java 25. Both can be installed side by side: `JAVA_HOME` decides which one the terminal uses, and Android's build tool, Gradle, can be told separately to keep using 17.
+
+## Worked example
+
+### 1. Install Java 25
+
+```sh
+brew install --cask temurin@25
+```
+
+macOS keeps every installed JDK in `/Library/Java/JavaVirtualMachines`. The `/usr/libexec/java_home` tool finds one by version:
+
+```sh
+/usr/libexec/java_home -V
+```
+
+It lists both, something like:
+
+```
+Matching Java Virtual Machines (2):
+    25.0.4 (arm64) "Eclipse Adoptium" - "OpenJDK 25.0.4" /Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home
+    17.0.16 (arm64) "Azul Systems, Inc." - "Zulu 17.60.17" /Library/Java/JavaVirtualMachines/zulu-17.jdk/Contents/Home
+```
+
+### 2. Make Java 25 the default, and keep Android on 17
+
+Open your shell settings:
+
+```sh
+code ~/.zshrc
+```
+
+Find the `JAVA_HOME` line you added in lesson 11.1 and **replace** it with:
+
+```sh
+export JAVA_HOME=$(/usr/libexec/java_home -v 25)
+```
+
+Then tell Gradle, for every Android project, to keep using Java 17. Create the file `~/.gradle/gradle.properties`:
+
+```sh
+mkdir -p ~/.gradle
+code ~/.gradle/gradle.properties
+```
+
+with this one line:
+
+```
+org.gradle.java.home=/Library/Java/JavaVirtualMachines/zulu-17.jdk/Contents/Home
+```
+
+Save both files and open a **new** terminal:
+
+```sh
+java -version
+```
+
+```
+openjdk version "25.0.4" 2026-07-21 LTS
+OpenJDK Runtime Environment Temurin-25.0.4+1 (build 25.0.4+1-LTS)
+...
+```
+
+The exact numbers will differ; the `25` is what matters.
+
+<Aside type="caution" title="Check Android still builds">
+Go to your `PayDeck` app folder and run `npm run android` once. In the Gradle output, or with `cd android && ./gradlew --version`, the **Daemon JVM** line should mention `zulu-17` and say `from org.gradle.java.home`. If an Android build ever complains about the Java version, check that file first.
+</Aside>
+
+### 3. Install IntelliJ IDEA
+
+<Steps>
+
+1. Go to [jetbrains.com/idea/download](https://www.jetbrains.com/idea/download/), choose **macOS** and your chip (Apple Silicon or Intel), and download the free edition.
+2. Open the `.dmg` and drag IntelliJ IDEA into Applications. Start it.
+3. Skip the import of settings and any sign-in offers; they are not needed.
+
+</Steps>
+
+### 4. Your first Java program
+
+```sh
+mkdir -p ~/Projects/course/java && cd ~/Projects/course/java
+code Hello.java
+```
+
+Type:
+
+```java
+void main() {
+    IO.println("Hello from Java!");
+}
+```
+
+Save, and run it:
+
+```sh
+java Hello.java
+```
+
+```
+Hello from Java!
+```
+
+Now open the same folder in IntelliJ: **File → Open**, choose the `java` folder, and **Trust** it when asked. Open `Hello.java`. If IntelliJ shows a yellow bar saying no JDK is set up, click it and choose **25**. Then click the green ▶ next to `void main()` and choose **Run**. The output appears in the **Run** panel at the bottom.
+
+<Aside type="note" title="What void main() means">
+`main` is where a Java program starts, like the top of a JavaScript file. `void` means it does not return anything. The next lesson explains every part. In older Java tutorials you will see `public static void main(String[] args)` inside a `class`; Java 25 lets small programs skip all of that.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: break it">
+Delete the semicolon at the end of the `IO.println` line, and run `java Hello.java` again. Then put it back, and change `IO.println` to `IO.printline`. Read both errors.
+
+<Fragment slot="hint">Java error messages start with the file name and line number, like TypeScript's.</Fragment>
+<Fragment slot="solution">
+Without the semicolon:
+
+```
+Hello.java:2: error: ';' expected
+    IO.println("Hello from Java!")
+                                  ^
+1 error
+error: compilation failed
+```
+
+With the misspelled method, the message says `cannot find symbol` and points at `printline`. In both cases nothing ran at all: Java checks the whole file before running any of it, just like `npx tsc` did in Module 9. IntelliJ underlines both mistakes in red before you even run.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="java -version still says 17">
+The terminal was opened before you changed `~/.zshrc`. Open a new one. If it still says 17, check there is only one `JAVA_HOME` line in `~/.zshrc`.
+</Aside>
+
+<Aside type="caution" title="compact source file does not have main method">
+`main` is misspelled (for example `mian`), or has the wrong shape. It must be exactly `void main()`.
+</Aside>
+
+## Recap
+
+- The JDK compiles and runs Java; IntelliJ IDEA is the editor most Java developers use.
+- `JAVA_HOME` points at Java 25 for your own code; `~/.gradle/gradle.properties` keeps Android on Java 17.
+- `java File.java` compiles and runs a one-file program.
+- Java checks the whole file before running anything.
+
+<Quiz
+	questions={[
+		{
+			question: 'What does javac do?',
+			options: ['Runs a program', 'Compiles .java source into bytecode for the JVM', 'Installs Java'],
+			answer: 1,
+			explanation: 'java File.java runs javac for you behind the scenes, then runs the result.',
+		},
+		{
+			question: 'Why add org.gradle.java.home to ~/.gradle/gradle.properties?',
+			options: ['To make Java faster', 'So Android builds keep using Java 17 while JAVA_HOME is 25', 'IntelliJ needs it'],
+			answer: 1,
+			explanation: "Gradle uses that setting instead of JAVA_HOME for running builds.",
+		},
+	]}
+/>
+
+<MarkComplete />
