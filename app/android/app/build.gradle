@@ -117,3 +117,9 @@ dependencies {
         implementation jscFlavor
     }
 }
+
+// Push notifications (Module 34) need your own google-services.json from the
+// Firebase console. Without it the app still builds, with push turned off.
+if (file("google-services.json").exists()) {
+    apply plugin: "com.google.gms.google-services"
+}

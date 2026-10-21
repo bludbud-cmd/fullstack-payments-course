@@ -7,6 +7,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import React, { useState } from 'react';
 import { AuthProvider, useAuth } from './src/auth/AuthContext';
+import { LiveUpdates } from './src/live/LiveUpdates';
 import { AppNavigator } from './src/navigation/AppNavigator';
 import { OpenAccountScreen } from './src/screens/OpenAccountScreen';
 import { SignInScreen } from './src/screens/SignInScreen';
@@ -38,7 +39,9 @@ function SignedInOnly() {
   }
   return (
     <AccountGate openAccount={OpenAccountScreen}>
-      <AppNavigator />
+      <LiveUpdates>
+        <AppNavigator />
+      </LiveUpdates>
     </AccountGate>
   );
 }

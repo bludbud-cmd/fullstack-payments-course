@@ -4,6 +4,13 @@ import { formatSignedMoney, type Currency } from '../money';
 import { spacing, useTheme } from '../theme';
 import type { Activity } from '../types';
 
+const typeLabel = {
+  TOP_UP: 'Top-up',
+  TRANSFER: 'Transfer',
+  CARD_PAYMENT: 'Card payment',
+  REFUND: 'Refund',
+} as const;
+
 export function ActivityRow({
   item,
   currency,
@@ -23,7 +30,7 @@ export function ActivityRow({
           {item.description}
         </Text>
         <Text style={{ color: theme.muted }}>
-          {item.type === 'TOP_UP' ? 'Top-up' : 'Transfer'} · {date}
+          {typeLabel[item.type]} · {date}
         </Text>
       </View>
       <Text

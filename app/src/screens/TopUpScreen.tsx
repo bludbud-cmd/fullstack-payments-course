@@ -1,7 +1,9 @@
-import React, { useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { Linking, StyleSheet, Text, View } from 'react-native';
 import { newIdempotencyKey } from '../api/client';
 import { useAccount, useTopUp } from '../api/hooks';
+import { startCardTopUp } from '../api/payments';
+import { queryParams } from '../auth/AuthContext';
 import { BackButton } from '../components/BackButton';
 import { Button } from '../components/Button';
 import { ErrorText } from '../components/ErrorText';
@@ -24,19 +26,54 @@ export function TopUpScreen() {
   // One key per amount. If the network drops and the person taps again, the
   // same key is sent, and the API makes sure the money only arrives once.
   const [idempotencyKey, setIdempotencyKey] = useState(newIdempotencyKey);
+  const [card, setCard] = useState<{
+    state: 'idle' | 'opening' | 'waiting' | 'paid' | 'cancelled';
+    error: Error | null;
+  }>({ state: 'idle', error: null });
 
   const currency = account.data?.currency ?? 'USD';
   const error = topUpError(amount);
   const cents = parseMoneyInput(amount);
+  const ready = error === null && cents !== null;
+
+  // Stripe's page sends the browser to paydeck://top-up?result=... when done.
+  useEffect(() => {
+    const subscription = Linking.addEventListener('url', ({ url }) => {
+      if (url.startsWith('paydeck://top-up')) {
+        const paid = queryParams(url).result === 'success';
+        setCard({ state: paid ? 'paid' : 'cancelled', error: null });
+      }
+    });
+    return () => subscription.remove();
+  }, []);
 
   const changeAmount = (text: string) => {
     setAmount(text);
     setIdempotencyKey(newIdempotencyKey());
   };
 
-  const confirm = () => {
+  const payByCard = async () => {
     setSubmitted(true);
-    if (error === null && cents !== null && !topUp.isPending) {
+    if (!ready || !account.data || card.state === 'opening') {
+      return;
+    }
+    setCard({ state: 'opening', error: null });
+    try {
+      const { url } = await startCardTopUp(
+        account.data.id,
+        cents,
+        idempotencyKey,
+      );
+      await Linking.openURL(url);
+      setCard({ state: 'waiting', error: null });
+    } catch (e) {
+      setCard({ state: 'idle', error: e as Error });
+    }
+  };
+
+  const addPretendMoney = () => {
+    setSubmitted(true);
+    if (ready && !topUp.isPending) {
       topUp.mutate(
         { amountCents: cents, idempotencyKey },
         { onSuccess: goBack },
@@ -44,12 +81,20 @@ export function TopUpScreen() {
     }
   };
 
+  if (card.state === 'paid') {
+    return (
+      <Screen title="Thank you" leading={<BackButton />}>
+        <Text style={{ color: theme.text }}>
+          Stripe has your payment. The money appears in your wallet as soon as
+          Stripe confirms it, usually within a few seconds.
+        </Text>
+        <Button title="Back to wallet" onPress={goBack} />
+      </Screen>
+    );
+  }
+
   return (
     <Screen title="Top up" leading={<BackButton />}>
-      <Text style={{ color: theme.muted }}>
-        Add money to your wallet. In Part 9 this will charge a card through
-        Stripe; for now it is pretend money.
-      </Text>
       <Field
         label={`Amount (${currency})`}
         value={amount}
@@ -57,7 +102,7 @@ export function TopUpScreen() {
         keyboardType="decimal-pad"
         placeholder="0.00"
         error={submitted ? error : null}
-        onSubmitEditing={confirm}
+        onSubmitEditing={payByCard}
         returnKeyType="done"
       />
       <View style={styles.quick}>
@@ -71,16 +116,46 @@ export function TopUpScreen() {
           </View>
         ))}
       </View>
+
+      <Button
+        title={
+          card.state === 'opening'
+            ? 'Opening Stripe…'
+            : ready
+            ? `Pay ${formatMoney(cents, currency)} by card`
+            : 'Pay by card'
+        }
+        onPress={payByCard}
+        disabled={card.state === 'opening'}
+      />
+      {card.state === 'waiting' && (
+        <Text style={{ color: theme.muted }}>
+          Finish paying in your browser. In test mode, use the card 4242 4242
+          4242 4242 with any future date.
+        </Text>
+      )}
+      {card.state === 'cancelled' && (
+        <Text style={{ color: theme.muted }}>
+          The payment was cancelled. Nothing was charged.
+        </Text>
+      )}
+      <ErrorText error={card.error} />
+
+      <Text style={{ color: theme.muted }}>
+        Building and testing? Add pretend money instead. It works until the
+        server switches it off.
+      </Text>
       <ErrorText error={topUp.error} />
       <Button
         title={
           topUp.isPending
             ? 'Adding…'
-            : cents && !error
-            ? `Add ${formatMoney(cents, currency)}`
-            : 'Add money'
+            : ready
+            ? `Add ${formatMoney(cents, currency)} of pretend money`
+            : 'Add pretend money'
         }
-        onPress={confirm}
+        variant="secondary"
+        onPress={addPretendMoney}
         disabled={topUp.isPending}
       />
     </Screen>

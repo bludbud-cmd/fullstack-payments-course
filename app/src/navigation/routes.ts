@@ -5,6 +5,7 @@ export type Route =
   | { name: 'activity' }
   | { name: 'profile' }
   | { name: 'card'; cardId: string }
+  | { name: 'pay'; cardId: string }
   | { name: 'topUp' }
   | { name: 'issueCard' };
 
