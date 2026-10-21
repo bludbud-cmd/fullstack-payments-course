@@ -1,0 +1,107 @@
+---
+title: "1.5 What a database is"
+description: "Explain what a database is, read a simple table, and say why PayDeck keeps a ledger instead of a balance."
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can read a database table, and explain why a payments app records every movement of money.
+
+## Why it matters
+
+A server forgets everything when it restarts, just like memory forgets when the power goes off. Everything PayDeck must remember (people, accounts, cards, every payment) lives in a **database**. In Part 5 you will write database queries, and in Part 6 the PayDeck API will use a database called **PostgreSQL**.
+
+## The idea
+
+A **database** is a program whose whole job is storing data safely and finding it again quickly. Most databases you will meet organise data into **tables**, like spreadsheets:
+
+**cards**
+
+| id | account_id | nickname | last4 | status |
+| --- | --- | --- | --- | --- |
+| 7 | 42 | Everyday | 4242 | ACTIVE |
+| 8 | 42 | Travel | 1881 | FROZEN |
+| 9 | 51 | Groceries | 3005 | ACTIVE |
+
+- Each **row** is one thing: one card.
+- Each **column** is one fact about it.
+- The **id** column gives every row a unique number, so other tables can point at it. The `account_id` column points at a row in the `accounts` table. That pointing is what makes this a **relational** database.
+
+You ask a database questions in a language called **SQL**, such as "give me every card of account 42 that is active". You will learn it in Module 20.
+
+Databases also promise that a change either happens completely or not at all. If the server crashes halfway through moving money, the database undoes the half-finished change. This is called a **transaction**, and for a payments app it is essential.
+
+### Why PayDeck keeps a ledger
+
+You might expect PayDeck to store each balance as one number and change it. It does not. It stores every movement of money in a **ledger**, like a bank statement:
+
+**ledger_entries** (simplified)
+
+| account_id | amount_cents | description |
+| --- | --- | --- |
+| 42 | +100000 | Opening balance |
+| 42 | +2550 | Top-up |
+| 42 | −1200 | Corner Café |
+
+The balance is the sum: 100,000 + 2,550 − 1,200 = 101,350 cents, or $1,013.50. If anyone ever asks "why is my balance this?", the answer is right there, line by line. Real banks work this way, and so will you, in Module 24.
+
+## Worked example: following a card payment
+
+When someone pays $12.00 at Corner Café with card 7:
+
+1. The server looks up card 7 in the `cards` table and checks it is `ACTIVE`.
+2. It adds up account 42's ledger to check there is enough money.
+3. In one **transaction**, it adds a `−1200` row to the ledger and a row to a `card_payments` table.
+4. Only when both are saved does it answer "approved".
+
+## Try it
+
+<Exercise title="Try it: read the tables">
+Using the `cards` table above: which account owns the Travel card, and could someone pay with it right now?
+
+<Fragment slot="hint">Find the row whose nickname is Travel, then read across.</Fragment>
+<Fragment slot="solution">The Travel card (id 8) belongs to account 42, the same account as Everyday. Its status is `FROZEN`, so a payment with it would be declined until the owner unfreezes it.</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Storing money as decimals">
+Computers cannot store most decimal numbers exactly: 0.1 + 0.2 comes out as 0.30000000000000004. That is why PayDeck stores **whole cents** everywhere. You will see this bug with your own eyes in Module 4.
+</Aside>
+
+## Recap
+
+- A **database** stores data safely, even when the server restarts.
+- Data lives in **tables** of **rows** and **columns**; ids let tables point at each other.
+- A **transaction** makes a group of changes all-or-nothing.
+- PayDeck keeps a **ledger** of every money movement, and works out balances from it.
+
+<Quiz
+	questions={[
+		{
+			question: 'In a table of cards, what is one row?',
+			options: ['One fact about every card', 'One card', 'The whole database'],
+			answer: 1,
+			explanation: 'Each row is one thing; each column is one fact about it.',
+		},
+		{
+			question: 'Why does a payment use a database transaction?',
+			options: ['So it runs faster', 'So the ledger and the payment are saved together or not at all', 'So it can be undone by the customer'],
+			answer: 1,
+			explanation: 'A transaction prevents half-finished changes, such as money leaving without a payment record.',
+		},
+		{
+			question: 'How does PayDeck know a balance?',
+			options: ['It stores one number and changes it', 'It adds up every ledger entry for the account', 'It asks the phone'],
+			answer: 1,
+			explanation: 'The ledger is the source of truth; the balance is calculated from it.',
+		},
+	]}
+/>
+
+<MarkComplete />

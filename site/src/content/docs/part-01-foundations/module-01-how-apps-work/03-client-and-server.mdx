@@ -1,0 +1,106 @@
+---
+title: "1.3 Client and server"
+description: "Explain which parts of an app run on your phone and which run on a server, and why."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can say what a client and a server are, and decide which side a piece of work belongs on.
+
+## Why it matters
+
+This whole course builds two programs. The **PayDeck app** (React Native) runs on phones and Macs. The **PayDeck API** (Java with Spring Boot) runs on a server. "Full-stack" just means you build both. Knowing which job belongs where is the first design decision in any app.
+
+## The idea
+
+Picture a restaurant.
+
+- You, at the table, are the **client**. You look at the menu, decide, and ask for things.
+- The kitchen is the **server**. It keeps the ingredients, follows the recipes, and sends food out.
+- The waiter carries orders in and dishes out. (In the next lesson you will meet the waiter's real name: the **API**.)
+
+In software, a **client** is the program the person uses: an app on a phone, or a website in a browser. A **server** is a program running on a computer somewhere else, usually in a data centre, that many clients talk to at once.
+
+### Why not do everything on the phone?
+
+Because some things must be shared and trusted:
+
+| Job | Where | Why |
+| --- | --- | --- |
+| Drawing buttons and screens | Client | Only this person sees them, and it must feel instant |
+| Checking a form ("is this an email address?") | Both | The client checks for speed; the server checks again because it cannot trust the client |
+| Knowing your balance | Server | Your balance must be the same on your phone, your Mac, and your bank statement |
+| Deciding whether a card payment is approved | Server | If the phone decided, anyone could change the app to always say yes |
+| Remembering who is signed in | Both | The phone keeps a token; the server checks it on every request |
+
+The rule of thumb: **the client is for showing and asking; the server is for deciding and remembering.** Anything to do with money, permissions or shared data belongs on the server.
+
+<Aside type="note" title="A server is just a computer">
+There is nothing magic about a server. It is a computer running a program that waits for requests. In Part 6 your own Mac will be the server, and in Part 10 you will move it to a computer on the internet.
+</Aside>
+
+## Worked example: checking your balance in PayDeck
+
+1. You open PayDeck. The **client** draws the wallet screen with a loading spinner.
+2. The client sends a request over HTTPS: "what is the balance of account 42?" It includes proof of who you are.
+3. The **server** checks that you are allowed to see account 42.
+4. The server works out the balance from its records and sends it back.
+5. The client replaces the spinner with **$1,243.50**.
+
+Notice that the phone never stores the "true" balance. It only displays what the server said most recently.
+
+## Try it
+
+<Exercise title="Try it: client or server?">
+For each job, decide whether it belongs on the client, the server, or both:
+
+1. Showing a list of your cards
+2. Freezing a card so nobody can use it
+3. Making sure an amount like "12.5" is a valid number
+4. Sending a notification to the account owner when a payment is declined
+
+<Fragment slot="hint">Ask: does this need to be trusted, or shared between devices? Then it belongs on the server.</Fragment>
+<Fragment slot="solution">
+1. **Both:** the server sends the list, the client draws it.
+2. **Server:** the freeze must apply everywhere and cannot be faked by a modified app. The client only asks for it.
+3. **Both:** the client checks so you see the problem instantly; the server checks again because a client can be modified.
+4. **Server:** it knows about the payment and who the owner is, even when the owner's phone is switched off.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Trusting the client">
+A classic beginner bug is checking something only in the app, such as "you may not spend more than your limit". Anyone can modify or imitate an app, so every rule that protects money or data must be checked on the server too.
+</Aside>
+
+## Recap
+
+- The **client** is what people use; the **server** is the shared program that many clients talk to.
+- Clients show and ask. Servers decide and remember.
+- Money, permissions and shared data always belong on the server.
+- PayDeck has a client (the React Native app) and a server (the Spring Boot API). Building both is "full-stack".
+
+<Quiz
+	questions={[
+		{
+			question: 'Where should PayDeck decide whether a payment is approved?',
+			options: ['In the app on the phone', 'On the server', 'Either, it does not matter'],
+			answer: 1,
+			explanation: 'Decisions about money must be made on the server, where nobody can tamper with them.',
+		},
+		{
+			question: 'The app already checked the amount. Why does the server check again?',
+			options: ['Servers are slow', 'A modified app could skip the check', 'It does not need to'],
+			answer: 1,
+			explanation: 'The server cannot know whether the request came from the real, unmodified app.',
+		},
+	]}
+/>
+
+<MarkComplete />

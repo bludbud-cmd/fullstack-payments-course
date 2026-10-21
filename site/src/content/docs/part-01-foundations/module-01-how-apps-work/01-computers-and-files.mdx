@@ -1,0 +1,101 @@
+---
+title: "1.1 Computers and files"
+description: "Name the parts of a computer that matter to a programmer, and explain what a file and a program are."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can explain what a processor, memory, storage, a file and a program are, in your own words.
+
+## Why it matters
+
+Everything you build in this course is files: PayDeck's app is a folder of text files, and its server is another folder of text files. When something goes wrong, the error message will talk about files, memory and programs. Knowing what those words mean turns a scary message into a clue.
+
+## The idea
+
+Think of a computer as a kitchen.
+
+| Part | In the kitchen | What it does |
+| --- | --- | --- |
+| **Processor** (CPU) | The cook | Follows instructions, one tiny step at a time, billions of times a second |
+| **Memory** (RAM) | The worktop | Holds what the cook is working on *right now*. Fast, but cleared when the power goes off |
+| **Storage** (SSD) | The cupboards | Keeps things for later, even when the power is off. Slower to reach than the worktop |
+
+A **file** is one thing in the cupboard: a named bundle of data kept in storage. A photo is a file. So is a song, a document, and every piece of code you will write.
+
+A **program** is a file (or a group of files) full of instructions. When you open an app, the computer copies the program from storage onto the worktop (memory), and the cook (processor) starts following its instructions.
+
+Files live in **folders**, and folders live inside other folders. The full address of a file, such as `/Users/asha/Projects/paydeck/App.tsx`, is called its **path**. You will use paths all the time from Module 2 onwards.
+
+<Aside type="tip" title="Text files are special">
+Most files you use every day (photos, videos) are not meant to be read by people. Code is different: it is plain **text**, which you can open and read in any text editor. That is why programmers can share, compare and review each other's work line by line.
+</Aside>
+
+## Worked example: follow a photo
+
+Here is what happens when you open a photo on your Mac:
+
+1. You double-click `beach.jpg` in Finder. Finder knows the file's path, so it knows where in storage the photo is.
+2. macOS sees the `.jpg` ending (the **file extension**) and picks a program that understands photos: Preview.
+3. The Preview program is copied from storage into memory, and the processor starts running it.
+4. Preview reads `beach.jpg` from storage into memory, turns the data into coloured dots, and draws them on the screen.
+5. When you close Preview, the memory it used is freed. The photo is still safe in storage.
+
+If you edit the photo and quit **without saving**, your edit is lost: it only ever lived in memory. Saving means copying it from memory back into storage. This is exactly why your code editor asks you to save.
+
+## Try it
+
+<Exercise title="Try it: find a file's path">
+Open **Finder**, find any file (a photo or document), and work out its full path.
+
+<Fragment slot="hint">In Finder, choose **View → Show Path Bar**. The bar at the bottom shows every folder the file is inside.</Fragment>
+<Fragment slot="hint2">Hold the **Option** key and right-click the file. One of the menu items copies the path for you.</Fragment>
+<Fragment slot="solution">With the file selected, hold **Option**, right-click, and choose **Copy "…" as Pathname**. Paste it into a note. It will look like `/Users/yourname/Pictures/beach.jpg`: each `/` separates one folder from the next, starting at the very top of your disk.</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title='"I saved it but it is gone"'>
+Usually the file was saved, just not where you expected. Check the folder shown in the save dialog, or search with Spotlight (Command + Space). Programmers avoid this by always knowing the **path** of the file they are working on.
+</Aside>
+
+<Aside type="caution" title="Memory versus storage">
+People often say "memory" when they mean storage. A Mac with "8 GB memory and 256 GB storage" has 8 GB of worktop and 256 GB of cupboards. When a program says it is **out of memory**, more disk space will not help; closing other programs will.
+</Aside>
+
+## Recap
+
+- The **processor** follows instructions, **memory** holds what is in use right now, and **storage** keeps files when the power is off.
+- A **file** is named data in storage, and its **path** says exactly where it is.
+- A **program** is a file of instructions. Running it means loading it into memory for the processor to follow.
+- Code is plain text, which is why people can read it, share it and review it.
+
+<Quiz
+	questions={[
+		{
+			question: 'You edited a document and the power went off before you saved. Where was your edit?',
+			options: ['In storage', 'In memory', 'On the internet'],
+			answer: 1,
+			explanation: 'Unsaved work lives in memory, which is cleared when the power goes off. Saving copies it into storage.',
+		},
+		{
+			question: 'What is /Users/asha/Projects/paydeck/App.tsx?',
+			options: ['A program', 'A path', 'A processor'],
+			answer: 1,
+			explanation: 'It is the path of a file: every folder it is inside, separated by slashes, then the file name.',
+		},
+		{
+			question: 'Why can programmers read each other’s code?',
+			options: ['Code is stored as plain text', 'Every Mac comes with a code reader', 'Code is a kind of photo'],
+			answer: 0,
+			explanation: 'Code is plain text, so any text editor can open it.',
+		},
+	]}
+/>
+
+<MarkComplete />
