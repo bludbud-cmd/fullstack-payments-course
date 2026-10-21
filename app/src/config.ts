@@ -1,9 +1,20 @@
 import { Platform } from 'react-native';
 
 /**
- * Where the PayDeck API runs. On your Mac it is localhost. The Android
- * emulator is a separate (virtual) device, so it reaches your Mac through
- * the special address 10.0.2.2. Part 10 points this at the deployed API.
+ * Where your deployed API lives (Module 36). Change this to your own address
+ * before building a release. It must be https://, because release builds of
+ * Android and macOS refuse plain http:// to other computers.
  */
-export const API_BASE_URL =
-  Platform.OS === 'android' ? 'http://10.0.2.2:8080' : 'http://localhost:8080';
+const PRODUCTION_API_URL = 'https://api.example.com';
+
+/**
+ * Where the PayDeck API runs. While you develop (__DEV__ is true) it is your
+ * Mac: localhost on the Mac itself, and the special address 10.0.2.2 from the
+ * Android emulator, which is a separate (virtual) device. Release builds use
+ * the deployed API.
+ */
+export const API_BASE_URL = __DEV__
+  ? Platform.OS === 'android'
+    ? 'http://10.0.2.2:8080'
+    : 'http://localhost:8080'
+  : PRODUCTION_API_URL;

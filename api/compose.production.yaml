@@ -1,0 +1,35 @@
+# Runs the whole PayDeck back end on one server: the API and its database.
+#   cp .env.example .env      then fill in .env
+#   docker compose -f compose.production.yaml up -d --build
+#
+# Put a web server with HTTPS (such as Caddy) in front of port 8080.
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: paydeck
+      POSTGRES_USER: paydeck
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env}
+    volumes:
+      - paydeck-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paydeck -d paydeck"]
+      interval: 5s
+      retries: 10
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: jdbc:postgresql://postgres:5432/paydeck
+      DATABASE_USERNAME: paydeck
+    ports:
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  paydeck-data:

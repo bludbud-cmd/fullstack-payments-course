@@ -24,3 +24,11 @@ jobs:
           java-version: 25
           cache: maven
       - run: ./mvnw -B verify
+
+  # Checks that the Dockerfile still builds. Nothing is published here; see
+  # release-api.yml for that.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --tag paydeck-api:ci api

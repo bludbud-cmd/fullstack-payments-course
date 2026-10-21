@@ -93,6 +93,31 @@ cd macos && pod install && cd ..
 npm run macos
 ```
 
+## Release it
+
+Part 10 (Module 36) turns the app into something other people can install.
+
+1. **Point it at your API.** Set `PRODUCTION_API_URL` in `src/config.ts` to your deployed API's `https://` address. Debug builds keep using your Mac; release builds use this address.
+2. **Android.** Make an upload key once, and keep it safe (Google Play needs the same key for every update):
+
+   ```sh
+   keytool -genkeypair -v -storetype PKCS12 -keystore paydeck-upload.keystore \
+     -alias paydeck -keyalg RSA -keysize 2048 -validity 10000
+   ```
+
+   Then tell Gradle where it is, in `~/.gradle/gradle.properties` (outside the project, so it never reaches git):
+
+   ```properties
+   PAYDECK_UPLOAD_STORE_FILE=/Users/you/keys/paydeck-upload.keystore
+   PAYDECK_UPLOAD_STORE_PASSWORD=...
+   PAYDECK_UPLOAD_KEY_ALIAS=paydeck
+   PAYDECK_UPLOAD_KEY_PASSWORD=...
+   ```
+
+   `cd android && ./gradlew bundleRelease` makes the `.aab` file for Google Play, and `./gradlew assembleRelease` makes an `.apk` you can install directly. Without an upload key, release builds are signed with the debug key, which is fine for your own phone.
+3. **macOS.** In Xcode, open `macos/PayDeck.xcworkspace`, choose **Product → Archive**, then **Distribute App → Custom → Copy App**. Without a paid Apple Developer account the app is unsigned, so people open it the first time with right-click → **Open**. Signing and notarizing, so it opens with a double-click, is an optional bonus lesson.
+4. **Let CI do it.** Pushing a tag such as `app-v1.0.0` runs `.github/workflows/release-app.yml`, which tests and builds both, and attaches the `.apk`, `.aab` and zipped Mac app to the run. To sign Android builds there, add the repository secrets `ANDROID_UPLOAD_KEYSTORE_BASE64` (from `base64 -i paydeck-upload.keystore`), `ANDROID_UPLOAD_STORE_PASSWORD`, `ANDROID_UPLOAD_KEY_ALIAS` and `ANDROID_UPLOAD_KEY_PASSWORD`.
+
 ## Check it
 
 ```sh
