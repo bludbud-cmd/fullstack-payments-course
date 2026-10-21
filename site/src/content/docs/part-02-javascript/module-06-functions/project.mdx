@@ -1,0 +1,84 @@
+---
+title: "Mini-project: grade calculator"
+description: "Build a grade report from small functions: average, letter grade, and a formatted report line."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Use Module 6's skills to build a program from small, tested functions.
+
+## The task
+
+A teacher has each student's test scores (0 to 100). Write `grades.js` that prints a report:
+
+```
+Asha   avg 85.0  B
+Ben    avg 91.3  A
+Chen   avg 58.7  F  (needs support)
+```
+
+Write **at least three functions**:
+
+1. `average(scores)`: the average of a list of scores. Add them up with a loop, then divide by `scores.length` (the number of scores).
+2. `letterGrade(avg)`: `A` for 90 and up, `B` for 80 and up, `C` for 70 and up, `D` for 60 and up, otherwise `F`.
+3. `reportLine(name, scores)`: returns one line of the report as a string, using the other two. Averages are shown with one decimal place, and an `F` gets `(needs support)` after it.
+
+Use these students:
+
+```js
+reportLine("Asha", [78, 92, 85]);
+reportLine("Ben", [88, 95, 91]);
+reportLine("Chen", [61, 55, 60]);
+```
+
+Before printing the report, **test each function on its own** with a few `console.log` checks, such as `letterGrade(90)` (should be `A`) and `letterGrade(89.9)` (should be `B`).
+
+<Exercise title="Check your work">
+Your output should match the report above. Then check the edge cases: what does your `average` do with an empty list `[]`? Make it return `0` instead of `NaN`.
+
+<Fragment slot="hint">`letterGrade` is a chain of `if` statements, each with an early `return`, from the highest grade down.</Fragment>
+<Fragment slot="hint2">`.padEnd(6)` lines up the names; `.toFixed(1)` shows one decimal place.</Fragment>
+<Fragment slot="solution">
+
+```js
+function average(scores) {
+  if (scores.length === 0) return 0;
+  let total = 0;
+  for (let i = 0; i < scores.length; i++) {
+    total += scores[i];
+  }
+  return total / scores.length;
+}
+
+function letterGrade(avg) {
+  if (avg >= 90) return "A";
+  if (avg >= 80) return "B";
+  if (avg >= 70) return "C";
+  if (avg >= 60) return "D";
+  return "F";
+}
+
+function reportLine(name, scores) {
+  const avg = average(scores);
+  const grade = letterGrade(avg);
+  const note = grade === "F" ? "  (needs support)" : "";
+  return `${name.padEnd(6)} avg ${avg.toFixed(1).padStart(4)}  ${grade}${note}`;
+}
+
+console.log(letterGrade(90), letterGrade(89.9)); // A B
+console.log(average([]));                        // 0
+
+console.log(reportLine("Asha", [78, 92, 85]));
+console.log(reportLine("Ben", [88, 95, 91]));
+console.log(reportLine("Chen", [61, 55, 60]));
+```
+
+Without the empty-list check, `average([])` is `0 / 0`, which is `NaN`, and the report would say `avg NaN`. Checking for the unusual input first, then handling the normal case, is a habit you will use in every PayDeck form.
+</Fragment>
+</Exercise>
+
+<MarkComplete />

@@ -1,0 +1,134 @@
+---
+title: "7.1 Arrays"
+description: "Keep lists of values in arrays: read, add, search and loop over them."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can create arrays, read and change their items, and loop over them.
+
+## Why it matters
+
+Apps are full of lists: your cards, your transactions, the people a card is shared with. The PayDeck API sends the app a list of transactions, and the Activity screen draws one row per item. In JavaScript, a list is an **array**.
+
+## The idea
+
+An array is an ordered list of values in square brackets:
+
+```js
+const cards = ["Everyday", "Travel", "Groceries"];
+```
+
+- Each value is an **item** (or element), at a numbered **position**, called its **index**.
+- Indexes start at **0**: `cards[0]` is `"Everyday"`, `cards[2]` is `"Groceries"`.
+- `cards.length` is the number of items: `3`. So the last item is `cards[cards.length - 1]`.
+- Asking for a position that does not exist gives `undefined`, not an error.
+
+An array can hold any values: numbers, strings, booleans, other arrays, and (next lesson) objects.
+
+### Common array methods
+
+| Code | What it does | Result |
+| --- | --- | --- |
+| `cards.push("Gifts")` | add to the end | `cards` now has 4 items |
+| `cards.pop()` | remove the last item and return it | `"Gifts"` |
+| `cards.includes("Rent")` | is it in the list? | `false` |
+| `cards.indexOf("Travel")` | where is it? (`-1` if missing) | `1` |
+| `cards.slice(1, 3)` | a copy of positions 1 up to (not including) 3 | `["Travel", "Groceries"]` |
+| `cards.join(", ")` | one string with a separator | `"Everyday, Travel, Groceries"` |
+
+Note that `const` stops you replacing the whole array with a new one, but you can still change what is inside it with `push` and `pop`.
+
+### Looping over an array
+
+You can use a counting `for` loop, as in Module 6. But when you just want each item, `for…of` is simpler:
+
+```js
+for (const card of cards) {
+  console.log(card);
+}
+```
+
+Read it as "for each `card` of `cards`". No index, no `length`, no off-by-one mistakes.
+
+## Worked example: adding up the month
+
+```js
+const amounts = [2000, -1250, -7000, 15000, -480];
+
+let inCents = 0;
+let outCents = 0;
+for (const amount of amounts) {
+  if (amount > 0) {
+    inCents += amount;
+  } else {
+    outCents += -amount;
+  }
+}
+
+console.log(`${amounts.length} transactions`);         // 5 transactions
+console.log(`Money in:  ${inCents} cents`);            // Money in:  17000 cents
+console.log(`Money out: ${outCents} cents`);           // Money out: 8730 cents
+```
+
+- One loop visits every amount once.
+- `-amount` flips the sign, so money out is counted as a positive total.
+
+## Try it
+
+<Exercise title="Try it: the biggest payment">
+Using the `amounts` array above, find the **largest payment out** (the most negative number), and print it as a positive amount: `Biggest payment: 7000 cents`.
+
+<Fragment slot="hint">Keep a variable for "the biggest so far", starting at 0, and update it inside a `for…of` loop whenever you find a bigger payment.</Fragment>
+<Fragment slot="solution">
+
+```js
+let biggest = 0;
+for (const amount of amounts) {
+  if (amount < 0 && -amount > biggest) {
+    biggest = -amount;
+  }
+}
+console.log(`Biggest payment: ${biggest} cents`);
+```
+
+"Keep the best so far and compare each item to it" is a pattern you will use over and over.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="cards[3] is undefined">
+Indexes start at 0, so a list of 3 items has positions 0, 1 and 2. `cards[cards.length]` is always one past the end.
+</Aside>
+
+## Recap
+
+- An **array** is an ordered list in `[ ]`; items are numbered from **0**.
+- `.length` counts items; `arr[arr.length - 1]` is the last one.
+- `push`, `pop`, `includes`, `indexOf`, `slice` and `join` cover most everyday needs.
+- `for (const item of array)` visits each item.
+
+<Quiz
+	questions={[
+		{
+			question: 'What is `["a", "b", "c"][1]`?',
+			options: ['"a"', '"b"', '"c"'],
+			answer: 1,
+			explanation: 'Indexes start at 0, so 1 is the second item.',
+		},
+		{
+			question: 'What does `["a", "b"].indexOf("z")` return?',
+			options: ['0', 'undefined', '-1'],
+			answer: 2,
+			explanation: 'indexOf returns -1 when the item is not in the array.',
+		},
+	]}
+/>
+
+<MarkComplete />

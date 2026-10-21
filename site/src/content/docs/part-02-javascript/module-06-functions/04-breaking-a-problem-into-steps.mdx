@@ -1,0 +1,155 @@
+---
+title: "6.4 Breaking a problem into steps"
+description: "Turn a big task into small functions that each do one job, and build the program from them."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can take a task described in words, split it into steps, and write one small function per step.
+
+## Why it matters
+
+"Build a payments app" is too big to start on. "Write a function that says whether a card can pay this amount" is not. Every program you will write, PayDeck included, is many small functions stacked together. Being able to see the small steps inside a big task is the core skill of programming, more than any piece of syntax.
+
+## The idea
+
+1. **Write the task in plain words.** No code yet.
+2. **Underline the verbs.** Each action ("check", "work out", "format") is a candidate function.
+3. **Decide each function's inputs and output** before writing its body. If you cannot say what goes in and what comes out, the step is not clear yet.
+4. **Write and test one function at a time**, starting with the smallest.
+5. **Combine them** in a short main section that reads almost like the plain-words version.
+
+A good function does **one** job, has a name that says what it does (usually a verb: `formatMoney`, `canPay`), and is short enough to read without scrolling.
+
+## Worked example: a monthly statement
+
+**Task in words:** "Given a starting balance and a list of the month's transactions, print each transaction, then the closing balance, and warn if it went below zero."
+
+**Verbs:** print each transaction, *work out* the closing balance, *warn* if negative. Plus formatting money, which several steps need.
+
+**Inputs and outputs:**
+
+| Function | Takes | Returns |
+| --- | --- | --- |
+| `formatMoney` | cents | a string like `$12.50` |
+| `closingBalance` | starting cents, list of amounts | cents |
+| `statementLine` | description, amount | a string |
+
+**Code**, smallest first:
+
+```js
+function formatMoney(cents) {
+  const sign = cents < 0 ? "-" : "";
+  return `${sign}$${(Math.abs(cents) / 100).toFixed(2)}`;
+}
+
+function statementLine(description, amountCents) {
+  return `${description.padEnd(14)} ${formatMoney(amountCents)}`;
+}
+
+function closingBalance(startCents, amounts) {
+  let balance = startCents;
+  for (let i = 0; i < amounts.length; i++) {
+    balance += amounts[i];
+  }
+  return balance;
+}
+
+// Main: reads like the task.
+const startCents = 5000;
+const descriptions = ["Top-up", "Corner Café", "Bookshop"];
+const amounts = [2000, -1250, -7000];
+
+for (let i = 0; i < amounts.length; i++) {
+  console.log(statementLine(descriptions[i], amounts[i]));
+}
+
+const endCents = closingBalance(startCents, amounts);
+console.log(`Closing balance: ${formatMoney(endCents)}`);
+if (endCents < 0) {
+  console.log("Warning: your balance is below zero.");
+}
+```
+
+Output:
+
+```
+Top-up         $20.00
+Corner Café    -$12.50
+Bookshop       -$70.00
+Closing balance: -$12.50
+Warning: your balance is below zero.
+```
+
+- `Math.abs` removes the minus sign, so the sign can go before the `$`.
+- `.padEnd(14)` adds spaces up to 14 characters so the amounts line up.
+- The lists in square brackets are **arrays**, coming in Module 7. Here, all you need is that `amounts[i]` is the item at position `i`.
+
+Because each function does one thing, you can check each on its own: `formatMoney(-1250)` should be `-$12.50`; `closingBalance(0, [1, 2])` should be `3`.
+
+<Aside type="note" title="Real PayDeck never goes below zero">
+In PayDeck, a payment that would take the balance below zero is declined. This statement program is just practice, and spotting that rule as its own step ("check the balance first") is exactly the kind of thinking this lesson is about.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: plan before you code">
+Task: "For a card payment, decide whether it is approved. Decline it if the card is frozen, if it is over the card's spending limit (when there is one), or if there is not enough money. Print either `Approved: $X` or `Declined: reason`."
+
+List the functions you would write, with inputs and outputs, then write them.
+
+<Fragment slot="hint">One function can find the decline reason (or `null`), and another can turn the result into the message. A limit of `null` can mean "no limit".</Fragment>
+<Fragment slot="solution">
+
+```js
+function declineReason(isFrozen, limitCents, balanceCents, amountCents) {
+  if (isFrozen) return "this card is frozen";
+  if (limitCents !== null && amountCents > limitCents) return "over the card's limit";
+  if (amountCents > balanceCents) return "not enough money";
+  return null;
+}
+
+function paymentMessage(reason, amountCents) {
+  return reason === null
+    ? `Approved: $${(amountCents / 100).toFixed(2)}`
+    : `Declined: ${reason}`;
+}
+
+console.log(paymentMessage(declineReason(false, null, 5000, 1200), 1200));  // Approved: $12.00
+console.log(paymentMessage(declineReason(false, 1000, 5000, 1200), 1200));  // Declined: over the card's limit
+```
+
+An `if` whose body is a single `return` can be written on one line without braces, as above. The deciding and the wording are separate, so you could translate the messages without touching the rules.
+</Fragment>
+</Exercise>
+
+## Recap
+
+- Write the task in words, find the verbs, and make each a function.
+- Decide each function's inputs and output before writing it.
+- Small, well-named functions that do one job are easy to test one at a time.
+- The main part of the program should read almost like the plain-words task.
+
+<Quiz
+	questions={[
+		{
+			question: 'What should you decide before writing a function’s body?',
+			options: ['Its line count', 'What goes in and what comes out', 'Which file it goes in'],
+			answer: 1,
+			explanation: 'If the inputs and output are clear, the body usually follows.',
+		},
+		{
+			question: 'Which is the best function name?',
+			options: ['doStuff', 'calculateClosingBalance', 'x2'],
+			answer: 1,
+			explanation: 'A verb that says exactly what it does.',
+		},
+	]}
+/>
+
+<MarkComplete />

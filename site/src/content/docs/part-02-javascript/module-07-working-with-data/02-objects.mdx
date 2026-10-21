@@ -1,0 +1,170 @@
+---
+title: "7.2 Objects"
+description: "Group related values into objects, read and change their properties, and combine objects with arrays."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can describe a real thing, such as a card, as an object, and work with lists of objects.
+
+## Why it matters
+
+A PayDeck card is not one value but several: its ID, nickname, last four digits, status and spending limit. An **object** keeps them together under one name. Almost all the data an app handles is objects inside arrays: an array of card objects, an array of transaction objects.
+
+## The idea
+
+An object is a group of named values in curly braces:
+
+```js
+const card = {
+  id: "c1",
+  nickname: "Everyday",
+  last4: "4242",
+  status: "ACTIVE",
+  spendingLimitCents: null,
+};
+```
+
+- Each `name: value` pair is a **property**. The name is also called the **key**.
+- Read a property with a dot: `card.nickname` is `"Everyday"`.
+- Or with square brackets and a string: `card["last4"]`. This is useful when the property name is in a variable.
+- Change one: `card.status = "FROZEN";`. Add one the same way.
+- Reading a property that does not exist gives `undefined`.
+
+### Handy object tools
+
+**Destructuring** pulls properties out into variables:
+
+```js
+const { nickname, last4 } = card;
+console.log(nickname, last4); // Everyday 4242
+```
+
+**Spreading** copies an object, optionally changing some properties:
+
+```js
+const frozenCard = { ...card, status: "FROZEN" };
+// card is unchanged; frozenCard is a new object
+```
+
+React relies on this "copy with changes" style heavily, so it is worth getting used to now.
+
+### Arrays of objects
+
+```js
+const transactions = [
+  { description: "Top-up", amountCents: 2000, type: "TOP_UP" },
+  { description: "Corner Café", amountCents: -1250, type: "CARD_PAYMENT" },
+  { description: "Bookshop", amountCents: -7000, type: "CARD_PAYMENT" },
+];
+
+console.log(transactions[1].description); // Corner Café
+```
+
+`transactions[1]` is the second object; `.description` reads a property from it.
+
+## Worked example: printing activity
+
+```js
+function formatMoney(cents) {
+  const sign = cents < 0 ? "−" : "+";
+  return `${sign}$${(Math.abs(cents) / 100).toFixed(2)}`;
+}
+
+for (const tx of transactions) {
+  console.log(`${tx.description.padEnd(12)} ${formatMoney(tx.amountCents)}`);
+}
+```
+
+```
+Top-up       +$20.00
+Corner Café  −$12.50
+Bookshop     −$70.00
+```
+
+This is, almost line for line, what PayDeck's `ActivityRow` component does, except it draws on a screen instead of printing.
+
+Objects can also be **parameters**. Passing one object with named properties is clearer than many positional arguments:
+
+```js
+function describe({ nickname, last4, status }) {
+  return `${nickname} •••• ${last4} (${status})`;
+}
+console.log(describe(card)); // Everyday •••• 4242 (ACTIVE)
+```
+
+The parameter is destructured right in the brackets, so the order of properties no longer matters.
+
+## Try it
+
+<Exercise title="Try it: freeze a card in a list">
+Given this array, write a function `freeze(cards, id)` that returns a **new** array where the card with that `id` has `status: "FROZEN"`, leaving every other card, and the original array, unchanged.
+
+```js
+const cards = [
+  { id: "c1", nickname: "Everyday", status: "ACTIVE" },
+  { id: "c2", nickname: "Travel", status: "ACTIVE" },
+];
+```
+
+<Fragment slot="hint">Make an empty array, loop over `cards`, and push either the card itself or a spread copy with the new status.</Fragment>
+<Fragment slot="solution">
+
+```js
+function freeze(cards, id) {
+  const result = [];
+  for (const card of cards) {
+    if (card.id === id) {
+      result.push({ ...card, status: "FROZEN" });
+    } else {
+      result.push(card);
+    }
+  }
+  return result;
+}
+
+const updated = freeze(cards, "c2");
+console.log(updated[1].status); // FROZEN
+console.log(cards[1].status);   // ACTIVE: the original is untouched
+```
+
+In the next lesson you will write this in one line with `map`.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="TypeError: Cannot read properties of undefined (reading 'nickname')">
+You wrote something like `card.nickname`, but `card` itself is `undefined`, often because you used an index that does not exist (`cards[5]`) or a search found nothing. Print the object before reading from it.
+</Aside>
+
+## Recap
+
+- An **object** groups named values (properties) in `{ }`. Read them with `obj.name` or `obj["name"]`.
+- Destructuring, `const { a, b } = obj`, pulls properties into variables.
+- Spreading, `{ ...obj, change: value }`, makes a changed copy.
+- Real data is usually an **array of objects**.
+
+<Quiz
+	questions={[
+		{
+			question: 'How do you read the status of the first card in an array called cards?',
+			options: ['cards.status[0]', 'cards[0].status', 'cards.0.status'],
+			answer: 1,
+			explanation: 'cards[0] is the first object; .status reads its property.',
+		},
+		{
+			question: 'After `const b = { ...a, x: 2 }`, what happens to a?',
+			options: ['a.x becomes 2', 'a is unchanged', 'a is deleted'],
+			answer: 1,
+			explanation: 'Spreading copies a into a new object; the original is not modified.',
+		},
+	]}
+/>
+
+<MarkComplete />

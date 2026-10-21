@@ -1,0 +1,141 @@
+---
+title: "7.4 JSON"
+description: "Turn objects into JSON text and back, and save data to a file with Node."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can convert between objects and JSON, and read and write JSON files.
+
+## Why it matters
+
+Objects live in a program's memory, and disappear when it stops. To send data across the internet, or to save it in a file, it must become **text**. **JSON** (JavaScript Object Notation) is the text format almost every API uses, including PayDeck's. Every request the app sends and every response it gets is JSON.
+
+## The idea
+
+JSON looks almost exactly like JavaScript objects and arrays, with stricter rules:
+
+```json
+{
+  "id": "c1",
+  "nickname": "Everyday",
+  "status": "ACTIVE",
+  "spendingLimitCents": null,
+  "tags": ["daily", "food"]
+}
+```
+
+- Property names **must** be in double quotes.
+- Strings use double quotes only.
+- Values can be strings, numbers, `true`, `false`, `null`, arrays and objects. No functions, no `undefined`, no comments.
+- No trailing comma after the last item.
+
+Two built-in functions convert:
+
+| Function | From | To |
+| --- | --- | --- |
+| `JSON.stringify(value)` | an object or array | a JSON string |
+| `JSON.parse(text)` | a JSON string | an object or array |
+
+## Worked example
+
+```js
+const card = { id: "c1", nickname: "Everyday", status: "ACTIVE", spendingLimitCents: null };
+
+const text = JSON.stringify(card);
+console.log(text);
+// {"id":"c1","nickname":"Everyday","status":"ACTIVE","spendingLimitCents":null}
+console.log(typeof text); // string
+
+const back = JSON.parse(text);
+console.log(back.nickname); // Everyday
+```
+
+`JSON.stringify(card, null, 2)` adds line breaks and two-space indentation, which is easier for people to read.
+
+### Saving to a file
+
+Node can read and write files with its built-in `fs` (file system) module:
+
+```js
+const fs = require("node:fs");
+
+const cards = [
+  { id: "c1", nickname: "Everyday" },
+  { id: "c2", nickname: "Travel" },
+];
+
+fs.writeFileSync("cards.json", JSON.stringify(cards, null, 2));
+
+const loaded = JSON.parse(fs.readFileSync("cards.json", "utf8"));
+console.log(loaded.length); // 2
+```
+
+- `require("node:fs")` loads Node's file tools.
+- `writeFileSync(name, text)` writes text to a file (creating or replacing it).
+- `readFileSync(name, "utf8")` reads it back as text. `"utf8"` says it is text, not raw bytes.
+
+Open `cards.json` in VS Code: it is plain, readable text. You just saved data that survives the program stopping, the same job a database does on a much bigger scale.
+
+## Try it
+
+<Exercise title="Try it: spot the invalid JSON">
+This is meant to be JSON, but `JSON.parse` rejects it. Find all three problems.
+
+```
+{
+  nickname: "Travel",
+  'last4': "1881",
+  "status": "ACTIVE",
+}
+```
+
+<Fragment slot="hint">Check the quotes on every name, and the very end.</Fragment>
+<Fragment slot="solution">
+1. `nickname` has no quotes; JSON names need double quotes.
+2. `'last4'` uses single quotes; JSON only allows double quotes.
+3. There is a comma after the last property.
+
+Fixed: `{ "nickname": "Travel", "last4": "1881", "status": "ACTIVE" }`
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title={`SyntaxError: Unexpected token '<', "<!DOCTYPE "... is not valid JSON`}>
+`JSON.parse` got text that is not valid JSON. Often it is an HTML error page from a server instead of the JSON you expected. Print the text before parsing it.
+</Aside>
+
+<Aside type="caution" title="[object Object]">
+You put an object where a string was expected, such as `"Card: " + card`. Use `JSON.stringify(card)` to see what is inside, or read the specific property you meant.
+</Aside>
+
+## Recap
+
+- **JSON** is the text format for sending and saving data: like objects and arrays, but with double-quoted names and no trailing commas.
+- `JSON.stringify` turns values into JSON text; `JSON.parse` turns it back.
+- Node's `fs.writeFileSync` and `fs.readFileSync` save and load files.
+
+<Quiz
+	questions={[
+		{
+			question: 'What is the type of `JSON.stringify({ a: 1 })`?',
+			options: ['object', 'string', 'number'],
+			answer: 1,
+			explanation: 'stringify turns values into a JSON string.',
+		},
+		{
+			question: 'Which is valid JSON?',
+			options: ['{ name: "Asha" }', "{ 'name': 'Asha' }", '{ "name": "Asha" }'],
+			answer: 2,
+			explanation: 'JSON needs double quotes around names and strings.',
+		},
+	]}
+/>
+
+<MarkComplete />
