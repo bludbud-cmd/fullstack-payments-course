@@ -1,18 +1,28 @@
 import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useAccount, useCards } from '../api/hooks';
 import { Button } from '../components/Button';
 import { PaymentCardView } from '../components/PaymentCardView';
+import { QueryState } from '../components/QueryState';
 import { Screen } from '../components/Screen';
 import { useNavigation } from '../navigation/NavigationContext';
-import { useWallet } from '../state/WalletContext';
 import { spacing, useTheme } from '../theme';
 
 export function CardsScreen() {
   const theme = useTheme();
   const { navigate } = useNavigation();
-  const { state } = useWallet();
-  const openCards = state.cards.filter(card => card.status !== 'CANCELLED');
+  const account = useAccount();
+  const cards = useCards();
 
+  if (!account.data || !cards.data) {
+    return (
+      <Screen title="Cards">
+        <QueryState queries={[account, cards]} />
+      </Screen>
+    );
+  }
+
+  const openCards = cards.data.filter(card => card.status !== 'CANCELLED');
   return (
     <Screen title="Cards">
       <Button
@@ -33,7 +43,7 @@ export function CardsScreen() {
             onPress={() => navigate({ name: 'card', cardId: card.id })}
             style={styles.cardSlot}
           >
-            <PaymentCardView card={card} currency={state.account.currency} />
+            <PaymentCardView card={card} currency={account.data.currency} />
           </Pressable>
         ))}
       </View>
