@@ -1,0 +1,207 @@
+---
+title: "13.4 Validation"
+description: "Check what people type with small validation functions, show helpful errors at the right moment, and only submit valid forms."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can write validation functions, show their errors at a sensible moment, and stop a form from being submitted until it is valid.
+
+## Why it matters
+
+People make typos. A good form catches them straight away, says exactly what is wrong and how to fix it, and never sends nonsense to the server. In PayDeck, a card name cannot be empty and a limit must be a real amount; the app checks first so people get instant help, and the API checks again because it can never trust what an app sends (Module 22).
+
+## The idea
+
+Write each rule as a small **pure function**: it takes the text, and returns an error message, or `null` when the input is fine. "Pure" means it only looks at its input and has no side effects, so it is easy to read and test.
+
+```ts
+export function nicknameError(nickname: string): string | null {
+  const trimmed = nickname.trim();
+  if (trimmed.length === 0) {
+    return 'Give the card a name';
+  }
+  if (trimmed.length > 50) {
+    return 'Use 50 characters or fewer';
+  }
+  return null;
+}
+```
+
+Good error messages say what to **do**, not what went wrong: "Give the card a name" rather than "Invalid input".
+
+**When** to show errors matters too. Showing "Give the card a name" before someone has typed anything feels like being told off. A common, simple rule: show errors only after the first attempt to submit. Keep a `submitted` flag in state, and pass errors to fields only when it is true. After that, errors update live as they fix them.
+
+## Worked example
+
+`validation.ts`:
+
+```ts
+export function nicknameError(nickname: string): string | null {
+  const trimmed = nickname.trim();
+  if (trimmed.length === 0) {
+    return 'Give the card a name';
+  }
+  if (trimmed.length > 50) {
+    return 'Use 50 characters or fewer';
+  }
+  return null;
+}
+
+/** A spending limit is optional: an empty box means "no limit". */
+export function limitError(text: string): string | null {
+  if (text.trim() === '') {
+    return null;
+  }
+  const value = Number(text);
+  if (Number.isNaN(value) || value <= 0) {
+    return 'Enter an amount like 200, or leave it empty';
+  }
+  return null;
+}
+```
+
+`App.tsx`, using `Field` (lesson 13.2) and `Button` (lesson 13.3):
+
+```tsx
+import { useState } from 'react';
+import { ScrollView, Text } from 'react-native';
+import { Button } from './Button';
+import { Field } from './Field';
+import { limitError, nicknameError } from './validation';
+
+export default function App() {
+  const [nickname, setNickname] = useState('');
+  const [limit, setLimit] = useState('');
+  const [submitted, setSubmitted] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const errors = {
+    nickname: nicknameError(nickname),
+    limit: limitError(limit),
+  };
+  const valid = errors.nickname === null && errors.limit === null;
+
+  function create() {
+    setSubmitted(true);
+    if (!valid) {
+      return;
+    }
+    setMessage(`Created ${nickname.trim()}`);
+    setNickname('');
+    setLimit('');
+    setSubmitted(false);
+  }
+
+  return (
+    <ScrollView contentContainerStyle={{ padding: 24, gap: 16 }}>
+      <Field
+        label="Card name"
+        value={nickname}
+        onChangeText={setNickname}
+        placeholder="Groceries"
+        error={submitted ? errors.nickname : null}
+      />
+      <Field
+        label="Monthly limit (optional)"
+        value={limit}
+        onChangeText={setLimit}
+        placeholder="200"
+        keyboardType="decimal-pad"
+        error={submitted ? errors.limit : null}
+      />
+      <Button title="Create card" onPress={create} />
+      {message && <Text>{message}</Text>}
+    </ScrollView>
+  );
+}
+```
+
+Try it:
+
+1. Press **Create card** with an empty form: "Give the card a name" appears under the first field, and its border turns red.
+2. Type a name: the error disappears as you type, because errors are worked out again on every render.
+3. Type `abc` as the limit and press the button: the limit error shows, and nothing is created.
+4. Fix it and press again: "Created Groceries", and the form clears.
+
+Notice that errors are never stored in state. They are **calculated** from the current text every render, so they can never be out of date. Only `submitted` (whether to show them) is state.
+
+<Aside type="note" title="Why trim?">
+`'   '.trim()` is `''`. Without trimming, a name of three spaces would pass the "not empty" check and create a card with an invisible name.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: test the rules">
+Validation functions are plain TypeScript, so you can check them without any screens. Create `validation.check.ts` that logs the result of `nicknameError` and `limitError` for these inputs, and run it with `node validation.check.ts`: `''`, `'   '`, `'Gym'`, a 51-character name (`'x'.repeat(51)`), and limits `''`, `'200'`, `'-5'`, `'abc'`, `'12.345'`.
+
+<Fragment slot="hint">Import with the file extension: `import { limitError, nicknameError } from './validation.ts';`. Node needs it; React Native does not mind either way. Node also prints a warning about the "module type" of the file; it is harmless, and comes from the project's `package.json` being set up for React Native rather than Node.</Fragment>
+<Fragment slot="solution">
+
+```ts
+import { limitError, nicknameError } from './validation.ts';
+
+for (const name of ['', '   ', 'Gym', 'x'.repeat(51)]) {
+  console.log(JSON.stringify(name.slice(0, 10)), nicknameError(name));
+}
+for (const limit of ['', '200', '-5', 'abc', '12.345']) {
+  console.log(JSON.stringify(limit), limitError(limit));
+}
+```
+
+```
+"" Give the card a name
+"   " Give the card a name
+"Gym" null
+"xxxxxxxxxx" Use 50 characters or fewer
+"" null
+"200" null
+"-5" Enter an amount like 200, or leave it empty
+"abc" Enter an amount like 200, or leave it empty
+"12.345" null
+```
+
+The last line is a bug: 12.345 dollars is not a real amount, because there is no such thing as half a cent. `Number` is too relaxed for money. Lesson 13.6 fixes it. In Module 35 you will turn checks like these into automatic tests.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Storing errors in state">
+`const [error, setError] = useState(...)`, updated in `onChangeText`, easily falls out of step with the text. Calculate errors from the values instead.
+</Aside>
+
+<Aside type="caution" title="Disabling the button instead of explaining">
+A greyed-out **Create** button with no explanation leaves people guessing. Let them press it, then show what needs fixing.
+</Aside>
+
+## Recap
+
+- Each rule is a pure function returning an error message or `null`.
+- Calculate errors on every render; keep only "has the person tried to submit?" in state.
+- Show errors after the first submit, then live as they fix them.
+- Messages say how to fix the problem. The server checks again anyway.
+
+<Quiz
+	questions={[
+		{
+			question: 'What should a validation function return when the input is fine?',
+			options: ['true', 'null', "'OK'"],
+			answer: 1,
+			explanation: 'null means "no error"; a string is the message to show.',
+		},
+		{
+			question: 'Why does the app check the form if the server checks again?',
+			options: ['It does not need to', 'To help people straight away, without waiting for the server', 'Because the server cannot check'],
+			answer: 1,
+			explanation: 'The app checks for speed and friendliness; the server checks for safety.',
+		},
+	]}
+/>
+
+<MarkComplete />

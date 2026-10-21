@@ -1,0 +1,186 @@
+---
+title: "13.6 Formatting money"
+description: "Store money as whole cents, show it in any currency with Intl.NumberFormat, and read amounts people type without rounding errors."
+sidebar:
+  order: 6
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can keep amounts as whole cents, format them for any currency, and turn what someone typed into cents safely.
+
+## Why it matters
+
+Money is the one thing a payments app must never get wrong. Two habits prevent almost every money bug in the app: **store whole cents** and **format only for display**. The PayDeck API stores amounts exactly the same way (Module 24), so the app and the server always agree to the cent.
+
+## The idea
+
+### Why whole cents
+
+JavaScript numbers cannot store most decimal fractions exactly:
+
+```js
+0.1 + 0.2      // 0.30000000000000004
+1.1 * 100      // 110.00000000000001
+```
+
+Tiny errors like these add up across thousands of transactions, and comparisons such as `total === 0.3` fail. Whole numbers do not have this problem. So PayDeck stores $12.50 as `1250` cents, adds and compares cents, and only divides by 100 at the last moment, to show the amount.
+
+### Showing amounts: Intl.NumberFormat
+
+`Intl.NumberFormat` is built into JavaScript. It knows how every currency is written:
+
+```ts
+function formatMoney(cents: number, currency: Currency): string {
+  return new Intl.NumberFormat('en', { style: 'currency', currency }).format(cents / 100);
+}
+
+formatMoney(12550, 'USD');      // "$125.50"
+formatMoney(12550, 'EUR');      // "€125.50"
+formatMoney(12550, 'INR');      // "₹125.50"
+formatMoney(123456789, 'USD');  // "$1,234,567.89"
+```
+
+The first argument, `'en'`, is the **locale**: the language and region whose conventions to follow. With `'de-DE'` (German), euros come out as `1.234,50 €`; with `'en-IN'` (English in India), rupees as `₹1,23,456.50`. PayDeck uses `'en'` everywhere for simplicity.
+
+### Reading amounts people type
+
+`Number(text)` is too relaxed for money: it accepts `'1e3'` (1000), `'12.345'` (half a cent), and `' '` (0). Instead, check the exact shape with a **regular expression**: a pattern that text must match.
+
+```ts
+/^(\d{1,7})(?:[.,](\d{1,2}))?$/
+```
+
+Read it piece by piece:
+
+| Part | Means |
+| --- | --- |
+| `^` and `$` | The pattern must match the **whole** text, from start to end |
+| `(\d{1,7})` | 1 to 7 digits (the whole amount), remembered as group 1 |
+| `(?: ... )?` | An optional part |
+| `[.,]` | A dot or a comma (many countries write 12,50) |
+| `(\d{1,2})` | 1 or 2 digits (the cents), remembered as group 2 |
+
+So `12`, `12.5`, `12.50` and `12,50` match; `12.345`, `-5`, `abc` and `1e3` do not.
+
+## Worked example
+
+`money.ts`:
+
+```ts
+export type Currency = 'USD' | 'EUR' | 'GBP' | 'INR';
+
+export function formatMoney(cents: number, currency: Currency): string {
+  return new Intl.NumberFormat('en', { style: 'currency', currency }).format(cents / 100);
+}
+
+/**
+ * Turns what someone typed ("12", "12.5", "12.50") into cents (1250).
+ * Returns null when it is not a valid positive amount with at most two decimals.
+ */
+export function parseMoneyInput(text: string): number | null {
+  const match = /^(\d{1,7})(?:[.,](\d{1,2}))?$/.exec(text.trim());
+  if (match === null) {
+    return null;
+  }
+  const whole = Number(match[1]);
+  const fraction = Number((match[2] ?? '').padEnd(2, '0'));
+  const cents = whole * 100 + fraction;
+  return cents > 0 ? cents : null;
+}
+```
+
+How `parseMoneyInput('12.5')` works:
+
+1. `.exec` returns the match, with `match[1]` = `'12'` and `match[2]` = `'5'`. If there were no cents, `match[2]` would be `undefined`, hence `?? ''`.
+2. `'5'.padEnd(2, '0')` is `'50'`: "5" after the dot means 50 cents, not 5.
+3. `12 * 100 + 50` = `1250`. All whole numbers; no rounding anywhere.
+
+Now fix the bug from lesson 13.4. In `validation.ts`, replace the `Number` check:
+
+```ts
+import { parseMoneyInput } from './money';
+
+export function limitError(text: string): string | null {
+  if (text.trim() === '') {
+    return null;
+  }
+  return parseMoneyInput(text) === null ? 'Enter an amount like 200, or leave it empty' : null;
+}
+```
+
+`12.345` is now rejected. And in the form, show the limit nicely when the card is created:
+
+```tsx
+const cents = parseMoneyInput(limit);
+setMessage(
+  `Created ${nickname.trim()}, ${cents === null ? 'no limit' : `limit ${formatMoney(cents, 'USD')}`}`,
+);
+```
+
+Typing `200` gives "Created Groceries, limit $200.00".
+
+<Aside type="note" title="Signs in lists">
+Transaction lists usually show a sign on every amount: "+$100.00" for a top-up, "−$3.50" for a coffee. PayDeck's `formatSignedMoney` in `app/src/money.ts` adds the sign and formats `Math.abs(cents)`. It uses the real minus sign `−`, which lines up better than the hyphen `-`.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a total in two currencies">
+Given `const payments = [1250, 399, 10000, 1]` (cents), show the total as US dollars and as euros, and the average payment in dollars, rounded to the nearest cent.
+
+<Fragment slot="hint">Add up whole cents first. For the average, divide and then `Math.round`, so you are back to whole cents before formatting.</Fragment>
+<Fragment slot="solution">
+
+```ts
+const payments = [1250, 399, 10000, 1];
+const total = payments.reduce((sum, cents) => sum + cents, 0);   // 11650
+const average = Math.round(total / payments.length);             // 2913 (from 2912.5)
+
+console.log(formatMoney(total, 'USD'));    // $116.50
+console.log(formatMoney(total, 'EUR'));    // €116.50
+console.log(formatMoney(average, 'USD'));  // $29.13
+```
+
+`reduce` walks through the array keeping a running result, starting from `0`. Rounding happens once, at the end, on purpose. In Module 24 you will see the API make the same decision about rounding, in Java.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Storing 12.5 instead of 1250">
+Once an amount is a decimal, rounding errors creep in. Convert to cents the moment you read input, and stay in cents.
+</Aside>
+
+<Aside type="caution" title="Building the string yourself">
+`'$' + (cents / 100).toFixed(2)` works for dollars, but gets euros, rupees and thousands separators wrong. Use `Intl.NumberFormat`.
+</Aside>
+
+## Recap
+
+- Store and calculate money as whole cents; divide by 100 only to display.
+- `Intl.NumberFormat(locale, { style: 'currency', currency })` formats any currency.
+- Parse input with a strict pattern, not `Number`, and return `null` for anything invalid.
+- The app and the API use the same rules, so they agree to the cent.
+
+<Quiz
+	questions={[
+		{
+			question: 'How does PayDeck store $12.50?',
+			options: ['12.5', '"12.50"', '1250'],
+			answer: 2,
+			explanation: 'Whole cents avoid rounding errors.',
+		},
+		{
+			question: 'What does parseMoneyInput("12.345") return?',
+			options: ['1234.5', '1235', 'null'],
+			answer: 2,
+			explanation: 'More than two decimal places is not a valid amount of money.',
+		},
+	]}
+/>
+
+<MarkComplete />

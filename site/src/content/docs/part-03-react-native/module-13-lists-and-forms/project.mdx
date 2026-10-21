@@ -1,0 +1,174 @@
+---
+title: "Mini-project: expense list"
+description: "Build an expense tracker with a validated form, a FlatList of expenses, a running total in proper money format, and delete buttons."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Everything from this module in one screen: a form you can fill in from the keyboard, validation, a list, and money done right.
+
+## What it does
+
+```
+Total: $15.50
+
+What for?   [ Lunch          ]
+Amount      [ 12             ]
+            [  Add expense   ]
+
+Lunch                     $12.00   Delete
+Coffee                     $3.50   Delete
+```
+
+## Requirements
+
+1. An `Expense` type with `id`, `description` and `amountCents`. Keep the expenses in state, newest first.
+2. A form using your `Field` and `Button` components:
+   - "What for?" must not be empty; "Amount" must be a valid amount (use `parseMoneyInput`).
+   - Errors appear after the first attempt to add, then update as the person types.
+   - The first field is focused at the start; Return moves to the amount; Return in the amount adds the expense.
+   - After adding, the form clears.
+3. A `FlatList` of expenses, with the form and the total in its `ListHeaderComponent`, separators between rows, and "No expenses yet" when empty.
+4. The total and every amount are formatted with `formatMoney`.
+5. Each row has a **Delete** button, with an accessibility label naming the expense ("Delete Lunch").
+6. On a wide Mac window, the content is at most 560 points wide and centred.
+
+<Exercise title="Check your work">
+Add three expenses using only the keyboard on the Mac. Try to add an empty one and one with an amount of `abc` or `4.567`. Delete the middle one and check the total.
+
+<Fragment slot="hint">For a unique `id`, `String(Date.now())` (the current time in milliseconds) is good enough here. In Part 7 the server gives each item its ID.</Fragment>
+<Fragment slot="hint2">Add to the front of the list with `setExpenses([expense, ...expenses])`, and delete with `filter`, which returns a new array without the item.</Fragment>
+<Fragment slot="solution">
+
+Copy `Field.tsx` (with the `ref` prop from lesson 13.5), `Button.tsx` and `money.ts` into the project. Then `App.tsx`:
+
+```tsx
+import { useRef, useState } from 'react';
+import { FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Button } from './Button';
+import { Field } from './Field';
+import { formatMoney, parseMoneyInput } from './money';
+
+type Expense = {
+  id: string;
+  description: string;
+  amountCents: number;
+};
+
+function descriptionError(text: string): string | null {
+  return text.trim() === '' ? 'Say what it was for' : null;
+}
+
+function amountError(text: string): string | null {
+  return parseMoneyInput(text) === null ? 'Enter an amount like 4.50' : null;
+}
+
+export default function App() {
+  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [description, setDescription] = useState('');
+  const [amount, setAmount] = useState('');
+  const [submitted, setSubmitted] = useState(false);
+  const amountInput = useRef<TextInput>(null);
+
+  const errors = { description: descriptionError(description), amount: amountError(amount) };
+  const totalCents = expenses.reduce((sum, e) => sum + e.amountCents, 0);
+
+  function add() {
+    setSubmitted(true);
+    const cents = parseMoneyInput(amount);
+    if (errors.description !== null || cents === null) {
+      return;
+    }
+    const expense = { id: String(Date.now()), description: description.trim(), amountCents: cents };
+    setExpenses([expense, ...expenses]);
+    setDescription('');
+    setAmount('');
+    setSubmitted(false);
+  }
+
+  function remove(id: string) {
+    setExpenses(expenses.filter((e) => e.id !== id));
+  }
+
+  return (
+    <FlatList
+      contentContainerStyle={styles.page}
+      keyboardShouldPersistTaps="handled"
+      data={expenses}
+      keyExtractor={(e) => e.id}
+      ListHeaderComponent={
+        <View style={styles.form}>
+          <Text style={styles.total}>Total: {formatMoney(totalCents, 'USD')}</Text>
+          <Field
+            label="What for?"
+            value={description}
+            onChangeText={setDescription}
+            placeholder="Coffee"
+            autoFocus
+            returnKeyType="next"
+            submitBehavior="submit"
+            onSubmitEditing={() => amountInput.current?.focus()}
+            error={submitted ? errors.description : null}
+          />
+          <Field
+            ref={amountInput}
+            label="Amount"
+            value={amount}
+            onChangeText={setAmount}
+            placeholder="4.50"
+            keyboardType="decimal-pad"
+            returnKeyType="done"
+            onSubmitEditing={add}
+            error={submitted ? errors.amount : null}
+          />
+          <Button title="Add expense" onPress={add} />
+        </View>
+      }
+      renderItem={({ item }) => (
+        <View style={styles.row}>
+          <Text style={styles.description}>{item.description}</Text>
+          <Text style={styles.amount}>{formatMoney(item.amountCents, 'USD')}</Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Delete ${item.description}`}
+            onPress={() => remove(item.id)}
+            hitSlop={8}
+          >
+            <Text style={styles.delete}>Delete</Text>
+          </Pressable>
+        </View>
+      )}
+      ItemSeparatorComponent={() => <View style={styles.separator} />}
+      ListEmptyComponent={<Text style={styles.empty}>No expenses yet. Add your first one above.</Text>}
+    />
+  );
+}
+
+const styles = StyleSheet.create({
+  page: { padding: 24, width: '100%', maxWidth: 560, alignSelf: 'center' },
+  form: { gap: 16, marginBottom: 24 },
+  total: { fontSize: 28, fontWeight: '700' },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, minHeight: 44 },
+  description: { flex: 1, fontSize: 16 },
+  amount: { fontSize: 16, fontVariant: ['tabular-nums'] },
+  delete: { color: '#b3261e' },
+  separator: { height: 1, backgroundColor: '#dfe1ea' },
+  empty: { color: '#5d6177' },
+});
+```
+
+Notes:
+
+- The whole screen is the `FlatList`; the form lives in its header so everything scrolls together, with no `ScrollView` around the list.
+- `add` uses the `cents` it has just parsed, rather than parsing again, and returns early when anything is invalid.
+- `hitSlop={8}` makes the small "Delete" text easier to hit, by 8 points on every side, without making it look bigger.
+- The expenses vanish when the app restarts. Saving them on the device is lesson 14.5.
+</Fragment>
+</Exercise>
+
+<MarkComplete />

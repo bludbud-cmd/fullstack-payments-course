@@ -1,0 +1,211 @@
+---
+title: "13.3 Buttons"
+description: "Build your own Button component with Pressable: variants, a pressed look, a disabled state, and the right size and role."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can build a `Button` component that looks the same on Android and the Mac, shows when it is pressed or disabled, and comes in primary, secondary and danger styles.
+
+## Why it matters
+
+React Native's built-in `Button` looks different on each platform and can hardly be styled. Real apps make their own, once, and use it everywhere. PayDeck has one `Button` for "Add money", "Freeze", "Cancel card" and every other action.
+
+## The idea
+
+`Pressable` makes anything respond to presses. Its `style` prop can be a **function** that receives `{ pressed }` and returns styles, so the button can change while a finger or the mouse is down:
+
+```tsx
+<Pressable style={({ pressed }) => [styles.button, pressed && styles.dimmed]} />
+```
+
+A good button component has:
+
+- **Variants** for different kinds of action. A **primary** button (filled) is the main action on a screen; there should be only one. **Secondary** (outlined) is for other actions. **Danger** (red) is for things that are hard to undo, like cancelling a card.
+- A **disabled** state: it does not respond, looks faded, and tells screen readers it is unavailable through `accessibilityState={{ disabled }}`.
+- A **size** of at least 44 points high (lesson 12.6), with `accessibilityRole="button"`.
+
+## Worked example
+
+`Button.tsx`:
+
+```tsx
+import { Pressable, StyleSheet, Text } from 'react-native';
+
+type ButtonProps = {
+  title: string;
+  onPress: () => void;
+  variant?: 'primary' | 'secondary' | 'danger';
+  disabled?: boolean;
+};
+
+const colours = {
+  primary: '#3c4fe0',
+  secondary: '#3c4fe0',
+  danger: '#b3261e',
+};
+
+export function Button({ title, onPress, variant = 'primary', disabled = false }: ButtonProps) {
+  const colour = colours[variant];
+  const filled = variant === 'primary';
+
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ disabled }}
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.button,
+        { borderColor: colour, backgroundColor: filled ? colour : 'transparent' },
+        (pressed || disabled) && styles.dimmed,
+      ]}
+    >
+      <Text style={[styles.title, { color: filled ? '#ffffff' : colour }]}>{title}</Text>
+    </Pressable>
+  );
+}
+
+const styles = StyleSheet.create({
+  button: {
+    minHeight: 44,
+    borderWidth: 1.5,
+    borderRadius: 10,
+    paddingHorizontal: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  title: { fontSize: 16, fontWeight: '600' },
+  dimmed: { opacity: 0.6 },
+});
+```
+
+`colours[variant]` looks up the colour by the variant's name. TypeScript knows `variant` can only be one of the three keys, so the lookup is always safe.
+
+Use it in `App.tsx`:
+
+```tsx
+import { useState } from 'react';
+import { Text, View } from 'react-native';
+import { Button } from './Button';
+
+export default function App() {
+  const [frozen, setFrozen] = useState(false);
+  const [cancelled, setCancelled] = useState(false);
+
+  return (
+    <View style={{ padding: 24, gap: 12 }}>
+      <Text>Card is {cancelled ? 'cancelled' : frozen ? 'frozen' : 'active'}</Text>
+      <Button title="Add money" onPress={() => {}} disabled={cancelled} />
+      <Button
+        title={frozen ? 'Unfreeze' : 'Freeze'}
+        variant="secondary"
+        onPress={() => setFrozen(!frozen)}
+        disabled={cancelled}
+      />
+      <Button title="Cancel card" variant="danger" onPress={() => setCancelled(true)} disabled={cancelled} />
+    </View>
+  );
+}
+```
+
+Press and hold a button: it fades while pressed. Press **Cancel card**: all three buttons fade and stop responding.
+
+<Aside type="tip" title="Showing progress">
+While an action is in progress, change the title ("Adding…") and disable the button, so nobody presses twice. PayDeck's top-up button does exactly that, and in Module 24 you will see the server side of "pressed twice".
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a loading state">
+Add an optional `loading` prop to `Button`. While loading, the button shows an `ActivityIndicator` instead of its title, and cannot be pressed. Test it with a button that turns `loading` on for two seconds with `setTimeout`.
+
+<Fragment slot="hint">A loading button behaves like a disabled one, so you can work out `const inactive = disabled || loading;` and use it where you used `disabled`.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+export function Button({ title, onPress, variant = 'primary', disabled = false, loading = false }: ButtonProps) {
+  const colour = colours[variant];
+  const filled = variant === 'primary';
+  const inactive = disabled || loading;
+
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ disabled: inactive, busy: loading }}
+      disabled={inactive}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.button,
+        { borderColor: colour, backgroundColor: filled ? colour : 'transparent' },
+        (pressed || inactive) && styles.dimmed,
+      ]}
+    >
+      {loading ? (
+        <ActivityIndicator color={filled ? '#ffffff' : colour} />
+      ) : (
+        <Text style={[styles.title, { color: filled ? '#ffffff' : colour }]}>{title}</Text>
+      )}
+    </Pressable>
+  );
+}
+```
+
+Add `loading?: boolean` to `ButtonProps` and `ActivityIndicator` to the import. Then:
+
+```tsx
+const [saving, setSaving] = useState(false);
+<Button
+  title="Save"
+  loading={saving}
+  onPress={() => {
+    setSaving(true);
+    setTimeout(() => setSaving(false), 2000);
+  }}
+/>
+```
+
+`busy: loading` lets screen readers announce that the button is working.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="onPress={doSomething()}">
+The same mistake as in Module 10: the parentheses call the function while drawing. Pass the function itself, `onPress={doSomething}`, or wrap it, `onPress={() => doSomething(card.id)}`.
+</Aside>
+
+<Aside type="caution" title="Two primary buttons on one screen">
+If everything looks important, nothing does. Pick the one main action; make the others secondary.
+</Aside>
+
+## Recap
+
+- Build your own button with `Pressable`; its `style` can be a function of `{ pressed }`.
+- Variants show the kind of action: primary, secondary, danger.
+- Disabled buttons fade, ignore presses and say so through `accessibilityState`.
+- Keep buttons at least 44 points high with `accessibilityRole="button"`.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which variant suits "Cancel card", which cannot be undone?',
+			options: ['primary', 'secondary', 'danger'],
+			answer: 2,
+			explanation: 'Red signals a destructive action.',
+		},
+		{
+			question: "What does Pressable's style function receive?",
+			options: ['The button title', 'An object with pressed: true or false', 'The theme'],
+			answer: 1,
+			explanation: 'That lets the style change while the button is held down.',
+		},
+	]}
+/>
+
+<MarkComplete />

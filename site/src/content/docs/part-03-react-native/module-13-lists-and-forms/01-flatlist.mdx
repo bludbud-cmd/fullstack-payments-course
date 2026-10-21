@@ -1,0 +1,204 @@
+---
+title: "13.1 FlatList"
+description: "Show long lists that scroll smoothly, with FlatList: items, keys, separators, a header and an empty state."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can show a long list with `FlatList`, with a key per item, separators, a header and a message for when the list is empty.
+
+## Why it matters
+
+A PayDeck account that has been used for a year has thousands of transactions. Drawing all of them at once, with `map` inside a `ScrollView`, makes the screen slow to open and uses lots of memory. `FlatList` only draws the rows you can see (plus a few either side), and reuses them as you scroll. That is why PayDeck's activity screen stays fast.
+
+## The idea
+
+`FlatList` takes the data and a function that draws one item:
+
+```tsx
+<FlatList
+  data={transactions}
+  keyExtractor={(item) => item.id}
+  renderItem={({ item }) => <TransactionRow item={item} />}
+/>
+```
+
+- `data` is the array.
+- `keyExtractor` returns each item's unique key, the same job `key` did with `map`.
+- `renderItem` receives an object with the `item` (and its `index`), and returns its JSX. `({ item })` destructures it.
+
+Useful extras, each taking a component or JSX:
+
+| Prop | Shows |
+| --- | --- |
+| `ItemSeparatorComponent` | Something between rows, such as a thin line |
+| `ListHeaderComponent` | Something above the first row, scrolling with the list |
+| `ListFooterComponent` | Something after the last row |
+| `ListEmptyComponent` | Something when `data` is empty |
+
+A `FlatList` scrolls by itself. Do not put it inside a `ScrollView`; make it the scrolling part of the screen.
+
+## Worked example
+
+200 sample transactions:
+
+```tsx
+import { FlatList, StyleSheet, Text, View } from 'react-native';
+
+type Transaction = {
+  id: string;
+  description: string;
+  amountCents: number;
+  date: string;
+};
+
+const transactions: Transaction[] = Array.from({ length: 200 }, (_, i) => ({
+  id: `t${i + 1}`,
+  description: i % 3 === 0 ? 'Top-up' : `Coffee #${i + 1}`,
+  amountCents: i % 3 === 0 ? 2000 : -350,
+  date: `2026-10-${String((i % 28) + 1).padStart(2, '0')}`,
+}));
+
+function TransactionRow({ item }: { item: Transaction }) {
+  return (
+    <View style={styles.row}>
+      <View style={styles.grow}>
+        <Text style={styles.description}>{item.description}</Text>
+        <Text style={styles.date}>{item.date}</Text>
+      </View>
+      <Text style={item.amountCents < 0 ? styles.negative : styles.positive}>
+        {item.amountCents < 0 ? '−' : '+'}${(Math.abs(item.amountCents) / 100).toFixed(2)}
+      </Text>
+    </View>
+  );
+}
+
+export default function App() {
+  return (
+    <FlatList
+      data={transactions}
+      keyExtractor={(item) => item.id}
+      renderItem={({ item }) => <TransactionRow item={item} />}
+      ItemSeparatorComponent={() => <View style={styles.separator} />}
+      ListHeaderComponent={<Text style={styles.header}>Activity</Text>}
+      ListEmptyComponent={<Text style={styles.empty}>No transactions yet.</Text>}
+    />
+  );
+}
+
+const styles = StyleSheet.create({
+  header: { fontSize: 24, fontWeight: '700', padding: 16 },
+  row: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12 },
+  grow: { flex: 1 },
+  description: { fontSize: 16 },
+  date: { color: '#5d6177' },
+  positive: { color: '#1d7a46', fontSize: 16 },
+  negative: { fontSize: 16 },
+  separator: { height: 1, backgroundColor: '#dfe1ea', marginLeft: 16 },
+  empty: { padding: 16, color: '#5d6177' },
+});
+```
+
+`Array.from({ length: 200 }, (_, i) => ...)` makes an array of 200 items by calling the function with each index `i` (the `_` is a parameter we do not use). `padStart(2, '0')` turns `7` into `07`.
+
+Scroll quickly to the bottom: it stays smooth. To see the empty message, change `data={transactions}` to `data={[]}`.
+
+<Aside type="note" title="How it stays fast">
+Only the first screenful of rows is drawn when the list appears. As you scroll, FlatList draws rows just before they come into view and drops ones far out of view. This is called **virtualisation**. It is also why each row needs a stable key.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: tap to select">
+Make rows tappable. Tapping a row selects it and gives it a light blue background; tapping another row moves the selection. Show "Selected: Coffee #2" in the header, or "Nothing selected".
+
+<Fragment slot="hint">Keep `selectedId` in state (`useState<string | null>(null)`) in `App`. Pass `selected` and `onPress` props to `TransactionRow`, and use a `Pressable` instead of the outer `View`.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+function TransactionRow({ item, selected, onPress }: {
+  item: Transaction;
+  selected: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ selected }}
+      onPress={onPress}
+      style={[styles.row, selected && { backgroundColor: '#e3e7ff' }]}
+    >
+      {/* the same contents as before */}
+    </Pressable>
+  );
+}
+
+export default function App() {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = transactions.find((t) => t.id === selectedId);
+
+  return (
+    <FlatList
+      data={transactions}
+      keyExtractor={(item) => item.id}
+      renderItem={({ item }) => (
+        <TransactionRow
+          item={item}
+          selected={item.id === selectedId}
+          onPress={() => setSelectedId(item.id)}
+        />
+      )}
+      ListHeaderComponent={
+        <Text style={styles.header}>
+          {selected ? `Selected: ${selected.description}` : 'Nothing selected'}
+        </Text>
+      }
+    />
+  );
+}
+```
+
+The state lives in `App`, the **parent**, because the header and every row need it. Moving state up to the nearest common parent is a pattern you will use constantly; React calls it **lifting state up**.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="VirtualizedLists should never be nested inside plain ScrollViews">
+This warning means a `FlatList` is inside a `ScrollView`. The list can no longer tell what is visible, so it draws everything. Put other content in `ListHeaderComponent` instead.
+</Aside>
+
+<Aside type="caution" title="renderItem={(item) => ...}">
+`renderItem` gets an object **containing** the item, so `item.description` is undefined. Destructure it: `({ item }) => ...`.
+</Aside>
+
+## Recap
+
+- `FlatList` draws only visible rows, so long lists stay fast.
+- `data`, `keyExtractor` and `renderItem` are the three props you always need.
+- Separators, header, footer and empty state have their own props.
+- Keep shared state, such as the selection, in the parent.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why use FlatList rather than map inside a ScrollView for 5,000 transactions?',
+			options: ['FlatList looks nicer', 'FlatList only draws the rows on screen, so it stays fast', 'map cannot handle 5,000 items'],
+			answer: 1,
+			explanation: 'map would create all 5,000 rows at once.',
+		},
+		{
+			question: 'What does ListEmptyComponent show?',
+			options: ['A loading spinner', 'Its content when data is an empty array', 'A blank row at the end'],
+			answer: 1,
+			explanation: 'It is the place for "No transactions yet" messages.',
+		},
+	]}
+/>
+
+<MarkComplete />
