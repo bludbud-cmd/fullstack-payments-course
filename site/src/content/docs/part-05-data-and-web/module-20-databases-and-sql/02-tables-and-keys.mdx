@@ -1,0 +1,200 @@
+---
+title: "20.2 Tables and keys"
+description: "Create a table with CREATE TABLE: choose column types, give every row a primary key, and let the database refuse bad data with NOT NULL, CHECK, UNIQUE and DEFAULT."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can create a table with sensible column types, a primary key and constraints, and read the errors Postgres gives when data breaks the rules.
+
+## Why it matters
+
+In Module 16 the `Account` class refused bad values in its constructor. A database can do the same, for every row, no matter which program writes it. That matters: an API has bugs, people run SQL by hand, and two requests can arrive at the same moment. If the database itself says "a card must have a nickname" and "a limit cannot be negative", those rules hold even when the code around them fails. The PayDeck database is full of such rules.
+
+## The idea
+
+A **table** is like a spreadsheet with strict columns: each **column** has a name and a type, and each **row** is one thing, such as one card.
+
+```sql
+CREATE TABLE cards (
+    id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    nickname     VARCHAR(50)  NOT NULL,
+    last4        VARCHAR(4)   NOT NULL,
+    limit_cents  BIGINT       NOT NULL DEFAULT 50000 CHECK (limit_cents >= 0),
+    frozen       BOOLEAN      NOT NULL DEFAULT false,
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+```
+
+### Column types
+
+| Type | Holds | Java equivalent |
+| --- | --- | --- |
+| `BIGINT` | Whole numbers up to about 9.2 quintillion | `long` |
+| `INTEGER` | Whole numbers up to about 2.1 billion | `int` |
+| `VARCHAR(n)` | Text of at most `n` characters | `String` |
+| `TEXT` | Text of any length | `String` |
+| `BOOLEAN` | `true` or `false` | `boolean` |
+| `TIMESTAMPTZ` | A moment in time, with time zone | `Instant` |
+| `UUID` | A random 128-bit ID such as `0b5f...` | `UUID` |
+| `NUMERIC(p, s)` | Exact decimals | `BigDecimal` |
+
+Money is a `BIGINT` of cents, for the same reasons as in Java. Names in SQL are written in `snake_case` (lower case with underscores), so `limitCents` in Java becomes `limit_cents` in the database. SQL keywords are written in capitals by convention, but Postgres does not mind.
+
+### Keys and constraints
+
+- A **primary key** uniquely identifies each row. No two rows may share it, and it can never be empty. `GENERATED ALWAYS AS IDENTITY` makes Postgres number the rows 1, 2, 3... by itself. (The PayDeck API uses random `UUID`s instead, so IDs cannot be guessed. Same idea.)
+- **`NOT NULL`**: the column must have a value. `NULL` is SQL's "no value", like Java's `null`.
+- **`CHECK (...)`**: a condition every row must meet.
+- **`UNIQUE`**: no two rows may have the same value, for example an email address.
+- **`DEFAULT ...`**: the value used when an insert does not give one. `now()` is the current time.
+
+These rules together are called **constraints**. A row that breaks one is refused, and nothing is saved.
+
+## Worked example
+
+Open psql (`docker exec -it course-postgres psql -U course`) and paste in the `CREATE TABLE cards` statement above. Postgres answers `CREATE TABLE`. Then look at what you made with psql's `\dt` (list tables) and `\d cards` (describe a table):
+
+```
+course=# \d cards
+                                     Table "public.cards"
+   Column    |           Type           | Collation | Nullable |           Default
+-------------+--------------------------+-----------+----------+------------------------------
+ id          | bigint                   |           | not null | generated always as identity
+ nickname    | character varying(50)    |           | not null |
+ last4       | character varying(4)     |           | not null |
+ limit_cents | bigint                   |           | not null | 50000
+ frozen      | boolean                  |           | not null | false
+ created_at  | timestamp with time zone |           | not null | now()
+Indexes:
+    "cards_pkey" PRIMARY KEY, btree (id)
+Check constraints:
+    "cards_limit_cents_check" CHECK (limit_cents >= 0)
+```
+
+Add two cards. Text values go in **single quotes** in SQL. Columns you leave out get their defaults:
+
+```sql
+INSERT INTO cards (nickname, last4) VALUES ('Everyday', '4242');
+INSERT INTO cards (nickname, last4, limit_cents, frozen) VALUES ('Travel', '1881', 200000, true);
+SELECT id, nickname, last4, limit_cents, frozen FROM cards;
+```
+
+```
+ id | nickname | last4 | limit_cents | frozen
+----+----------+-------+-------------+--------
+  1 | Everyday | 4242  |       50000 | f
+  2 | Travel   | 1881  |      200000 | t
+(2 rows)
+```
+
+Postgres chose the `id`s, and filled in `limit_cents` and `frozen` for Everyday. (`f` and `t` are how psql prints `false` and `true`.)
+
+Now try to break the rules:
+
+```sql
+INSERT INTO cards (last4) VALUES ('9999');
+```
+
+```
+ERROR:  null value in column "nickname" of relation "cards" violates not-null constraint
+DETAIL:  Failing row contains (3, null, 9999, 50000, f, 2026-10-21 23:15:09.908572+00).
+```
+
+```sql
+INSERT INTO cards (nickname, last4, limit_cents) VALUES ('Oops', '9999', -500);
+```
+
+```
+ERROR:  new row for relation "cards" violates check constraint "cards_limit_cents_check"
+DETAIL:  Failing row contains (4, Oops, 9999, -500, f, 2026-10-21 23:15:09.909306+00).
+```
+
+```sql
+INSERT INTO cards (id, nickname, last4) VALUES (1, 'Copy', '4242');
+```
+
+```
+ERROR:  cannot insert a non-DEFAULT value into column "id"
+DETAIL:  Column "id" is an identity column defined as GENERATED ALWAYS.
+```
+
+Each error names the rule that was broken, and the `DETAIL` shows the row that was refused. None of these rows were saved. One side effect: the refused rows still used up the numbers 3 and 4, so the next card you add gets `id` 5. Gaps in IDs are normal and harmless; never rely on IDs having no gaps.
+
+## Try it
+
+<Exercise title="Try it: a users table">
+Create a `users` table with an automatic `id`, a `name` of up to 100 characters, and an `email` of up to 254 characters that is required and must be unique. Add Asha Rao (`asha@example.com`), then try to add another user with the same email. What does Postgres say?
+
+<Fragment slot="hint">Constraints can be combined on one column: `email VARCHAR(254) NOT NULL UNIQUE`.</Fragment>
+<Fragment slot="solution">
+
+```sql
+CREATE TABLE users (
+    id     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name   VARCHAR(100) NOT NULL,
+    email  VARCHAR(254) NOT NULL UNIQUE
+);
+INSERT INTO users (name, email) VALUES ('Asha Rao', 'asha@example.com');
+INSERT INTO users (name, email) VALUES ('Another Asha', 'asha@example.com');
+```
+
+```
+ERROR:  duplicate key value violates unique constraint "users_email_key"
+DETAIL:  Key (email)=(asha@example.com) already exists.
+```
+
+Postgres named the constraint `users_email_key` by itself. When two people try to sign up with the same email at the same instant, only this database rule can guarantee one of them is refused: two copies of the API checking "is this email taken?" at the same moment would both say no. (254 characters is the longest an email address can be.)
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title={`column "Everyday" does not exist`}>
+You used double quotes for a text value: `VALUES ("Everyday", ...)`. In SQL, text goes in **single** quotes. Double quotes are for names of columns and tables.
+</Aside>
+
+<Aside type="caution" title="value too long for type character varying(50)">
+The text is longer than the `VARCHAR(n)` allows. Shorten it, or, if the limit is wrong, change the table.
+</Aside>
+
+<Aside type="caution" title={`relation "cards" already exists`}>
+You ran `CREATE TABLE` twice. To start that table over, `DROP TABLE cards;` first. It deletes the table and all its rows, so only do that with practice data.
+</Aside>
+
+## Recap
+
+- `CREATE TABLE` defines columns with names and types; use `BIGINT` cents for money and `snake_case` names.
+- Every table has a primary key; `GENERATED ALWAYS AS IDENTITY` numbers rows automatically.
+- `NOT NULL`, `CHECK`, `UNIQUE` and `DEFAULT` make the database refuse bad data itself.
+- Text values use single quotes; `\dt` lists tables and `\d name` describes one.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why put rules like CHECK (limit_cents >= 0) in the database as well as in the API?',
+			options: ['It is faster', 'They hold for every program and every person that writes data, even when code has bugs', 'SQL requires them'],
+			answer: 1,
+			explanation: 'The database is the last line of defence for your data.',
+		},
+		{
+			question: 'Which column type should hold a balance of $125.50?',
+			options: ['VARCHAR(10) with "125.50"', 'BIGINT with 12550', 'BOOLEAN'],
+			answer: 1,
+			explanation: 'Whole cents in a BIGINT, as in Java.',
+		},
+		{
+			question: 'How do you write the text Everyday in SQL?',
+			options: ['"Everyday"', "'Everyday'", 'Everyday'],
+			answer: 1,
+			explanation: 'Single quotes for text; double quotes are for names.',
+		},
+	]}
+/>
+
+<MarkComplete />

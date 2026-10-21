@@ -1,0 +1,249 @@
+---
+title: "Mini-project: design the PayDeck database"
+description: "Design a first version of the PayDeck database: users, accounts, cards and transactions, with rules that refuse bad data, seed data, and the queries behind the app's main screens."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Time to put the module together. You will design the first version of the PayDeck database from a short brief, fill it with sample data, and write the queries behind three of the app's screens. In Part 6 the real API gets a database very like this one.
+
+## The brief
+
+PayDeck has **users**. Each user can have several **accounts**, each in one currency. Each account can have several **cards**. Money moves as **transactions**: a top-up adds money to an account, a payment with a card takes it away, a refund puts some back.
+
+The key design decision: **an account's balance is not stored anywhere.** It is the sum of the account's transactions. Top-ups and refunds are positive amounts; payments are negative. Stored balances can drift out of step with the history; a sum of the history cannot.
+
+## Set up
+
+Make a folder `~/Projects/course/sql`, and create a fresh database for the project, separate from the practice tables you made in the lessons:
+
+```sh
+docker exec course-postgres psql -U course -c 'CREATE DATABASE paydeck_design'
+```
+
+This time you write SQL in files and run them, rather than typing in psql. From the `sql` folder:
+
+```sh
+docker exec -i course-postgres psql -U course -d paydeck_design < schema.sql
+```
+
+`-d paydeck_design` picks the database, `< schema.sql` feeds the file in as input, and `-i` (without `-t` this time) lets the file through. To look around afterwards, `docker exec -it course-postgres psql -U course -d paydeck_design`.
+
+<Aside type="tip" title="Starting over">
+While designing you will want to start again often. In psql connected to the `course` database: `DROP DATABASE paydeck_design;` then `CREATE DATABASE paydeck_design;`, and run your files again. You cannot drop the database you are connected to.
+</Aside>
+
+## The tasks
+
+1. **Schema.** Write `schema.sql` with four tables. Every table has an automatic `id` primary key and a `created_at` that defaults to now.
+   - `users`: `name` (required), `email` (required, unique).
+   - `accounts`: belongs to a user (`user_id`); `currency` is required and must be `USD`, `EUR` or `GBP`.
+   - `cards`: belongs to an account (`account_id`); `nickname` and `last4` required; `status` is `ACTIVE`, `FROZEN` or `CANCELLED`, and new cards are `ACTIVE`; `limit_cents` is never negative and defaults to 50000.
+   - `transactions`: belongs to an account (`account_id`); optionally made with a card (`card_id`, empty for top-ups); `amount_cents` is required and never 0; `description` is required.
+2. **Seed data.** Run this `seed.sql` against your schema. If it fails, your schema does not match the brief yet.
+
+   ```sql
+   INSERT INTO users (name, email) VALUES
+       ('Asha Rao', 'asha@example.com'),
+       ('Ben Okafor', 'ben@example.com'),
+       ('Chen Wei', 'chen@example.com');
+
+   INSERT INTO accounts (user_id, currency) VALUES
+       (1, 'USD'), (1, 'EUR'), (2, 'USD'), (3, 'GBP');
+
+   INSERT INTO cards (account_id, nickname, last4, status, limit_cents) VALUES
+       (1, 'Everyday',   '4242', 'ACTIVE', 50000),
+       (1, 'Groceries',  '5676', 'ACTIVE', 20000),
+       (2, 'Travel',     '1881', 'FROZEN', 200000),
+       (3, 'Ben''s card', '3005', 'ACTIVE', 50000);
+
+   INSERT INTO transactions (account_id, card_id, amount_cents, description, created_at) VALUES
+       (1, NULL, 100000, 'Top-up',            '2026-10-01 09:00+00'),
+       (1, 1,     -1250, 'Coffee Corner',     '2026-10-02 08:15+00'),
+       (1, 2,     -8740, 'FreshMart',         '2026-10-03 18:30+00'),
+       (1, 1,     -3500, 'City Cinema',       '2026-10-04 20:00+00'),
+       (2, NULL,  40000, 'Top-up',            '2026-10-05 10:00+00'),
+       (2, 3,    -15000, 'Hotel Lisboa',      '2026-10-06 22:10+00'),
+       (3, NULL,  25000, 'Top-up',            '2026-10-02 12:00+00'),
+       (3, 4,     -4999, 'Bookshop',          '2026-10-07 16:45+00'),
+       (1, 2,      1200, 'FreshMart refund',  '2026-10-08 11:00+00');
+   ```
+
+   `NULL` means "no card". The times end in `+00`, meaning UTC, so everyone's results match.
+3. **Queries.** In `queries.sql`, write:
+   - **Balances:** every account with its owner's name, currency and balance. Chen's account has no transactions and must show a balance of 0, not be missing.
+   - **Statement:** account 1's transactions, newest first, with the date, description, amount and the card's `last4` (empty for top-ups).
+   - **Spending per card:** each card's nickname, how many payments it made, and how much it spent in total as a positive number, biggest spender first.
+4. **Two payments, all or nothing.** Ben pays for a taxi ($25.00) and lunch ($18.00) with his card. Record both inside one transaction, then show his account's new balance.
+5. **Prove the rules.** Write three statements that the database must refuse: setting a card's status to `LOST`, a transaction for card 99, and a transaction of 0 cents. Run them and check each is refused for the reason you expect.
+
+<Exercise title="Build it">
+Work through the five tasks. Check your balances against these: Asha's USD account 87710, her EUR account 25000, Ben's 20001, Chen's 0.
+
+<Fragment slot="hint">Use the lesson 20.2 constraints. `CHECK (currency IN ('USD', 'EUR', 'GBP'))` limits a column to a list. A foreign key column without `NOT NULL` may be empty. Create tables in the order they are pointed at: users, accounts, cards, transactions.</Fragment>
+<Fragment slot="hint2">For the balances, `LEFT JOIN` the transactions so Chen's account stays, and `coalesce(sum(t.amount_cents), 0)` turns his `NULL` sum into 0 (`coalesce` returns the first of its values that is not `NULL`). Every column you select that is not inside `sum` must be in the `GROUP BY`. For spending per card, put `t.amount_cents < 0` in the `ON` of a `LEFT JOIN`, so refunds are not counted but cards with no payments are kept.</Fragment>
+<Fragment slot="solution">
+
+`schema.sql`:
+
+```sql
+CREATE TABLE users (
+    id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name        VARCHAR(100) NOT NULL,
+    email       VARCHAR(254) NOT NULL UNIQUE,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+CREATE TABLE accounts (
+    id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id     BIGINT      NOT NULL REFERENCES users (id),
+    currency    VARCHAR(3)  NOT NULL CHECK (currency IN ('USD', 'EUR', 'GBP')),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE cards (
+    id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    account_id   BIGINT      NOT NULL REFERENCES accounts (id),
+    nickname     VARCHAR(50) NOT NULL,
+    last4        VARCHAR(4)  NOT NULL,
+    status       VARCHAR(10) NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'FROZEN', 'CANCELLED')),
+    limit_cents  BIGINT      NOT NULL DEFAULT 50000 CHECK (limit_cents >= 0),
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE transactions (
+    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    account_id    BIGINT       NOT NULL REFERENCES accounts (id),
+    card_id       BIGINT       REFERENCES cards (id),
+    amount_cents  BIGINT       NOT NULL CHECK (amount_cents <> 0),
+    description   VARCHAR(100) NOT NULL,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+```
+
+`queries.sql`, with the output of each:
+
+```sql
+-- Balances
+SELECT a.id, u.name, a.currency, coalesce(sum(t.amount_cents), 0) AS balance_cents
+FROM accounts a
+JOIN users u ON u.id = a.user_id
+LEFT JOIN transactions t ON t.account_id = a.id
+GROUP BY a.id, u.name, a.currency
+ORDER BY a.id;
+```
+
+```
+ id |    name    | currency | balance_cents
+----+------------+----------+---------------
+  1 | Asha Rao   | USD      |         87710
+  2 | Asha Rao   | EUR      |         25000
+  3 | Ben Okafor | USD      |         20001
+  4 | Chen Wei   | GBP      |             0
+(4 rows)
+```
+
+```sql
+-- Statement for account 1
+SELECT t.created_at, t.description, t.amount_cents, c.last4
+FROM transactions t
+LEFT JOIN cards c ON c.id = t.card_id
+WHERE t.account_id = 1
+ORDER BY t.created_at DESC;
+```
+
+```
+       created_at       |   description    | amount_cents | last4
+------------------------+------------------+--------------+-------
+ 2026-10-08 11:00:00+00 | FreshMart refund |         1200 | 5676
+ 2026-10-04 20:00:00+00 | City Cinema      |        -3500 | 4242
+ 2026-10-03 18:30:00+00 | FreshMart        |        -8740 | 5676
+ 2026-10-02 08:15:00+00 | Coffee Corner    |        -1250 | 4242
+ 2026-10-01 09:00:00+00 | Top-up           |       100000 |
+(5 rows)
+```
+
+```sql
+-- Spending per card
+SELECT c.nickname, count(t.id) AS payments, coalesce(-sum(t.amount_cents), 0) AS spent_cents
+FROM cards c
+LEFT JOIN transactions t ON t.card_id = c.id AND t.amount_cents < 0
+GROUP BY c.id, c.nickname
+ORDER BY spent_cents DESC, c.nickname;
+```
+
+```
+  nickname  | payments | spent_cents
+------------+----------+-------------
+ Travel     |        1 |       15000
+ Groceries  |        1 |        8740
+ Ben's card |        1 |        4999
+ Everyday   |        2 |        4750
+(4 rows)
+```
+
+Task 4:
+
+```sql
+BEGIN;
+INSERT INTO transactions (account_id, card_id, amount_cents, description) VALUES (3, 4, -2500, 'Taxi');
+INSERT INTO transactions (account_id, card_id, amount_cents, description) VALUES (3, 4, -1800, 'Lunch');
+COMMIT;
+SELECT coalesce(sum(amount_cents), 0) AS balance_cents FROM transactions WHERE account_id = 3;
+```
+
+```
+ balance_cents
+---------------
+         15701
+(1 row)
+```
+
+Task 5:
+
+```sql
+UPDATE cards SET status = 'LOST' WHERE id = 1;
+```
+
+```
+ERROR:  new row for relation "cards" violates check constraint "cards_status_check"
+```
+
+```sql
+INSERT INTO transactions (account_id, card_id, amount_cents, description) VALUES (1, 99, -500, 'Ghost shop');
+```
+
+```
+ERROR:  insert or update on table "transactions" violates foreign key constraint "transactions_card_id_fkey"
+DETAIL:  Key (card_id)=(99) is not present in table "cards".
+```
+
+```sql
+INSERT INTO transactions (account_id, amount_cents, description) VALUES (1, 0, 'Nothing');
+```
+
+```
+ERROR:  new row for relation "transactions" violates check constraint "transactions_amount_cents_check"
+```
+
+(The `DETAIL` lines for the check errors show today's time, so yours will differ.)
+
+What to notice:
+
+- `count(t.id)` and the `LEFT JOIN` kept every card; with an inner join, a brand-new card with no payments would vanish from the list.
+- Putting `t.amount_cents < 0` in the `ON` rather than the `WHERE` matters: in the `WHERE`, it would throw away the rows where a card had no transactions at all, undoing the `LEFT JOIN`.
+- Nothing yet stops a payment that is bigger than the balance, a payment on a frozen card, or a payment on account 1 made with card 4, which belongs to account 3. Those rules depend on other rows, which `CHECK` cannot see. The API enforces them in Module 24, inside transactions like the one in task 4.
+- Module 24 also upgrades `transactions` into a proper **double-entry ledger**, where every movement of money is recorded twice, once leaving one place and once arriving in another, so the books always balance.
+</Fragment>
+</Exercise>
+
+<Aside type="note" title="Keep your files">
+Keep `schema.sql`, `seed.sql` and `queries.sql`. In Module 23 you will compare your design with the one the PayDeck API creates, and see how a migration tool runs files like these for you.
+</Aside>
+
+<MarkComplete />

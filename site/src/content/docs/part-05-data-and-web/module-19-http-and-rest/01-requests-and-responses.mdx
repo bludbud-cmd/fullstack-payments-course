@@ -1,0 +1,345 @@
+---
+title: "19.1 Requests and responses"
+description: "What actually travels between an app and a server: the parts of a URL, an HTTP request and an HTTP response, seen with curl against a practice API on your Mac."
+sidebar:
+  order: 1
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can name the parts of a URL, an HTTP request and an HTTP response, and send a request with `curl`.
+
+## Why it matters
+
+When PayDeck shows your balance, the app sends a message to the API asking for it, and the API sends a message back. Those messages follow a set of rules called **HTTP** (HyperText Transfer Protocol). You used HTTP already with `fetch` in Module 8, but `fetch` hid most of the details. In Part 6 you write the server side, and in Part 7 you connect the two. Every bug in between, "the app shows nothing", "it says 401", "the list is empty", is solved by looking at the actual HTTP messages. This module teaches you to read them.
+
+## The idea
+
+HTTP is a conversation with a strict shape: the **client** (the app, your browser, or a tool such as `curl`) sends a **request**, and the **server** answers with exactly one **response**. Then the conversation is over. The server never speaks first.
+
+### The URL
+
+```
+http://localhost:4000/cards?frozen=true
+└─┬─┘  └───┬───┘ └┬─┘└─┬──┘ └────┬────┘
+scheme   host   port path    query
+```
+
+- **scheme**: `http`, or `https` for the encrypted version every real app uses.
+- **host**: which computer. `localhost` always means "this computer".
+- **port**: which program on that computer. A computer can run many servers; each listens on its own port number. Web servers on the internet use 443 for `https`, so you rarely see it written.
+- **path**: which thing on the server you mean, such as `/cards`, or `/cards/1` for card number 1.
+- **query**: extra options after a `?`, as `name=value` pairs joined by `&`.
+
+### A request
+
+```
+GET /cards/1 HTTP/1.1
+Host: localhost:4000
+Accept: */*
+
+```
+
+- The first line is the **method** (`GET`, "give me"), the path, and the HTTP version.
+- Then **headers**: `Name: value` lines with extra information (lesson 19.4).
+- Then a blank line, and an optional **body**. A `GET` has no body.
+
+### A response
+
+```
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "id": 1,
+  "nickname": "Everyday",
+  ...
+}
+```
+
+- The first line is the **status**: a number and a short phrase. `200 OK` means it worked (lesson 19.3).
+- Then headers. `Content-Type: application/json` says the body is JSON (lesson 19.5).
+- Then a blank line, and the **body**: the actual data.
+
+That is all HTTP is: text in a fixed shape. Every API you will ever use, including Stripe's, works this way.
+
+## Worked example
+
+You need a server to talk to. The course gives you a small **practice API**: a pretend card service, running on your own Mac. It keeps a couple of cards in memory and lets you list, add, change and delete them.
+
+<Steps>
+
+1. Make a folder and open it in VS Code:
+
+   ```sh
+   mkdir -p ~/Projects/course/http && cd ~/Projects/course/http
+   code .
+   ```
+
+2. Create `practice-api.mjs` and paste this in. You do not need to understand it: it uses Node's built-in `http` module, and in Part 6 you build the real thing in Java.
+
+   ```js
+   // The course's practice API: a tiny card service that runs on your Mac.
+   // You do not need to understand this code. In Part 6 you build the real one in Java.
+   import { createServer } from 'node:http';
+
+   const PORT = 4000;
+   const TOKEN = 'practice-token';
+   let nextId = 3;
+   const cards = new Map([
+     [1, { id: 1, nickname: 'Everyday', last4: '4242', limitCents: 50000, frozen: false }],
+     [2, { id: 2, nickname: 'Travel', last4: '1881', limitCents: 200000, frozen: true }],
+   ]);
+
+   function send(res, status, body, headers = {}) {
+     const text = body === undefined ? '' : JSON.stringify(body, null, 2) + '\n';
+     res.writeHead(status, {
+       ...(text ? { 'Content-Type': 'application/json' } : {}),
+       ...headers,
+     });
+     res.end(text);
+   }
+
+   async function readJson(req) {
+     let text = '';
+     for await (const chunk of req) text += chunk;
+     return JSON.parse(text);
+   }
+
+   function validCard(input, partial) {
+     if (typeof input !== 'object' || input === null || Array.isArray(input)) return 'The body must be a JSON object';
+     if (!partial || 'nickname' in input) {
+       if (typeof input.nickname !== 'string' || input.nickname.trim() === '') return 'nickname must be a non-empty string';
+     }
+     if ('limitCents' in input && (!Number.isInteger(input.limitCents) || input.limitCents < 0)) {
+       return 'limitCents must be a whole number of cents, 0 or more';
+     }
+     if ('frozen' in input && typeof input.frozen !== 'boolean') return 'frozen must be true or false';
+     return null;
+   }
+
+   async function handle(req, res) {
+     const url = new URL(req.url, `http://localhost:${PORT}`);
+     const parts = url.pathname.split('/').filter(Boolean);
+     console.log(`${req.method} ${url.pathname}${url.search}`);
+
+     if (url.pathname === '/health') {
+       return req.method === 'GET' ? send(res, 200, { status: 'UP' }) : send(res, 405, { error: 'Use GET' }, { Allow: 'GET' });
+     }
+     if (parts[0] !== 'cards' || parts.length > 2) {
+       return send(res, 404, { error: `Nothing at ${url.pathname}` });
+     }
+
+     const writing = req.method !== 'GET';
+     if (writing && req.headers.authorization !== `Bearer ${TOKEN}`) {
+       return send(res, 401, { error: 'Send the header Authorization: Bearer practice-token' }, { 'WWW-Authenticate': 'Bearer' });
+     }
+     if ((req.method === 'POST' || req.method === 'PATCH') && !(req.headers['content-type'] ?? '').startsWith('application/json')) {
+       return send(res, 415, { error: 'Send JSON, with the header Content-Type: application/json' });
+     }
+
+     if (parts.length === 1) {
+       if (req.method === 'GET') {
+         let list = [...cards.values()];
+         if (url.searchParams.has('frozen')) list = list.filter((c) => String(c.frozen) === url.searchParams.get('frozen'));
+         return send(res, 200, list);
+       }
+       if (req.method === 'POST') {
+         const input = await readJson(req);
+         const problem = validCard(input, false);
+         if (problem) return send(res, 400, { error: problem });
+         const card = {
+           id: nextId++,
+           nickname: input.nickname.trim(),
+           last4: String(1000 + ((nextId * 7919) % 9000)),
+           limitCents: input.limitCents ?? 50000,
+           frozen: false,
+         };
+         cards.set(card.id, card);
+         return send(res, 201, card, { Location: `/cards/${card.id}` });
+       }
+       return send(res, 405, { error: `${req.method} is not allowed on /cards` }, { Allow: 'GET, POST' });
+     }
+
+     const id = Number(parts[1]);
+     const card = cards.get(id);
+     if (!card) return send(res, 404, { error: `No card with id ${parts[1]}` });
+
+     if (req.method === 'GET') return send(res, 200, card);
+     if (req.method === 'PATCH') {
+       const input = await readJson(req);
+       const problem = validCard(input, true);
+       if (problem) return send(res, 400, { error: problem });
+       for (const key of ['nickname', 'limitCents', 'frozen']) if (key in input) card[key] = input[key];
+       return send(res, 200, card);
+     }
+     if (req.method === 'DELETE') {
+       cards.delete(id);
+       return send(res, 204);
+     }
+     return send(res, 405, { error: `${req.method} is not allowed on /cards/${id}` }, { Allow: 'GET, PATCH, DELETE' });
+   }
+
+   createServer((req, res) => {
+     handle(req, res).catch((err) => {
+       if (err instanceof SyntaxError) return send(res, 400, { error: `That is not valid JSON: ${err.message}` });
+       console.error(err);
+       send(res, 500, { error: 'Something went wrong on the server' });
+     });
+   }).listen(PORT, () => {
+     console.log(`Practice API running at http://localhost:${PORT}  (press Ctrl+C to stop)`);
+   });
+   ```
+
+3. Start it:
+
+   ```sh
+   node practice-api.mjs
+   ```
+
+   ```
+   Practice API running at http://localhost:4000  (press Ctrl+C to stop)
+   ```
+
+   The terminal is now busy running the server. Leave it running and **open a second Terminal window** (Cmd+N) for the next steps. When you stop the server with Ctrl+C and start it again, it forgets every change and starts with the same two cards.
+
+4. In the second window, send a request with **curl**, a command-line HTTP client that comes with macOS. `-i` asks it to show the status and headers too, not just the body:
+
+   ```sh
+   curl -i http://localhost:4000/health
+   ```
+
+   ```
+   HTTP/1.1 200 OK
+   Content-Type: application/json
+   Date: Wed, 21 Oct 2026 23:09:01 GMT
+   Connection: keep-alive
+   Keep-Alive: timeout=5
+   Transfer-Encoding: chunked
+
+   {
+     "status": "UP"
+   }
+   ```
+
+   Status line, headers, blank line, body: exactly the shape above. A "health" endpoint simply says the server is running; the PayDeck API has one too. In the first window, the server logs each request it receives: `GET /health`.
+
+5. Ask for the list of cards, then for one card:
+
+   ```sh
+   curl http://localhost:4000/cards
+   curl http://localhost:4000/cards/1
+   ```
+
+   Without `-i`, curl prints only the body. The first is a JSON list of both cards; the second just card 1.
+
+6. Use a query to filter the list. Put the URL in single quotes, because the shell gives `?` a special meaning:
+
+   ```sh
+   curl 'http://localhost:4000/cards?frozen=true'
+   ```
+
+   ```
+   [
+     {
+       "id": 2,
+       "nickname": "Travel",
+       "last4": "1881",
+       "limitCents": 200000,
+       "frozen": true
+     }
+   ]
+   ```
+
+7. Open `http://localhost:4000/cards` in your web browser. A browser is an HTTP client too: typing an address sends a `GET` request.
+
+</Steps>
+
+<Aside type="note" title="What is an endpoint?">
+An **endpoint** is one method plus one path that the API answers, such as `GET /cards` or `GET /cards/{id}`, where `{id}` stands for any card's number. An API's documentation is mostly a list of its endpoints.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: read the conversation">
+Run `curl -v http://localhost:4000/cards/1`. `-v` (verbose) shows both sides of the conversation. Find the request line, the request headers, the status line and the response headers. Which lines did curl send, and which did it receive?
+
+<Fragment slot="hint">Lines starting with `>` went **out** to the server; lines starting with `<` came **back**. Lines with `*` are curl's own notes.</Fragment>
+<Fragment slot="solution">
+
+```
+* Connected to localhost (127.0.0.1) port 4000
+> GET /cards/1 HTTP/1.1
+> Host: localhost:4000
+> User-Agent: curl/8.7.1
+> Accept: */*
+>
+< HTTP/1.1 200 OK
+< Content-Type: application/json
+< Date: Wed, 21 Oct 2026 23:09:30 GMT
+< Connection: keep-alive
+< Keep-Alive: timeout=5
+< Transfer-Encoding: chunked
+<
+{
+  "id": 1,
+  "nickname": "Everyday",
+  "last4": "4242",
+  "limitCents": 50000,
+  "frozen": false
+}
+```
+
+curl sent four lines: the request line and three headers, ending with an empty line. It received the status line, five headers, an empty line and the body. Your `curl` version and the date will differ.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Failed to connect to localhost port 4000">
+Nothing is listening on that port: the practice API is not running, or you stopped it. Start it again with `node practice-api.mjs` in its own window.
+</Aside>
+
+<Aside type="caution" title="EADDRINUSE: address already in use">
+The practice API is already running in another window, so a second copy cannot use the same port. Use the one that is running, or stop it with Ctrl+C first.
+</Aside>
+
+<Aside type="caution" title="zsh: no matches found">
+You left the quotes off a URL with `?` in it. Write `curl 'http://localhost:4000/cards?frozen=true'`.
+</Aside>
+
+## Recap
+
+- HTTP is a request from a client and one response from a server, as plain text in a fixed shape.
+- A URL has a scheme, host, port, path and query.
+- A request: method and path, headers, blank line, optional body.
+- A response: status, headers, blank line, body.
+- `curl URL` prints the body; `-i` adds the status and headers; `-v` shows both sides.
+
+<Quiz
+	questions={[
+		{
+			question: 'In http://localhost:4000/cards/2?x=1, what is the path?',
+			options: ['localhost', '/cards/2', '?x=1'],
+			answer: 1,
+			explanation: 'The path names the thing on the server; the query comes after the ?.',
+		},
+		{
+			question: 'Which side of an HTTP conversation speaks first?',
+			options: ['The server', 'The client, with a request', 'Either'],
+			answer: 1,
+			explanation: 'The client always asks; the server only ever answers.',
+		},
+		{
+			question: 'What does the first line of a response contain?',
+			options: ['The body', 'The status, such as 200 OK', 'The URL'],
+			answer: 1,
+			explanation: 'The status line says how the request went.',
+		},
+	]}
+/>
+
+<MarkComplete />

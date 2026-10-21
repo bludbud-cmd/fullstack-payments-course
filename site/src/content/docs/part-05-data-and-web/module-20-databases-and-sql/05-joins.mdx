@@ -1,0 +1,258 @@
+---
+title: "20.5 Joins"
+description: "Combine rows from several tables in one query with JOIN, keep rows that have no match with LEFT JOIN, and summarise across tables."
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can write queries that combine users, accounts and cards with `JOIN` and `LEFT JOIN`, and summarise across tables.
+
+## Why it matters
+
+In lesson 20.3 you split the data into tables so each fact is stored once: Asha's name lives in `users`, the currency in `accounts`, the nickname in `cards`. But a screen that says "Asha Rao · USD · Everyday •••• 4242" needs all three at once. A **join** puts the pieces back together, on demand, in one query. Joins are the reason splitting data into tables costs you nothing.
+
+## The idea
+
+```sql
+SELECT cards.nickname, accounts.currency
+FROM cards
+JOIN accounts ON accounts.id = cards.account_id;
+```
+
+Read it as: "for each card, find the account whose `id` equals the card's `account_id`, and make one combined row from the two." The `ON` part says how rows match; it is almost always a foreign key equal to the primary key it points at.
+
+When two tables have columns with the same name (both have `id`), write `table.column` to say which one you mean.
+
+**Aliases** keep long queries readable: `FROM users u` lets you write `u.name` instead of `users.name`.
+
+### JOIN and LEFT JOIN
+
+- **`JOIN`** (also written `INNER JOIN`) keeps only rows that have a match on both sides. An account with no cards does not appear.
+- **`LEFT JOIN`** keeps **every** row from the left table (the one before `LEFT JOIN`), even with no match. Where there is no match, the right table's columns are `NULL`.
+
+```
+accounts           cards                       accounts JOIN cards     accounts LEFT JOIN cards
++----+-----+       +------------+-----------+  +----+-----------+      +----+-----------+
+| 1  | USD |       | account 1  | Everyday  |  | 1  | Everyday  |      | 1  | Everyday  |
+| 2  | EUR |       | account 1  | Groceries |  | 1  | Groceries |      | 1  | Groceries |
+| 4  | GBP |       | account 2  | Travel    |  | 2  | Travel    |      | 2  | Travel    |
++----+-----+       +------------+-----------+  +----+-----------+      | 4  | (null)    |
+                                                                       +----+-----------+
+```
+
+Use `JOIN` when you want only things that are linked; use `LEFT JOIN` when "nothing linked" is a valid answer you need to see.
+
+## Worked example
+
+This continues from the end of lesson 20.4's exercise.
+
+### Two tables
+
+```sql
+SELECT cards.nickname, accounts.currency
+FROM cards
+JOIN accounts ON accounts.id = cards.account_id
+ORDER BY cards.id;
+```
+
+```
+  nickname  | currency
+------------+----------
+ Everyday   | USD
+ Groceries  | USD
+ Travel     | EUR
+ Ben's card | USD
+(4 rows)
+```
+
+### Three tables
+
+Joins chain: users to accounts, accounts to cards.
+
+```sql
+SELECT u.name, a.currency, c.nickname, c.last4
+FROM users u
+JOIN accounts a ON a.user_id = u.id
+JOIN cards c ON c.account_id = a.id
+ORDER BY u.name, c.nickname;
+```
+
+```
+    name    | currency |  nickname  | last4
+------------+----------+------------+-------
+ Asha Rao   | USD      | Everyday   | 4242
+ Asha Rao   | USD      | Groceries  | 5676
+ Asha Rao   | EUR      | Travel     | 1881
+ Ben Okafor | USD      | Ben's card | 3005
+(4 rows)
+```
+
+That is the PayDeck "my cards" screen, for everyone at once. Add `WHERE u.id = 1` and it is just Asha's.
+
+### When something has no match
+
+Ben opens a new pound account. It has no cards yet:
+
+```sql
+INSERT INTO accounts (user_id, currency) VALUES (2, 'GBP');
+```
+
+With `JOIN`, the new account is invisible, because it has no card to match:
+
+```sql
+SELECT a.id, a.currency, c.nickname
+FROM accounts a
+JOIN cards c ON c.account_id = a.id
+ORDER BY a.id;
+```
+
+```
+ id | currency |  nickname
+----+----------+------------
+  1 | USD      | Everyday
+  1 | USD      | Groceries
+  2 | EUR      | Travel
+  3 | USD      | Ben's card
+(4 rows)
+```
+
+With `LEFT JOIN`, it appears, with an empty (`NULL`) nickname:
+
+```sql
+SELECT a.id, a.currency, c.nickname
+FROM accounts a
+LEFT JOIN cards c ON c.account_id = a.id
+ORDER BY a.id, c.nickname;
+```
+
+```
+ id | currency |  nickname
+----+----------+------------
+  1 | USD      | Everyday
+  1 | USD      | Groceries
+  2 | EUR      | Travel
+  3 | USD      | Ben's card
+  4 | GBP      |
+(5 rows)
+```
+
+That `NULL` is useful. "Accounts with no cards" is the rows where the card side is `NULL`:
+
+```sql
+SELECT a.id, a.currency
+FROM accounts a
+LEFT JOIN cards c ON c.account_id = a.id
+WHERE c.id IS NULL;
+```
+
+```
+ id | currency
+----+----------
+  4 | GBP
+(1 row)
+```
+
+### Joins with summaries
+
+Joins and `GROUP BY` work together. How many cards does each person have?
+
+```sql
+SELECT u.name, count(c.id) AS cards
+FROM users u
+JOIN accounts a ON a.user_id = u.id
+LEFT JOIN cards c ON c.account_id = a.id
+GROUP BY u.name
+ORDER BY u.name;
+```
+
+```
+    name    | cards
+------------+-------
+ Asha Rao   |     3
+ Ben Okafor |     1
+(2 rows)
+```
+
+`count(c.id)` counts only rows where there is a card, so Ben's empty GBP account adds nothing. (`count(*)` would count that row too and say 2.)
+
+## Try it
+
+<Exercise title="Try it: spending power per person">
+For each user, show their name and the total limit of their cards that are **not** frozen, sorted by name.
+
+<Fragment slot="hint">Start from the three-table query above, add `WHERE NOT c.frozen`, then `GROUP BY u.name` with `sum(c.limit_cents)`.</Fragment>
+<Fragment slot="solution">
+
+```sql
+SELECT u.name, sum(c.limit_cents) AS total_limit_cents
+FROM users u
+JOIN accounts a ON a.user_id = u.id
+JOIN cards c ON c.account_id = a.id
+WHERE NOT c.frozen
+GROUP BY u.name
+ORDER BY u.name;
+```
+
+```
+    name    | total_limit_cents
+------------+-------------------
+ Asha Rao   |            120000
+ Ben Okafor |             75000
+(2 rows)
+```
+
+Asha's frozen Travel card is left out, so she has Everyday and Groceries at 60000 each. Ben's card is 75000 since the last lesson's exercise. `WHERE` filters rows **before** they are grouped.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title={`column reference "id" is ambiguous`}>
+Both tables have an `id` column, and you wrote just `id`. Say which one: `cards.id` or `c.id`.
+</Aside>
+
+<Aside type="caution" title="Far too many rows">
+You forgot the `ON` condition or joined on the wrong columns, so every row of one table was paired with every row of the other. Each `JOIN` needs an `ON` that links a foreign key to the primary key it points at.
+</Aside>
+
+<Aside type="caution" title="Rows went missing">
+You used `JOIN` where you needed `LEFT JOIN`. An inner join silently drops everything without a match, such as an account with no cards.
+</Aside>
+
+## Recap
+
+- `JOIN other ON other.id = this.other_id` combines matching rows from two tables.
+- Chain joins to follow links across several tables; use aliases such as `u`, `a`, `c`.
+- `JOIN` keeps only matches; `LEFT JOIN` keeps every row on the left and fills the gaps with `NULL`.
+- `LEFT JOIN ... WHERE right.id IS NULL` finds things with nothing linked.
+- Joins combine with `WHERE`, `GROUP BY` and aggregates.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which query lists every account, including ones with no cards?',
+			options: ['accounts JOIN cards', 'accounts LEFT JOIN cards', 'cards LEFT JOIN accounts'],
+			answer: 1,
+			explanation: 'LEFT JOIN keeps every row of the left table, here accounts.',
+		},
+		{
+			question: 'What does the ON part of a join usually compare?',
+			options: ['Two names', 'A foreign key with the primary key it points at', 'Two row counts'],
+			answer: 1,
+			explanation: 'For example ON accounts.id = cards.account_id.',
+		},
+		{
+			question: 'After a LEFT JOIN, the card columns of one row are NULL. What does that mean?',
+			options: ['The card was deleted', 'That account has no matching card', 'The query failed'],
+			answer: 1,
+			explanation: 'NULL fills the side with no match.',
+		},
+	]}
+/>
+
+<MarkComplete />

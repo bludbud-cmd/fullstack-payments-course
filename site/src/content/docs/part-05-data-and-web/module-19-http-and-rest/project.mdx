@@ -1,0 +1,134 @@
+---
+title: "Mini-project: explore a public API by hand"
+description: "Explore JSONPlaceholder, a free practice API on the internet, using only HTTP requests: find the endpoints, read and create data, provoke errors, and describe the data as types."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Real developers often meet an API they have never seen, with nothing but its documentation. In this project you explore one on the internet with the tools from this module, and write down what you learn as a `.http` file that someone else could use.
+
+The API is **JSONPlaceholder**, a free service made for practising. It pretends to be a small blogging site with users, posts, comments and to-dos. It accepts `POST`, `PATCH` and `DELETE` and answers as if they worked, but it does not really save anything, so you cannot break it.
+
+## The tasks
+
+Make a file `~/Projects/course/http/jsonplaceholder.http` with `@baseUrl = https://jsonplaceholder.typicode.com` at the top, and answer each question with a request in the file. Use `curl` and `jq` too when it is quicker for counting.
+
+1. **Read the documentation.** Open [jsonplaceholder.typicode.com](https://jsonplaceholder.typicode.com) in your browser and find the list of resources and routes. Which six resources does it have?
+2. **Collections.** How many users are there? How many posts?
+3. **One item.** What is the name and email address of user 1?
+4. **Filtering.** Using a query, list only the posts written by user 1. How many are there?
+5. **Nested resources.** Using a path rather than a query, list the comments on post 1. How many are there?
+6. **Create.** `POST` a new post for user 1. What status and `id` come back? Then `GET` that `id`. What happens, and why?
+7. **Change and delete.** `PATCH` post 1's title, then `DELETE` post 1. What status does each return?
+8. **Errors.** What does the API return for a post that does not exist?
+9. **Types.** Write a TypeScript interface and a Java record for a user, with just `id`, `name`, `username` and `email`.
+
+<Exercise title="Explore it">
+Work through the nine tasks. Write each answer as a comment (a line starting with `#`) above its request.
+
+<Fragment slot="hint">The home page lists the resources and some example routes such as `/posts/1/comments` and `/posts?userId=1`. For counting, `curl -s URL | jq length` is the quickest. For task 6, look again at what the home page says about saving.</Fragment>
+<Fragment slot="hint2">For the `POST`, `PATCH` and `DELETE` requests, remember `Content-Type: application/json` and a blank line before the body. JSONPlaceholder needs no `Authorization` header.</Fragment>
+<Fragment slot="solution">
+
+```http
+@baseUrl = https://jsonplaceholder.typicode.com
+
+# 1. Resources: posts, comments, albums, photos, todos, users.
+
+# 2. 10 users.
+### Users
+GET {{baseUrl}}/users
+
+# 2. 100 posts.
+### Posts
+GET {{baseUrl}}/posts
+
+# 3. Leanne Graham, Sincere@april.biz
+### User 1
+GET {{baseUrl}}/users/1
+
+# 4. 10 posts by user 1.
+### Posts by user 1
+GET {{baseUrl}}/posts?userId=1
+
+# 5. 5 comments on post 1.
+### Comments on post 1
+GET {{baseUrl}}/posts/1/comments
+
+# 6. 201 Created, with id 101 ...
+### Create a post
+# @name newPost
+POST {{baseUrl}}/posts
+Content-Type: application/json
+
+{
+  "userId": 1,
+  "title": "My first API request",
+  "body": "Sent from VS Code."
+}
+
+# 6. ... but reading it back gives 404: JSONPlaceholder only pretends to save.
+### Read the new post
+GET {{baseUrl}}/posts/{{newPost.response.body.$.id}}
+
+# 7. 200 OK, with post 1 including the new title.
+### Change a title
+PATCH {{baseUrl}}/posts/1
+Content-Type: application/json
+
+{
+  "title": "A better title"
+}
+
+# 7. 200 OK, with an empty object {} as the body.
+### Delete post 1
+DELETE {{baseUrl}}/posts/1
+
+# 8. 404 Not Found, with an empty object {} as the body.
+### A post that does not exist
+GET {{baseUrl}}/posts/9999
+```
+
+Counting with curl and jq:
+
+```sh
+curl -s https://jsonplaceholder.typicode.com/users | jq length              # 10
+curl -s https://jsonplaceholder.typicode.com/posts | jq length              # 100
+curl -s 'https://jsonplaceholder.typicode.com/posts?userId=1' | jq length   # 10
+curl -s https://jsonplaceholder.typicode.com/posts/1/comments | jq length   # 5
+```
+
+Task 9:
+
+```ts
+interface User {
+  id: number;
+  name: string;
+  username: string;
+  email: string;
+}
+```
+
+```java
+record User(long id, String name, String username, String email) {}
+```
+
+What to notice:
+
+- Two ways to ask for "the comments on post 1": the nested path `/posts/1/comments` and the query `/comments?postId=1`. Both are common in REST APIs.
+- The `DELETE` answered `200 OK` with `{}` rather than `204 No Content`. Both are acceptable; APIs differ, which is why you read the responses rather than assume.
+- The 404 has an empty body with no explanation. Compare the practice API's `{"error": "No card with id 9"}`. In Part 6 you will make sure PayDeck's errors always explain themselves.
+- A user has more fields than the four you described (an address, a phone number, a company). Your types only need the fields your app uses; extra JSON fields are ignored.
+</Fragment>
+</Exercise>
+
+<Aside type="note" title="Being a good API citizen">
+Public APIs are shared by everyone. Send requests by hand or a few at a time, never in a fast loop. Many APIs limit how many requests each person may send, and answer `429 Too Many Requests` when you go over.
+</Aside>
+
+<MarkComplete />

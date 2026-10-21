@@ -1,0 +1,216 @@
+---
+title: "20.3 Relationships"
+description: "Connect tables with foreign keys: one-to-many relationships such as an account's cards, many-to-many through a joining table, and how the database protects the links."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can link tables with foreign keys, model one-to-many and many-to-many relationships, and explain the errors that protect those links.
+
+## Why it matters
+
+A user has accounts; an account has cards; a card has payments. In Java you would put a list of cards inside an account object. Databases do it differently: each card row stores the ID of its account. This one idea, a column that points at another table's primary key, is how the whole PayDeck database hangs together, and the database makes sure no card can ever point at an account that does not exist.
+
+## The idea
+
+### One-to-many
+
+One account has many cards; each card belongs to exactly one account. The "many" side stores the link:
+
+```sql
+CREATE TABLE cards (
+    id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    account_id  BIGINT NOT NULL REFERENCES accounts (id),
+    ...
+);
+```
+
+`account_id` is a **foreign key**: its value must be the `id` of a row that exists in `accounts`. `REFERENCES accounts (id)` creates that rule. By convention the column is named after the table it points to, in the singular, plus `_id`.
+
+```
+users              accounts                 cards
++----+---------+   +----+---------+------+   +----+------------+-----------+
+| id | name    |   | id | user_id | cur. |   | id | account_id | nickname  |
++----+---------+   +----+---------+------+   +----+------------+-----------+
+| 1  | Asha    |<--| 1  | 1       | USD  |<--| 1  | 1          | Everyday  |
+| 2  | Ben     |   | 2  | 1       | EUR  |   | 2  | 1          | Groceries |
++----+---------+   | 3  | 2       | USD  |   | 3  | 2          | Travel    |
+                   +----+---------+------+   +----+------------+-----------+
+```
+
+Asha (user 1) has two accounts; her USD account (account 1) has two cards.
+
+### Many-to-many
+
+Some relationships go both ways: a joint account has several holders, and a person can hold several accounts. Neither table can hold a single ID for the other. The answer is a third, **joining table** with one row per link:
+
+```sql
+CREATE TABLE account_holders (
+    account_id  BIGINT NOT NULL REFERENCES accounts (id),
+    user_id     BIGINT NOT NULL REFERENCES users (id),
+    PRIMARY KEY (account_id, user_id)
+);
+```
+
+Its primary key is the **pair** of columns, so the same person cannot be added to the same account twice.
+
+### What the database protects
+
+A foreign key stops two kinds of mistake:
+
+- adding a card for an account that does not exist;
+- deleting an account that still has cards, which would leave them pointing at nothing.
+
+You can tell Postgres to delete the cards along with the account instead, with `REFERENCES accounts (id) ON DELETE CASCADE`. For money, you almost never want that: history should be kept, not silently deleted. PayDeck never deletes accounts or cards at all; it marks cards as `CANCELLED`.
+
+## Worked example
+
+Start this module's tables over with the three linked tables. In psql:
+
+```sql
+DROP TABLE cards;
+DROP TABLE users;
+
+CREATE TABLE users (
+    id     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name   VARCHAR(100) NOT NULL,
+    email  VARCHAR(254) NOT NULL UNIQUE
+);
+
+CREATE TABLE accounts (
+    id        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id   BIGINT     NOT NULL REFERENCES users (id),
+    currency  VARCHAR(3) NOT NULL
+);
+
+CREATE TABLE cards (
+    id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    account_id   BIGINT       NOT NULL REFERENCES accounts (id),
+    nickname     VARCHAR(50)  NOT NULL,
+    last4        VARCHAR(4)   NOT NULL,
+    limit_cents  BIGINT       NOT NULL DEFAULT 50000 CHECK (limit_cents >= 0),
+    frozen       BOOLEAN      NOT NULL DEFAULT false
+);
+```
+
+The tables must be created in this order: `accounts` refers to `users`, so `users` must exist first.
+
+Add some data. One `INSERT` can add several rows, separated by commas. A single quote inside text is written twice: `'Ben''s card'`.
+
+```sql
+INSERT INTO users (name, email) VALUES ('Asha Rao', 'asha@example.com'), ('Ben Okafor', 'ben@example.com');
+INSERT INTO accounts (user_id, currency) VALUES (1, 'USD'), (1, 'EUR'), (2, 'USD');
+INSERT INTO cards (account_id, nickname, last4) VALUES
+    (1, 'Everyday', '4242'), (1, 'Groceries', '5676'), (2, 'Travel', '1881'), (3, 'Ben''s card', '3005');
+SELECT id, account_id, nickname FROM cards;
+```
+
+```
+ id | account_id |  nickname
+----+------------+------------
+  1 |          1 | Everyday
+  2 |          1 | Groceries
+  3 |          2 | Travel
+  4 |          3 | Ben's card
+(4 rows)
+```
+
+Now try to break a link:
+
+```sql
+INSERT INTO cards (account_id, nickname, last4) VALUES (99, 'Ghost', '0000');
+```
+
+```
+ERROR:  insert or update on table "cards" violates foreign key constraint "cards_account_id_fkey"
+DETAIL:  Key (account_id)=(99) is not present in table "accounts".
+```
+
+```sql
+DELETE FROM accounts WHERE id = 2;
+```
+
+```
+ERROR:  update or delete on table "accounts" violates foreign key constraint "cards_account_id_fkey" on table "cards"
+DETAIL:  Key (id)=(2) is still referenced from table "cards".
+```
+
+Account 2 still has the Travel card, so it cannot go. `\d cards` now lists the link under **Foreign-key constraints**.
+
+## Try it
+
+<Exercise title="Try it: joint accounts">
+Ben and Asha open a joint account: create the `account_holders` table from above, then add a row for each account's own user (account 1 and 2 for Asha, account 3 for Ben), and make Ben a second holder of account 1. Then try to add Ben to account 1 again.
+
+<Fragment slot="hint">One `INSERT INTO account_holders (account_id, user_id) VALUES (...), (...), ...;` can add all four links.</Fragment>
+<Fragment slot="solution">
+
+```sql
+CREATE TABLE account_holders (
+    account_id  BIGINT NOT NULL REFERENCES accounts (id),
+    user_id     BIGINT NOT NULL REFERENCES users (id),
+    PRIMARY KEY (account_id, user_id)
+);
+INSERT INTO account_holders (account_id, user_id) VALUES (1, 1), (2, 1), (3, 2), (1, 2);
+INSERT INTO account_holders (account_id, user_id) VALUES (1, 2);
+```
+
+```
+ERROR:  duplicate key value violates unique constraint "account_holders_pkey"
+DETAIL:  Key (account_id, user_id)=(1, 2) already exists.
+```
+
+Account 1 now has two holders, and Asha holds two accounts: many-to-many. With this table in place, `accounts.user_id` really means "the account's main owner", and a real design would probably rename it `owner_id`.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title={`relation "users" does not exist`}>
+You created a table that refers to another before creating that other one. Create the table being pointed **at** first.
+</Aside>
+
+<Aside type="caution" title="violates foreign key constraint">
+Read the `DETAIL` line. "is not present in table" means you pointed at a row that does not exist; "is still referenced" means you tried to delete a row something else still points at.
+</Aside>
+
+<Aside type="caution" title="Storing a list in one column">
+Putting `'1,2,3'` in a `card_ids` column of `accounts` breaks every rule above: nothing checks the IDs exist, and you cannot search or join on them. Point from the "many" side instead, or use a joining table.
+</Aside>
+
+## Recap
+
+- A foreign key (`REFERENCES table (id)`) is a column that must point at an existing row.
+- One-to-many: the "many" side stores the "one" side's ID (`cards.account_id`).
+- Many-to-many: a joining table with two foreign keys and a two-column primary key.
+- Foreign keys refuse orphans: no card for a missing account, no deleting an account that still has cards.
+
+<Quiz
+	questions={[
+		{
+			question: 'An account has many cards. Which table holds the link?',
+			options: ['accounts, with a card_id column', 'cards, with an account_id column', 'Neither'],
+			answer: 1,
+			explanation: 'The many side points at the one side.',
+		},
+		{
+			question: 'How do you model people who can hold many accounts, and accounts with many holders?',
+			options: ['A list column', 'A joining table with two foreign keys', 'Two foreign keys pointing at each other'],
+			answer: 1,
+			explanation: 'One row per link, in a table of its own.',
+		},
+		{
+			question: 'Why does PayDeck avoid ON DELETE CASCADE for cards?',
+			options: ['It is slow', 'Payment history must be kept, not deleted with its account', 'Postgres does not support it'],
+			answer: 1,
+			explanation: 'Money records are kept; cards are cancelled rather than deleted.',
+		},
+	]}
+/>
+
+<MarkComplete />

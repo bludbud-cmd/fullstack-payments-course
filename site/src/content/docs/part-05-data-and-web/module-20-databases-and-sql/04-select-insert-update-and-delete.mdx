@@ -1,0 +1,370 @@
+---
+title: "20.4 SELECT, INSERT, UPDATE and DELETE"
+description: "Read and change data with SQL: filter and sort with SELECT, add rows with INSERT, change them with UPDATE, remove them with DELETE, summarise with count and sum, and undo mistakes with a transaction."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can read, add, change and remove rows with SQL, summarise data with `count` and `sum`, and use a transaction as a safety net.
+
+## Why it matters
+
+Every screen in PayDeck is a question to the database ("which cards does Asha have?"), and every button is a change ("freeze card 3"). Those four kinds of statement, often called **CRUD** (Create, Read, Update, Delete), are almost all the SQL an app needs. In Part 6, Spring Boot writes most of this SQL for you, but you still need to read it in logs, write it in migrations, and run it by hand when something looks wrong.
+
+## The idea
+
+| Statement | Does | HTTP cousin |
+| --- | --- | --- |
+| `SELECT` | Reads rows | `GET` |
+| `INSERT` | Adds rows | `POST` |
+| `UPDATE` | Changes rows | `PATCH` / `PUT` |
+| `DELETE` | Removes rows | `DELETE` |
+
+### SELECT: reading
+
+```sql
+SELECT columns FROM table WHERE condition ORDER BY column LIMIT n;
+```
+
+Only `SELECT ... FROM ...` is required; the other parts are optional but must come in this order.
+
+- `SELECT *` means every column. In real code, name the columns you need.
+- `WHERE` keeps only rows where the condition is true. Conditions use `=`, `<>` (not equal), `<`, `>`, `<=`, `>=`, and combine with `AND`, `OR` and `NOT`. Note: one `=`, not Java's `==`.
+- `ILIKE '%card%'` matches text containing "card", ignoring case. `%` stands for "any characters". (`LIKE` is the same but case-sensitive.)
+- `ORDER BY nickname` sorts; add `DESC` for largest first. Without `ORDER BY`, rows come back in **no guaranteed order**.
+- `LIMIT 2` returns at most two rows.
+
+### INSERT, UPDATE, DELETE: changing
+
+```sql
+INSERT INTO cards (account_id, nickname, last4) VALUES (1, 'Everyday', '4242');
+UPDATE cards SET frozen = true WHERE id = 3;
+DELETE FROM cards WHERE id = 6;
+```
+
+`UPDATE` and `DELETE` change **every row the `WHERE` matches**. Leave out the `WHERE` and they change every row in the table. That is the most expensive mistake in SQL, which is why this lesson ends with a safety net.
+
+Adding `RETURNING columns` to any of the three makes Postgres show you the rows it just changed, for example the `id` it chose for a new row. The PayDeck API uses exactly this to answer `201 Created` with the new card.
+
+### Summaries
+
+**Aggregate functions** turn many rows into one value: `count(*)`, `sum(column)`, `avg(column)`, `min(column)`, `max(column)`. `GROUP BY column` makes one summary row per distinct value instead of one for the whole table. `AS name` gives a result column a readable name.
+
+## Worked example
+
+This continues from the end of lesson 20.3, with four cards. Open psql and follow along; your results should match exactly.
+
+### Reading
+
+```sql
+SELECT nickname, limit_cents FROM cards WHERE frozen = false ORDER BY nickname;
+```
+
+```
+  nickname  | limit_cents
+------------+-------------
+ Ben's card |       50000
+ Everyday   |       50000
+ Groceries  |       50000
+ Travel     |       50000
+(4 rows)
+```
+
+```sql
+SELECT * FROM cards WHERE account_id = 1 AND last4 <> '4242';
+```
+
+```
+ id | account_id | nickname  | last4 | limit_cents | frozen
+----+------------+-----------+-------+-------------+--------
+  2 |          1 | Groceries | 5676  |       50000 | f
+(1 row)
+```
+
+```sql
+SELECT nickname FROM cards WHERE nickname ILIKE '%card%';
+SELECT nickname FROM cards ORDER BY nickname LIMIT 2;
+```
+
+The first finds only `Ben's card`; the second returns `Ben's card` and `Everyday`, the first two alphabetically.
+
+### Adding
+
+```sql
+INSERT INTO cards (account_id, nickname, last4, limit_cents) VALUES (3, 'Fuel', '7337', 15000) RETURNING id, nickname;
+```
+
+```
+ id | nickname
+----+----------
+  6 | Fuel
+(1 row)
+
+INSERT 0 1
+```
+
+Why 6 and not 5? The refused Ghost card in lesson 20.3 used up number 5. `INSERT 0 1` means one row was inserted (the 0 is a leftover from old Postgres versions; ignore it).
+
+### Changing
+
+```sql
+UPDATE cards SET frozen = true WHERE id = 3 RETURNING id, nickname, frozen;
+```
+
+```
+ id | nickname | frozen
+----+----------+--------
+  3 | Travel   | t
+(1 row)
+
+UPDATE 1
+```
+
+The new value can be worked out from the old one. Raise every limit on account 1 by $100:
+
+```sql
+UPDATE cards SET limit_cents = limit_cents + 10000 WHERE account_id = 1;
+```
+
+```
+UPDATE 2
+```
+
+Always read that count. If you expected 2 and it says 4000, something is wrong.
+
+```sql
+SELECT id, nickname, limit_cents, frozen FROM cards ORDER BY id;
+```
+
+```
+ id |  nickname  | limit_cents | frozen
+----+------------+-------------+--------
+  1 | Everyday   |       60000 | f
+  2 | Groceries  |       60000 | f
+  3 | Travel     |       50000 | t
+  4 | Ben's card |       50000 | f
+  6 | Fuel       |       15000 | f
+(5 rows)
+```
+
+### Removing
+
+```sql
+DELETE FROM cards WHERE id = 6;
+```
+
+```
+DELETE 1
+```
+
+Fuel is gone. (In PayDeck itself, cards are never deleted, only cancelled, but practice data is yours to throw away.)
+
+### Summarising
+
+```sql
+SELECT count(*) FROM cards;
+SELECT count(*) AS frozen_cards FROM cards WHERE frozen;
+SELECT sum(limit_cents) AS total_limit_cents FROM cards;
+```
+
+These return 4, 1 and 220000. (`WHERE frozen` is short for `WHERE frozen = true`.) Now one summary row per account:
+
+```sql
+SELECT account_id, count(*) AS cards, sum(limit_cents) AS total_limit_cents
+FROM cards
+GROUP BY account_id
+ORDER BY account_id;
+```
+
+```
+ account_id | cards | total_limit_cents
+------------+-------+-------------------
+          1 |     2 |            120000
+          2 |     1 |             50000
+          3 |     1 |             50000
+(3 rows)
+```
+
+A statement can be spread over several lines, as here; it ends at the `;`.
+
+### The safety net: transactions
+
+A **transaction** groups statements so they either all happen or none do. `BEGIN` starts one; `COMMIT` keeps the changes; `ROLLBACK` throws them away. Watch:
+
+```sql
+BEGIN;
+UPDATE cards SET frozen = true;
+```
+
+```
+UPDATE 4
+```
+
+Oops: no `WHERE`, so every card is now frozen. Check:
+
+```sql
+SELECT nickname, frozen FROM cards ORDER BY id;
+```
+
+```
+  nickname  | frozen
+------------+--------
+ Everyday   | t
+ Groceries  | t
+ Travel     | t
+ Ben's card | t
+(4 rows)
+```
+
+Because you started with `BEGIN`, nothing is final yet:
+
+```sql
+ROLLBACK;
+SELECT nickname, frozen FROM cards ORDER BY id;
+```
+
+```
+  nickname  | frozen
+------------+--------
+ Everyday   | f
+ Groceries  | f
+ Travel     | t
+ Ben's card | f
+(4 rows)
+```
+
+Back to how it was: only Travel is frozen. Make it a habit: before any `UPDATE` or `DELETE` you type by hand on data that matters, type `BEGIN;` first, check the row count, then `COMMIT;` or `ROLLBACK;`.
+
+Transactions are about much more than undoing typos. Moving money from one account to another is two changes (take from one, add to the other) that must both happen or neither. Module 24 builds PayDeck's transfers on exactly this.
+
+## Try it
+
+<Exercise title="Try it: questions and changes">
+Write one statement for each:
+
+1. The nickname and limit of every card with a limit above $500, largest first.
+2. Set Ben's card's limit to $750, by its nickname, and show its `id` and new limit.
+3. How many cards are frozen and how many are not, in one query.
+4. The highest and lowest limit across all cards.
+
+<Fragment slot="hint">$500 is 50000 cents. Remember `''` for the quote in `Ben''s card`. For question 3, group by the `frozen` column.</Fragment>
+<Fragment slot="solution">
+
+```sql
+SELECT nickname, limit_cents FROM cards WHERE limit_cents > 50000 ORDER BY limit_cents DESC, nickname;
+```
+
+```
+ nickname  | limit_cents
+-----------+-------------
+ Everyday  |       60000
+ Groceries |       60000
+(2 rows)
+```
+
+When two rows tie on the first sort column, the second (`nickname`) decides, so the order is always the same.
+
+```sql
+UPDATE cards SET limit_cents = 75000 WHERE nickname = 'Ben''s card' RETURNING id, limit_cents;
+```
+
+```
+ id | limit_cents
+----+-------------
+  4 |       75000
+(1 row)
+```
+
+Using `WHERE id = 4` would be safer: nicknames are not unique, so two cards called the same thing would both change.
+
+```sql
+SELECT frozen, count(*) FROM cards GROUP BY frozen ORDER BY frozen;
+```
+
+```
+ frozen | count
+--------+-------
+ f      |     3
+ t      |     1
+(2 rows)
+```
+
+```sql
+SELECT max(limit_cents) AS highest, min(limit_cents) AS lowest FROM cards;
+```
+
+```
+ highest | lowest
+---------+--------
+   75000 |  50000
+(1 row)
+```
+
+Keep these changes: the next lesson continues from here.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="UPDATE or DELETE without WHERE">
+Changes every row in the table, instantly and without asking. If you are not inside a `BEGIN`, there is no undo. Write the `WHERE` first, or run the same condition as a `SELECT` before turning it into an `UPDATE`.
+</Aside>
+
+<Aside type="caution" title={`column "cards.nickname" must appear in the GROUP BY clause or be used in an aggregate function`}>
+With `GROUP BY`, every column you select must either be one you grouped by or be inside `count`, `sum` and so on. Postgres cannot show "the nickname" of a group of several cards.
+</Aside>
+
+<Aside type="caution" title="current transaction is aborted, commands ignored until end of transaction block">
+Inside a `BEGIN`, one error spoils the whole transaction. Type `ROLLBACK;` and start again.
+</Aside>
+
+<Aside type="caution" title="WHERE nickname = NULL finds nothing">
+Nothing is ever equal to `NULL`, not even `NULL`. Write `WHERE nickname IS NULL` (or `IS NOT NULL`).
+</Aside>
+
+## Recap
+
+- `SELECT ... FROM ... WHERE ... ORDER BY ... LIMIT ...` reads rows; always `ORDER BY` when order matters.
+- `INSERT`, `UPDATE` and `DELETE` change rows; `RETURNING` shows what changed; read the row count.
+- `count`, `sum`, `min`, `max` and `avg` summarise; `GROUP BY` makes one summary per group.
+- `BEGIN` ... `COMMIT` or `ROLLBACK` makes changes all-or-nothing, and is your undo button in psql.
+
+<Quiz
+	questions={[
+		{
+			question: 'What does UPDATE cards SET frozen = true; do?',
+			options: ['Freezes the first card', 'Freezes every card', 'Nothing, because WHERE is required'],
+			answer: 1,
+			explanation: 'Without WHERE, every row matches.',
+		},
+		{
+			question: 'Why add RETURNING id to an INSERT?',
+			options: ['To make it faster', 'To get back the id the database chose for the new row', 'To undo it later'],
+			answer: 1,
+			explanation: 'The API needs the new id to answer 201 Created.',
+		},
+		{
+			question: 'You typed BEGIN; then a DELETE that removed too much. What now?',
+			options: ['COMMIT;', 'ROLLBACK;', 'Restore from a backup'],
+			answer: 1,
+			explanation: 'Nothing is final until COMMIT.',
+		},
+		{
+			question: 'Which query gives one row per account with its number of cards?',
+			options: [
+				'SELECT account_id, count(*) FROM cards;',
+				'SELECT account_id, count(*) FROM cards GROUP BY account_id;',
+				'SELECT count(account_id) FROM cards;',
+			],
+			answer: 1,
+			explanation: 'GROUP BY makes one summary row per distinct account_id.',
+		},
+	]}
+/>
+
+<MarkComplete />
