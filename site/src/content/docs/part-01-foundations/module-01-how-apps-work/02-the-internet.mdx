@@ -1,0 +1,99 @@
+---
+title: "1.2 The internet"
+description: "Explain how a message gets from your phone to a computer on the other side of the world."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can explain what the internet is, and what an IP address, a domain name and HTTPS are for.
+
+## Why it matters
+
+When someone taps **Pay** in PayDeck, a message leaves their phone, crosses the internet, reaches the PayDeck server, and an answer comes back, all in well under a second. Later in the course you will set the address the app sends to, and debug it when it cannot reach the server. That starts with knowing how messages travel.
+
+## The idea
+
+The internet is a huge number of computers joined by cables, radio (Wi-Fi and mobile data) and machines called **routers** that pass messages along. No single company owns it. It works because every computer agrees to follow the same rules, called **protocols**.
+
+It works a lot like the post:
+
+- Every computer on the internet has an **IP address**, such as `142.250.180.14`. That is its postal address.
+- Your message is split into small **packets**, like a long letter sent as many postcards. Each packet carries the address it is going to.
+- Routers read the address on each packet and pass it one step closer, again and again, until it arrives. The computer at the other end puts the packets back in order.
+
+Numbers are hard to remember, so we use **domain names** such as `github.com`. A service called **DNS** (the Domain Name System) works like a phone book: your computer asks DNS "what is the IP address of github.com?", gets the number, and then sends the packets there.
+
+### HTTP and HTTPS
+
+The packets carry messages written in a protocol. Websites and apps mostly use **HTTP**: your device sends a **request** ("please give me this page") and the other computer sends back a **response** (the page, or an error).
+
+**HTTPS** is HTTP inside an encrypted envelope. Anyone handling the packets on the way (the café Wi-Fi, a router) sees only scrambled data. For a payments app this is not optional: card details and passwords must only ever travel over HTTPS. The padlock in your browser's address bar means the page came over HTTPS.
+
+## Worked example: visiting a website
+
+You type `https://github.com` and press Return:
+
+1. Your Mac asks DNS for the IP address of `github.com`.
+2. It opens an encrypted (HTTPS) connection to that address.
+3. It sends a request: `GET /`, meaning "give me the main page".
+4. GitHub's computer sends back a response with status `200 OK` and the page.
+5. Your browser draws the page. Images and styles on the page each trigger more requests.
+
+The same five steps happen when an app loads data. The only difference is that the app asks for data instead of a page.
+
+## Try it
+
+<Exercise title="Try it: look up an IP address">
+Find the IP address behind `github.com` using your Mac's built-in tools.
+
+<Fragment slot="hint">Open the **Terminal** app (Command + Space, type "Terminal"). You will learn the terminal properly in Module 2; for now, just type one command.</Fragment>
+<Fragment slot="hint2">The command is `host` followed by the domain name.</Fragment>
+<Fragment slot="solution">Type `host github.com` and press Return. The answer includes a line such as `github.com has address 140.82.121.4`. That number is what DNS gave your Mac. (It may differ for you: big sites have many addresses around the world.)</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="“The internet” and “the web” are not the same">
+The internet is the network of connected computers. The web is one thing that runs on it: pages you open in a browser. Apps such as PayDeck use the internet without being web pages.
+</Aside>
+
+<Aside type="caution" title="Server not found">
+This browser error usually means DNS could not find the name: often a typo in the address, or no internet connection at all. It does **not** mean the server is broken.
+</Aside>
+
+## Recap
+
+- The internet is many computers joined together, all following shared rules called protocols.
+- Messages travel as **packets**, addressed with **IP addresses** and passed along by **routers**.
+- **DNS** turns names like `github.com` into IP addresses.
+- **HTTP** is request and response; **HTTPS** is the encrypted version, and payments always use it.
+
+<Quiz
+	questions={[
+		{
+			question: 'What does DNS do?',
+			options: ['Encrypts your messages', 'Turns domain names into IP addresses', 'Stores websites'],
+			answer: 1,
+			explanation: 'DNS is the internet’s phone book: names in, IP addresses out.',
+		},
+		{
+			question: 'Why must PayDeck use HTTPS?',
+			options: ['It is faster', 'It encrypts card details and passwords on the way', 'Apps cannot use HTTP'],
+			answer: 1,
+			explanation: 'HTTPS scrambles the data so nobody handling the packets on the way can read it.',
+		},
+		{
+			question: 'In HTTP, what does the server send back after a request?',
+			options: ['A response', 'Another request', 'An IP address'],
+			answer: 0,
+			explanation: 'HTTP is always request then response.',
+		},
+	]}
+/>
+
+<MarkComplete />

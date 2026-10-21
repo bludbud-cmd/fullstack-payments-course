@@ -1,0 +1,123 @@
+---
+title: "2.4 Reading error messages"
+description: "Read an error message calmly: find the key line, the file and the line number, and decide what to try next."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can pick out the important parts of an error message and use them to find the problem.
+
+## Why it matters
+
+Every developer sees error messages all day, including very experienced ones. The difference is not that experts make fewer mistakes; it is that they read the message instead of panicking. An error message is the computer telling you exactly what went wrong and, very often, where.
+
+## The idea
+
+Most error messages have the same few parts, even when they look like a wall of text:
+
+1. **The kind of error**, such as `SyntaxError`, `TypeError` or `command not found`.
+2. **The message**, a sentence about what went wrong.
+3. **The location**: a file name and a line number, sometimes a column too.
+4. **A stack trace**: the chain of calls that led there. The top lines usually matter most; the lines from inside libraries usually matter least.
+
+The reading method:
+
+1. **Find the first real error.** One mistake can cause many messages; fix the first one and the rest often disappear.
+2. **Read the message slowly, word by word.** It usually means exactly what it says.
+3. **Go to the file and line** it names, and look at that line and the one above it.
+4. **Change one thing**, then run again. Read the new message: a *different* error often means progress.
+
+## Worked example
+
+Here is a mistake you will make in Module 4. A file `tip.js` contains:
+
+```js
+const bill = 40;
+const tip = bil * 0.15;
+console.log(tip);
+```
+
+Running it prints:
+
+```
+/Users/asha/Projects/tip.js:2
+const tip = bil * 0.15;
+            ^
+
+ReferenceError: bil is not defined
+    at Object.<anonymous> (/Users/asha/Projects/tip.js:2:13)
+    at Module._compile (node:internal/modules/cjs/loader:1554:14)
+    at node:internal/main/run_main_module:36:49
+```
+
+Reading it with the method:
+
+- **Kind:** `ReferenceError`, meaning code referred to a name that does not exist.
+- **Message:** `bil is not defined`. The program has never heard of `bil`.
+- **Location:** `tip.js:2:13`, which is line 2, column 13. The `^` even points at it.
+- **Stack trace:** the lines starting with `node:internal` are Node's own code. Ignore them.
+
+Line 2 says `bil`, but line 1 created `bill`. It is a typo. Fix it, run again, and it prints `6`.
+
+## Try it
+
+<Exercise title="Try it: decode a terminal error">
+You run this in the terminal:
+
+```
+% cd ~/Projects/paydeck/app
+cd: no such file or directory: /Users/asha/Projects/paydeck/app
+```
+
+What is wrong, and what two commands would you run to find out more?
+
+<Fragment slot="hint">The message names the exact path it looked for. Which part of that path might not exist?</Fragment>
+<Fragment slot="solution">The shell could not find the folder `paydeck/app` inside `Projects`. Either `paydeck` does not exist, it has a different name, or `app` is not inside it. Run `ls ~/Projects` to see what is in `Projects`, then `ls ~/Projects/paydeck` if it is there. The message was precise: it even printed the full absolute path it tried.</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Fixing the last error instead of the first">
+When a build prints 40 errors, scroll **up** to the first one. The later ones are often caused by it.
+</Aside>
+
+<Aside type="caution" title="Changing five things at once">
+If you change many things and it works, you do not know which change fixed it. If it still fails, you do not know which change broke something else. Change one thing at a time.
+</Aside>
+
+## Recap
+
+- An error has a **kind**, a **message**, a **location** and often a **stack trace**.
+- Fix the **first** error first. Read the message word by word.
+- Go to the file and line it names, and check the line above too.
+- Change one thing, run again, and read the new message.
+
+<Quiz
+	questions={[
+		{
+			question: 'A build prints 12 errors. Which do you fix first?',
+			options: ['The last one', 'The first one', 'The longest one'],
+			answer: 1,
+			explanation: 'Later errors are often caused by the first one.',
+		},
+		{
+			question: 'In `tip.js:2:13`, what is 2?',
+			options: ['The number of errors', 'The line number', 'The column number'],
+			answer: 1,
+			explanation: 'The format is file:line:column.',
+		},
+		{
+			question: 'After a fix, you get a different error. What does that usually mean?',
+			options: ['You made it worse', 'Progress: the first problem is gone', 'The computer is broken'],
+			answer: 1,
+			explanation: 'A new error usually means the program got further than before.',
+		},
+	]}
+/>
+
+<MarkComplete />

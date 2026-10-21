@@ -1,0 +1,49 @@
+---
+title: "Mini-project: set up your workspace"
+description: "Use only the terminal to create the folder where you will build PayDeck, and open it in VS Code."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Set up the folder you will use for the rest of the course, using only the terminal.
+
+## The task
+
+Without touching Finder:
+
+1. Make a folder `~/Projects/course` with three folders inside: `javascript`, `java` and `notes`.
+2. Inside `notes`, create a file called `stuck-log.md`. Whenever you get stuck in this course, write down the error and what fixed it. Future you will be grateful.
+3. Copy `~/Projects/hello.txt` (from lesson 2.1) into `notes`, then rename the copy to `first-file.txt`.
+4. Open `~/Projects/course` in VS Code with the `code` command, and write your first entry in `stuck-log.md`.
+5. Finally, go back to your home folder and list everything inside `Projects/course/notes`, using a single command.
+
+<Exercise title="Check your work">
+Run `ls -R ~/Projects/course`. `-R` means "recursive": it lists every folder inside, too. Does it match the plan?
+
+<Fragment slot="hint">If something is in the wrong place, `mv` can move it. Use `pwd` whenever you are unsure where you are.</Fragment>
+<Fragment slot="solution">
+
+```sh
+mkdir -p ~/Projects/course/javascript ~/Projects/course/java ~/Projects/course/notes
+touch ~/Projects/course/notes/stuck-log.md
+cp ~/Projects/hello.txt ~/Projects/course/notes/
+mv ~/Projects/course/notes/hello.txt ~/Projects/course/notes/first-file.txt
+code ~/Projects/course
+cd ~
+ls Projects/course/notes
+```
+
+The last command uses a **relative** path, which works because `cd ~` put you in your home folder first.
+</Fragment>
+</Exercise>
+
+<Aside type="tip" title="Keep the stuck log going">
+Writing down what broke and how you fixed it is a habit many senior developers keep. It turns every frustrating hour into something you never have to figure out twice.
+</Aside>
+
+<MarkComplete />

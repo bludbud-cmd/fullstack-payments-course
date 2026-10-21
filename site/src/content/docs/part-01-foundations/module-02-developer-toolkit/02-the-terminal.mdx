@@ -1,0 +1,131 @@
+---
+title: "2.2 The terminal"
+description: "Open the terminal, type commands, and read what they print."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can open a terminal, run a command, and understand the parts of what you typed.
+
+## Why it matters
+
+Developers use the **terminal** every day: to run the PayDeck API, start the app, install tools, run tests and save work with Git. Many tools have no buttons at all, only commands. It looks old-fashioned, but it is fast, precise and easy to copy from instructions like these.
+
+## The idea
+
+The terminal is a window where you type instructions to your Mac as text, instead of clicking. The program that reads your instructions is called the **shell**; on a Mac it is called **zsh**. You type a **command**, press **Return**, the shell runs it, prints the result, and waits for the next one.
+
+When the terminal is waiting, it shows a **prompt**, something like:
+
+```
+asha@Ashas-MacBook-Air ~ %
+```
+
+That reads: user `asha`, on the computer `Ashas-MacBook-Air`, currently in the folder `~` (your home folder), and `%` means "ready". In these lessons we show commands without the prompt. Type only the command.
+
+Most commands have the same shape:
+
+```sh
+command  options  arguments
+ls       -l       Projects
+```
+
+- The **command** is the program to run: `ls` lists files.
+- **Options** (also called flags) change how it behaves. They start with `-`. Here `-l` means "long format, with details".
+- **Arguments** say what to work on: the `Projects` folder.
+
+## Worked example: your first commands
+
+Open **Terminal** (Command + Space, type `Terminal`, press Return), or in VS Code choose **Terminal → New Terminal**. Then type each of these and press Return:
+
+```sh
+whoami
+```
+
+Prints your user name. Not useful yet, but you just ran a program.
+
+```sh
+date
+```
+
+Prints the date and time.
+
+```sh
+echo "PayDeck is coming"
+```
+
+`echo` prints back whatever you give it. The quotes keep the words together as one argument.
+
+```sh
+ls
+```
+
+Lists the files and folders where you are now: your home folder, so you should see `Desktop`, `Documents`, `Projects` and others.
+
+```sh
+ls -l Projects
+```
+
+Lists what is inside `Projects`, with details such as size and date. You should see the `hello.txt` you made last lesson.
+
+```sh
+clear
+```
+
+Clears the screen. Your history is still there: press the **up arrow** to bring back earlier commands, and edit them before pressing Return again.
+
+<Aside type="tip" title="Two keys that save hours">
+- **Tab** completes names. Type `ls Proj` and press Tab, and the shell fills in `Projects/`.
+- **Control + C** stops a running command. Use it when something runs forever, such as a server you want to stop.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: read the manual">
+Find out what the `-a` option of `ls` does, then try it on your home folder.
+
+<Fragment slot="hint">Most commands have a manual page. The command to read one is `man`.</Fragment>
+<Fragment slot="hint2">Type `man ls`. Scroll with the arrow keys, search by typing `/-a` and Return, and quit with `q`.</Fragment>
+<Fragment slot="solution">`-a` means "all": it also lists **hidden** files, whose names start with a dot, such as `.zshrc`. Run `ls -a` and you will see several. Tools keep their settings in hidden files like these, and you will edit one in Module 11.</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="zsh: command not found: Is">
+Check the spelling. `ls` starts with a lowercase **L**, not a capital **i**. Commands are case-sensitive: `LS` is not `ls`.
+</Aside>
+
+<Aside type="caution" title="Nothing happens and there is no prompt">
+The command is still running, or waiting for you to type something. Press **Control + C** to stop it. If you opened a manual page or long output, press `q`.
+</Aside>
+
+## Recap
+
+- The terminal lets you run programs by typing **commands**; the shell on a Mac is **zsh**.
+- A command line is usually `command options arguments`.
+- Use **Tab** to complete names, the **up arrow** for history, and **Control + C** to stop.
+- `man` shows the manual for a command.
+
+<Quiz
+	questions={[
+		{
+			question: 'In `ls -l Projects`, what is `-l`?',
+			options: ['The command', 'An option', 'An argument'],
+			answer: 1,
+			explanation: 'Options start with a dash and change how the command behaves.',
+		},
+		{
+			question: 'A server you started is running and you want it to stop. What do you press?',
+			options: ['Command + Q', 'Control + C', 'Escape'],
+			answer: 1,
+			explanation: 'Control + C stops the command that is running in the terminal.',
+		},
+	]}
+/>
+
+<MarkComplete />

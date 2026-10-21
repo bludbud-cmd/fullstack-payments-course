@@ -1,0 +1,131 @@
+---
+title: "3.3 Pushing to GitHub"
+description: "Create a GitHub account, sign in from the terminal, and push a repository to GitHub."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson your notes repository is on GitHub, and you can push new commits to it.
+
+## Why it matters
+
+So far your commits exist only on your Mac. **GitHub** keeps a copy online: a backup if your Mac dies, a way to work from another computer, and a place to show your work. It is also where teams review each other's changes and where automated checks run. The PayDeck code lives on GitHub, and so will yours.
+
+## The idea
+
+Git and GitHub are different things:
+
+- **Git** is the program on your Mac that makes commits.
+- **GitHub** is a website that stores Git repositories and adds sharing, reviews and automation on top.
+
+A copy of your repository on GitHub is called a **remote**. By convention, the main remote is named `origin`. Two commands move commits between your Mac and the remote:
+
+- `git push` sends your new commits **up** to GitHub.
+- `git pull` brings new commits **down** from GitHub.
+
+## Worked example
+
+### 1. Create a GitHub account
+
+Go to [github.com](https://github.com) and sign up, using the email you gave Git in lesson 3.1. Choose your username carefully: it appears in the address of every repository you make. Turn on two-factor authentication when GitHub suggests it.
+
+### 2. Sign in from the terminal
+
+GitHub needs proof that pushes from your Mac are really you. The easiest way is the **GitHub CLI**, a command called `gh`.
+
+1. Go to [cli.github.com](https://cli.github.com), download the macOS installer, and run it.
+2. In a **new** terminal window, run:
+
+   ```sh
+   gh auth login
+   ```
+
+3. Answer the questions: **GitHub.com**, protocol **HTTPS**, **Yes** to authenticating Git with your GitHub credentials, and **Login with a web browser**. Copy the one-time code it shows, press Return, and paste the code into the page that opens.
+
+`gh auth status` should now say you are logged in. Git will use this login whenever it talks to GitHub.
+
+### 3. Create an empty repository on GitHub
+
+On GitHub, click **+** (top right) → **New repository**. Name it `course-notes`, choose **Private** if you like, and **do not** tick "Add a README" (your repository already has commits). Click **Create repository**.
+
+GitHub shows a page of instructions. Find the HTTPS address, which looks like `https://github.com/asha-rao/course-notes.git`.
+
+### 4. Connect and push
+
+In `~/Projects/course/notes`:
+
+```sh
+git remote add origin https://github.com/asha-rao/course-notes.git
+git push -u origin main
+```
+
+- `git remote add origin URL` tells Git where the remote is.
+- `git push -u origin main` sends the `main` branch there. `-u` remembers the choice, so from now on plain `git push` is enough.
+
+Refresh the GitHub page: your files and commits are there. Click **commits** to see your history online.
+
+### The everyday loop
+
+From now on, saving work is:
+
+```sh
+git add .
+git commit -m "Describe the change"
+git push
+```
+
+`git add .` stages every change in the current folder. Run `git status` first so you know what that includes.
+
+<Aside type="danger" title="Never commit secrets">
+Passwords, API keys and private keys must never go into a commit, even in a private repository: they stay in the history even after you delete the file. PayDeck keeps secrets in environment variables and files listed in `.gitignore`, which tells Git to ignore them. You will set this up properly in Part 8.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a change from the web">
+On GitHub, open `stuck-log.md`, click the pencil icon, add a line, and commit the change on the website. Then bring that change down to your Mac.
+
+<Fragment slot="hint">Your Mac does not know about the new commit yet. Which command brings commits down?</Fragment>
+<Fragment slot="solution">Run `git pull` in the `notes` folder. Git downloads the commit and updates `stuck-log.md`. `git log --oneline` now shows the commit you made on the website at the top.</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="! [rejected] main -> main (fetch first)">
+GitHub has commits that your Mac does not (perhaps you edited on the website). Run `git pull` first, then `git push` again.
+</Aside>
+
+<Aside type="caution" title="Password authentication is not supported">
+GitHub no longer accepts your account password from the terminal. Run `gh auth login` as above, and Git will use that login instead.
+</Aside>
+
+## Recap
+
+- **Git** makes commits on your Mac; **GitHub** stores repositories online.
+- A **remote** is a copy elsewhere; the main one is called `origin`.
+- `git push` sends commits up; `git pull` brings them down.
+- The everyday loop is add, commit, push. Never commit secrets.
+
+<Quiz
+	questions={[
+		{
+			question: 'You committed on your Mac. Is the commit on GitHub yet?',
+			options: ['Yes, automatically', 'No, not until you push', 'Only if the repository is public'],
+			answer: 1,
+			explanation: 'Commits stay on your Mac until `git push` sends them.',
+		},
+		{
+			question: 'You accidentally committed a password and then deleted the file in a new commit. Is it safe?',
+			options: ['Yes, the file is gone', 'No, it is still in the history', 'Only if you push again'],
+			answer: 1,
+			explanation: 'Every commit is a snapshot, so the old one still contains the password. Change the password straight away.',
+		},
+	]}
+/>
+
+<MarkComplete />

@@ -1,0 +1,166 @@
+---
+title: "2.3 Folders and paths"
+description: "Move between folders in the terminal, and create, copy, move and delete files safely."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can move around your Mac in the terminal and manage files and folders with commands.
+
+## Why it matters
+
+Almost every instruction in this course starts with "in the `app` folder, run…" or "in the `api` folder, run…". The PayDeck project has two halves in two folders, and commands only work from the right one. Knowing where you are, and how to get somewhere else, prevents a whole category of confusing errors.
+
+## The idea
+
+The terminal is always "in" one folder, called the **working directory**. Commands work there unless you give them a path.
+
+You met paths in lesson 1.1. There are two kinds:
+
+- An **absolute path** starts at the very top of the disk, with `/`: `/Users/asha/Projects/paydeck`. It means the same thing wherever you are.
+- A **relative path** starts from where you are: `paydeck/app`. It means "the `app` folder inside the `paydeck` folder inside where I am now".
+
+Some shortcuts you will use constantly:
+
+| Shortcut | Means |
+| --- | --- |
+| `~` | Your home folder, such as `/Users/asha` |
+| `.` | The folder you are in |
+| `..` | The folder above (the parent) |
+
+## Worked example: moving around
+
+```sh
+pwd
+```
+
+**P**rint **w**orking **d**irectory: where am I? A new terminal starts in your home folder, so you will see something like `/Users/asha`.
+
+```sh
+cd Projects
+pwd
+```
+
+**C**hange **d**irectory into `Projects`. `pwd` now shows `/Users/asha/Projects`.
+
+```sh
+mkdir paydeck-notes
+cd paydeck-notes
+```
+
+**M**a**k**e a **dir**ectory (folder), then go into it.
+
+```sh
+touch ideas.txt
+ls
+```
+
+`touch` creates an empty file. `ls` shows `ideas.txt`.
+
+```sh
+cp ideas.txt ideas-backup.txt
+mv ideas-backup.txt old-ideas.txt
+ls
+```
+
+`cp` copies a file, and `mv` moves it, which is also how you rename. You now have `ideas.txt` and `old-ideas.txt`.
+
+```sh
+cd ..
+pwd
+```
+
+`..` goes up one level, back to `Projects`.
+
+```sh
+cd ~
+```
+
+Back home from anywhere. (Plain `cd` with nothing after it does the same.)
+
+```sh
+code ~/Projects/paydeck-notes
+```
+
+Opens that folder in VS Code (if you installed the `code` command in lesson 2.1).
+
+<Aside type="danger" title="rm deletes for good">
+`rm old-ideas.txt` deletes a file, and `rm -r folder` deletes a folder and everything in it. There is **no Trash and no undo**. Run `pwd` and `ls` first to check where you are, and never run an `rm` command you copied from somewhere without understanding it.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: build a folder tree">
+From your home folder, using only the terminal, create this structure inside `Projects`:
+
+```
+practice/
+  app/
+    App.tsx
+  api/
+    README.md
+```
+
+Then check it with `ls`.
+
+<Fragment slot="hint">You need `cd`, `mkdir` and `touch`. `mkdir` can make several folders at once: `mkdir app api`.</Fragment>
+<Fragment slot="hint2">`mkdir -p practice/app` creates `practice` and `app` inside it in one go.</Fragment>
+<Fragment slot="solution">
+
+```sh
+cd ~/Projects
+mkdir -p practice/app practice/api
+touch practice/app/App.tsx practice/api/README.md
+ls practice practice/app practice/api
+```
+
+`-p` tells `mkdir` to create any missing parent folders. Giving `ls` several folders lists each one in turn.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="cd: no such file or directory: app">
+There is no `app` folder *where you are now*. Run `pwd` to see where you are and `ls` to see what is there. You are probably one folder too high or too low.
+</Aside>
+
+<Aside type="caution" title="Spaces in names">
+`cd My Projects` fails, because the space splits it into two arguments. Use quotes, `cd "My Projects"`, or press Tab to let the shell add a backslash: `cd My\ Projects`. Programmers avoid spaces in folder and file names for exactly this reason.
+</Aside>
+
+## Recap
+
+- `pwd` shows where you are, `ls` shows what is there, and `cd` moves you.
+- Absolute paths start with `/`; relative paths start from where you are. `~` is home and `..` is the folder above.
+- `mkdir` makes folders, `touch` makes files, `cp` copies, `mv` moves or renames.
+- `rm` deletes permanently: check with `pwd` and `ls` first.
+
+<Quiz
+	questions={[
+		{
+			question: 'You are in /Users/asha/Projects/paydeck/app. Where does `cd ..` take you?',
+			options: ['/Users/asha', '/Users/asha/Projects/paydeck', '/'],
+			answer: 1,
+			explanation: '`..` is the folder one level up.',
+		},
+		{
+			question: 'How do you rename notes.txt to ideas.txt?',
+			options: ['rename notes.txt ideas.txt', 'mv notes.txt ideas.txt', 'cp notes.txt ideas.txt'],
+			answer: 1,
+			explanation: 'Moving a file to a new name in the same folder renames it. `cp` would leave both files.',
+		},
+		{
+			question: 'Which path means the same thing wherever you are?',
+			options: ['app/src', '../api', '/Users/asha/Projects'],
+			answer: 2,
+			explanation: 'Absolute paths start at the top of the disk with `/`.',
+		},
+	]}
+/>
+
+<MarkComplete />

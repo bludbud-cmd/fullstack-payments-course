@@ -1,0 +1,54 @@
+---
+title: "Mini-project: draw an app"
+description: "Draw the client, server, API and database behind an app you use every day."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Time to put Module 1 together. No code: just paper and a pencil (or any drawing app).
+
+## The task
+
+Pick an app you use every day: a banking app, a food delivery app, a messaging app. Draw:
+
+1. **The client:** a box for the app on your phone.
+2. **The server:** a box for the company's server.
+3. **The API:** arrows between them. Label three arrows with a request the app probably makes, such as `GET /orders` or `POST /messages`. Write the method and a path you invent.
+4. **The database:** a cylinder next to the server. Inside it, list three tables the app probably has, each with three columns.
+5. **One journey:** pick one thing you do in the app (send a message, pay for a coffee) and number the steps from your tap to the result on screen, like the worked examples in this module.
+
+<Exercise title="Check your drawing">
+Go through your drawing and answer:
+
+- Is anything that involves money, permissions or shared data happening only on the client?
+- Does every arrow have a method and a path?
+- Does every table have an id column?
+
+<Fragment slot="hint">Compare with the worked example in lesson 1.3: the balance came from the server, not the phone.</Fragment>
+<Fragment slot="solution">
+Here is one for a food delivery app:
+
+- **Requests:** `GET /restaurants`, `POST /orders`, `GET /orders/31`.
+- **Tables:**
+  - **restaurants** (id, name, address)
+  - **orders** (id, customer_id, restaurant_id, status)
+  - **customers** (id, name, email)
+- **Journey:**
+  1. Tap **Order**.
+  2. The app sends `POST /orders` with the basket.
+  3. The server checks that the restaurant is open and the payment works.
+  4. The server saves a row in `orders` inside a transaction.
+  5. The server answers `201 Created`.
+  6. The app shows "Order placed".
+
+Yours will differ, and that is fine. What matters is that the decisions happen on the server.
+</Fragment>
+</Exercise>
+
+Keep the drawing. When you build PayDeck in Part 6, compare its real API with the one you imagined.
+
+<MarkComplete />

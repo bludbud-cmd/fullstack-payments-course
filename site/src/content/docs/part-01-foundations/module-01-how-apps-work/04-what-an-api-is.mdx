@@ -1,0 +1,128 @@
+---
+title: "1.4 What an API is"
+description: "Read a simple API request and response, and explain what an endpoint, a method and a status code are."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can read an API request and its response, and say what they mean.
+
+## Why it matters
+
+The PayDeck app and the PayDeck server only ever talk through the **API**. You will design it in Part 6, call it from the app in Part 7, and protect it in Part 8. Reading API messages is also the fastest way to debug: when a screen shows the wrong thing, the first question is always "what did the API send back?"
+
+## The idea
+
+An **API** (Application Programming Interface) is the list of things a server lets clients ask for, and the exact way to ask. In the restaurant picture, it is the menu plus the waiter: you can only order what is on the menu, and you have to order it the way the waiter understands.
+
+A web API request has a few parts:
+
+| Part | Example | Meaning |
+| --- | --- | --- |
+| **Method** | `GET` | What kind of thing you want to do. `GET` reads, `POST` creates, `PATCH` changes, `DELETE` removes |
+| **Path** | `/api/accounts/42` | Which thing. Each path you can call is an **endpoint** |
+| **Headers** | `Authorization: Bearer abc…` | Extra details, such as who is asking |
+| **Body** | `{"amountCents": 2550}` | The data you are sending, if any |
+
+The response has:
+
+| Part | Example | Meaning |
+| --- | --- | --- |
+| **Status code** | `200` | How it went: `2xx` worked, `4xx` you asked wrongly, `5xx` the server failed |
+| **Body** | `{"balanceCents": 124350}` | The data you asked for |
+
+The data is usually written in **JSON**, a simple text format of names and values in curly braces. You will write lots of it from Module 7.
+
+### Status codes you will meet
+
+- `200 OK` and `201 Created`: it worked.
+- `400 Bad Request`: something in your request is wrong, such as a missing amount.
+- `401 Unauthorized`: you are not signed in (or your sign-in has expired).
+- `403 Forbidden`: you are signed in, but not allowed to do this.
+- `404 Not Found`: there is no such thing (or you may not know it exists).
+- `500 Internal Server Error`: the server has a bug.
+
+## Worked example: topping up a PayDeck wallet
+
+The app sends:
+
+```http
+POST /api/accounts/42/top-ups
+Authorization: Bearer eyJhbGciOi...
+Content-Type: application/json
+
+{ "amountCents": 2550, "description": "Top-up" }
+```
+
+Read it line by line: *create* (`POST`) a top-up for account 42, here is proof of who I am, the body is JSON, and the amount is 2,550 cents ($25.50). PayDeck stores money as whole cents to avoid rounding errors; you will see why in Module 24.
+
+The server answers:
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json
+
+{ "transactionId": "7f3c2a9e-1b4d-4c8e-9a1f-2d3e4f5a6b7c" }
+```
+
+`201 Created` means it worked and something new was made: a transaction, with its ID.
+
+## Try it
+
+<Exercise title="Try it: read the response">
+The app asks to freeze card 7 and gets this back:
+
+```http
+HTTP/1.1 403 Forbidden
+
+{ "detail": "You are not allowed to do this to this card." }
+```
+
+What happened, and is it a bug in the server?
+
+<Fragment slot="hint">Look at the first digit of the status code, then at the exact code.</Fragment>
+<Fragment slot="solution">`4xx` means the request was the problem, not the server. `403` specifically means "I know who you are, but you may not do this", so the person is signed in but card 7 is not theirs to freeze. It is not a server bug; the server is protecting the card, exactly as it should.</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="401 versus 403">
+`401` means "who are you?" (sign in again). `403` means "I know who you are, and the answer is no". Mixing them up sends people to the sign-in screen when signing in again would not help.
+</Aside>
+
+## Recap
+
+- An **API** is the set of requests a server accepts, and how to make them.
+- A request has a **method**, a **path** (endpoint), **headers** and sometimes a **body**.
+- A response has a **status code** and usually a **body**, often in **JSON**.
+- `2xx` worked, `4xx` the request was wrong, `5xx` the server failed.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which method would you use to read a list of cards?',
+			options: ['POST', 'GET', 'DELETE'],
+			answer: 1,
+			explanation: 'GET reads data without changing anything.',
+		},
+		{
+			question: 'A request comes back with status 500. Whose problem is it most likely to be?',
+			options: ['The client’s', 'The server’s', 'The internet’s'],
+			answer: 1,
+			explanation: '5xx codes mean the server failed to handle a request.',
+		},
+		{
+			question: 'What does 401 tell the app to do?',
+			options: ['Try a different card', 'Sign in again', 'Wait and retry'],
+			answer: 1,
+			explanation: '401 means the server does not know who you are, usually because the sign-in expired.',
+		},
+	]}
+/>
+
+<MarkComplete />
