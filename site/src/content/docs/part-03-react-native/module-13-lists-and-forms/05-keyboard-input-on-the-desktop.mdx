@@ -1,0 +1,204 @@
+---
+title: "13.5 Keyboard input on the desktop"
+description: "Make forms work well with a real keyboard: focus the first field, move on with Return or Tab, submit with Return, and keep the keyboard out of the way on Android."
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can build a form that is quick to fill in from a keyboard: the cursor starts in the first field, Return moves to the next one, and Return in the last field submits.
+
+## Why it matters
+
+On a Mac, people expect to type, press Tab or Return, and never touch the mouse. On Android, the keyboard's action button should say **Next** and then **Done**, and do what it says. Getting this right is the difference between a form that feels native and one that feels like a website from 2005.
+
+## The idea
+
+Four tools cover almost everything:
+
+- **`autoFocus`** puts the cursor in a field when the screen opens.
+- **`onSubmitEditing`** runs when Return (or the keyboard's action button) is pressed in a field.
+- **`returnKeyType`** sets the label of Android's action button: `'next'`, `'done'`, `'go'`, `'search'`.
+- **Refs** let you move the cursor yourself, with `.focus()`.
+
+A **ref** is new. `useRef` creates a small box that React keeps between renders, like state, but changing it does **not** re-render. Its most common use is to hold on to a component on screen so you can call its methods:
+
+```tsx
+const limitInput = useRef<TextInput>(null);
+
+<TextInput ref={limitInput} ... />
+
+limitInput.current?.focus();   // move the cursor into that field
+```
+
+`limitInput.current` is the `TextInput` once it is on screen (and `null` before, hence `?.`).
+
+On the Mac, **Tab** already moves between text fields, and <kbd>Shift</kbd> + <kbd>Tab</kbd> moves back. You get that for free, in screen order, as long as the fields are real `TextInput`s.
+
+## Worked example
+
+Upgrade the form from lesson 13.4. First, make `Field` accept a `ref`, by adding it to its props type:
+
+```tsx
+import type { Ref } from 'react';
+import { StyleSheet, Text, TextInput, View, type TextInputProps } from 'react-native';
+
+type FieldProps = TextInputProps & {
+  label: string;
+  error?: string | null;
+  ref?: Ref<TextInput>;
+};
+```
+
+The rest of `Field` stays the same: `ref` is collected into `...input` with the other props and passed on to the `TextInput`.
+
+Then the form:
+
+```tsx
+import { useRef, useState } from 'react';
+import { ScrollView, Text, TextInput } from 'react-native';
+import { Button } from './Button';
+import { Field } from './Field';
+import { limitError, nicknameError } from './validation';
+
+export default function App() {
+  const [nickname, setNickname] = useState('');
+  const [limit, setLimit] = useState('');
+  const [submitted, setSubmitted] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const limitInput = useRef<TextInput>(null);
+
+  const errors = { nickname: nicknameError(nickname), limit: limitError(limit) };
+  const valid = errors.nickname === null && errors.limit === null;
+
+  function create() {
+    setSubmitted(true);
+    if (!valid) {
+      return;
+    }
+    setMessage(`Created ${nickname.trim()}`);
+    setNickname('');
+    setLimit('');
+    setSubmitted(false);
+  }
+
+  return (
+    <ScrollView
+      contentContainerStyle={{ padding: 24, gap: 16, width: '100%', maxWidth: 480, alignSelf: 'center' }}
+      keyboardShouldPersistTaps="handled"
+    >
+      <Field
+        label="Card name"
+        value={nickname}
+        onChangeText={setNickname}
+        placeholder="Groceries"
+        autoFocus
+        returnKeyType="next"
+        submitBehavior="submit"
+        onSubmitEditing={() => limitInput.current?.focus()}
+        error={submitted ? errors.nickname : null}
+      />
+      <Field
+        ref={limitInput}
+        label="Monthly limit (optional)"
+        value={limit}
+        onChangeText={setLimit}
+        placeholder="200"
+        keyboardType="decimal-pad"
+        returnKeyType="done"
+        onSubmitEditing={create}
+        error={submitted ? errors.limit : null}
+      />
+      <Button title="Create card" onPress={create} />
+      {message && <Text>{message}</Text>}
+    </ScrollView>
+  );
+}
+```
+
+What each new piece does:
+
+- `autoFocus` on the first field: on the Mac you can type straight away; on Android the keyboard opens.
+- In the first field, Return calls `limitInput.current?.focus()`, moving to the limit. `submitBehavior="submit"` keeps the keyboard open while it does, instead of closing it and opening it again.
+- In the last field, Return calls `create`, just like pressing the button.
+- `keyboardShouldPersistTaps="handled"` on the `ScrollView` means tapping the **Create card** button while the Android keyboard is open presses the button straight away, instead of only closing the keyboard first.
+- `maxWidth: 480` with `alignSelf: 'center'` stops the form stretching across a wide Mac window (lesson 12.5).
+
+On the Mac, try filling it in without the mouse: type a name, Return, type a limit, Return. Then try Tab and <kbd>Shift</kbd> + <kbd>Tab</kbd>.
+
+<Aside type="note" title="Copy, paste and undo">
+On the Mac, the **Edit** menu in the menu bar, and <kbd>Cmd</kbd> + <kbd>C</kbd>, <kbd>V</kbd>, <kbd>Z</kbd>, work in every `TextInput` automatically. You do not need to build them.
+</Aside>
+
+<Aside type="note" title="Shortcuts of your own">
+react-native-macos also lets a `View` listen for key presses, such as <kbd>Cmd</kbd> + <kbd>N</kbd> for "new card", through `keyDownEvents` and `onKeyDown`. These are Mac-only props, and PayDeck does not need them; the [react-native-macos documentation](https://microsoft.github.io/react-native-windows/docs/rnm-getting-started) describes them if you want to explore.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a three-field sign-in">
+Build a sign-up form with name, email and password fields (lesson 13.2). Return moves name → email → password, and Return in the password field shows "Signing up as ...". The first field is focused when the screen opens.
+
+<Fragment slot="hint">You need two refs, one for email and one for password. The first two fields use `returnKeyType="next"` and `submitBehavior="submit"`; the last uses `returnKeyType="go"`.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+const emailInput = useRef<TextInput>(null);
+const passwordInput = useRef<TextInput>(null);
+const [done, setDone] = useState(false);
+
+<Field label="Your name" value={name} onChangeText={setName} autoFocus
+  returnKeyType="next" submitBehavior="submit"
+  onSubmitEditing={() => emailInput.current?.focus()} />
+<Field ref={emailInput} label="Email" value={email} onChangeText={setEmail}
+  keyboardType="email-address" autoCapitalize="none" autoCorrect={false}
+  returnKeyType="next" submitBehavior="submit"
+  onSubmitEditing={() => passwordInput.current?.focus()} />
+<Field ref={passwordInput} label="Password" value={password} onChangeText={setPassword}
+  secureTextEntry returnKeyType="go" onSubmitEditing={() => setDone(true)} />
+{done && <Text>Signing up as {name} ({email})</Text>}
+```
+
+PayDeck's sign-in screen (`app/src/screens/SignInScreen.tsx`) submits from the password field the same way.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="ref.current.focus() crashes">
+Before the field is on screen, `current` is `null`. Use `ref.current?.focus()`, which does nothing when it is `null`.
+</Aside>
+
+<Aside type="caution" title="Return does nothing in a multiline field">
+In a `multiline` `TextInput`, Return adds a new line, which is usually what people want in a notes box. Do not rely on `onSubmitEditing` there.
+</Aside>
+
+## Recap
+
+- `autoFocus` starts in the first field; `onSubmitEditing` handles Return.
+- `useRef` holds a component so you can call `.focus()` on it; changing a ref does not re-render.
+- `returnKeyType` labels Android's action button; `submitBehavior="submit"` keeps the keyboard open between fields.
+- Tab, Shift+Tab, copy and paste work on the Mac automatically.
+
+<Quiz
+	questions={[
+		{
+			question: 'What is the difference between useRef and useState?',
+			options: ['There is none', 'Changing a ref does not re-render the component', 'Refs cannot hold components'],
+			answer: 1,
+			explanation: 'Both survive between renders, but only state changes cause a re-render.',
+		},
+		{
+			question: 'How do you make Return in the last field submit the form?',
+			options: ['onSubmitEditing={create}', 'returnKeyType="submit"', 'autoFocus'],
+			answer: 0,
+			explanation: 'onSubmitEditing runs when Return is pressed; returnKeyType only changes a label.',
+		},
+	]}
+/>
+
+<MarkComplete />

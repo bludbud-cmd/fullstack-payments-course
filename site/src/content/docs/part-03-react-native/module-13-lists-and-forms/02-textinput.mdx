@@ -1,0 +1,201 @@
+---
+title: "13.2 TextInput"
+description: "Configure text boxes for names, emails, passwords and amounts, and build a reusable labelled Field component."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can set up a `TextInput` for each kind of data, and write a reusable `Field` component with a label and an error message.
+
+## Why it matters
+
+Forms are where people tell your app what to do: sign in, name a card, enter an amount. Small details make them pleasant or painful: the right keyboard for numbers, no auto-capitals in email addresses, hidden passwords. Every PayDeck form is built from one `Field` component, so those details are right everywhere.
+
+## The idea
+
+You met the controlled `TextInput` in Module 11: `value` from state, `onChangeText` to update it. These props tune it for the data:
+
+| Prop | What it does | Use it for |
+| --- | --- | --- |
+| `keyboardType` | Which on-screen keyboard Android shows: `'default'`, `'email-address'`, `'decimal-pad'`, `'number-pad'`, `'phone-pad'` | Emails, amounts |
+| `autoCapitalize` | `'none'`, `'sentences'`, `'words'`, `'characters'` | `'none'` for emails, `'words'` for names |
+| `autoCorrect` | `false` stops spelling "fixes" | Emails, codes, names |
+| `secureTextEntry` | Hides what is typed | Passwords |
+| `autoComplete` | Tells the system what the field is, so it can offer saved values: `'email'`, `'password'`, `'name'` | Sign-in forms |
+| `placeholder` | Grey example text when empty | A hint such as `0.00` |
+| `multiline` | Several lines | Notes |
+| `maxLength` | Limits the number of characters | Short codes |
+| `editable` | `false` makes it read-only | While saving |
+
+On the Mac there is no on-screen keyboard, so `keyboardType` does nothing there, but the other props work.
+
+### A reusable Field
+
+Every field in a form needs the same pieces: a label above the box, the box, and sometimes an error under it. Write it once:
+
+```tsx
+import { StyleSheet, Text, TextInput, View, type TextInputProps } from 'react-native';
+
+type FieldProps = TextInputProps & {
+  label: string;
+  error?: string | null;
+};
+
+export function Field({ label, error, ...input }: FieldProps) {
+  return (
+    <View style={styles.field}>
+      <Text style={styles.label}>{label}</Text>
+      <TextInput
+        accessibilityLabel={label}
+        style={[styles.input, error ? styles.inputError : null]}
+        {...input}
+      />
+      {error ? <Text style={styles.error}>{error}</Text> : null}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  field: { gap: 4 },
+  label: { fontSize: 14, fontWeight: '600' },
+  input: { borderWidth: 1, borderColor: '#dfe1ea', borderRadius: 10, padding: 12, fontSize: 16 },
+  inputError: { borderColor: '#b3261e' },
+  error: { color: '#b3261e' },
+});
+```
+
+Two new pieces of syntax:
+
+- `TextInputProps & { label: string; ... }` is an **intersection type**: all of `TextInput`'s props **and** our two extra ones. So `Field` accepts `keyboardType`, `placeholder` and the rest for free.
+- `{ label, error, ...input }` takes out `label` and `error`, and collects **every other prop** into an object called `input`. Then `<TextInput {...input} />` **spreads** them onto the real text box. This is the same `...` as copying objects in Module 7, used on props.
+
+## Worked example
+
+Save the component above as `Field.tsx` in `HelloMe`, then a sign-up form in `App.tsx`:
+
+```tsx
+import { useState } from 'react';
+import { ScrollView, Text } from 'react-native';
+import { Field } from './Field';
+
+export default function App() {
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+
+  return (
+    <ScrollView contentContainerStyle={{ padding: 24, gap: 16 }}>
+      <Field
+        label="Your name"
+        value={name}
+        onChangeText={setName}
+        autoCapitalize="words"
+        autoComplete="name"
+      />
+      <Field
+        label="Email"
+        value={email}
+        onChangeText={setEmail}
+        keyboardType="email-address"
+        autoCapitalize="none"
+        autoCorrect={false}
+        autoComplete="email"
+      />
+      <Field
+        label="Password"
+        value={password}
+        onChangeText={setPassword}
+        secureTextEntry
+        autoComplete="password"
+        error={password.length > 0 && password.length < 10 ? 'Use at least 10 characters' : null}
+      />
+      <Text>Signing up as {name || '...'} ({email || 'no email yet'})</Text>
+    </ScrollView>
+  );
+}
+```
+
+Try it in the emulator: tap the email field, and the keyboard has an `@` key and does not capitalise the first letter. The password shows dots. Type three characters and the error appears; reach ten and it goes.
+
+<Aside type="tip" title="Tap the label, find the field">
+Because the `TextInput` gets `accessibilityLabel={label}`, a screen reader says "Email, text field" rather than just "text field". Tests can also find fields by their label, which you will use in Module 35.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a hint">
+Add an optional `hint` prop to `Field`: grey text under the box, shown only when there is no error. Use it on the password field: "At least 10 characters. Longer is safer."
+
+<Fragment slot="hint">Add `hint?: string` to `FieldProps`, take it out next to `label` and `error`, and choose what to show with a nested ternary: error, else hint, else nothing.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+type FieldProps = TextInputProps & {
+  label: string;
+  error?: string | null;
+  hint?: string;
+};
+
+export function Field({ label, error, hint, ...input }: FieldProps) {
+  return (
+    <View style={styles.field}>
+      <Text style={styles.label}>{label}</Text>
+      <TextInput
+        accessibilityLabel={label}
+        style={[styles.input, error ? styles.inputError : null]}
+        {...input}
+      />
+      {error ? (
+        <Text style={styles.error}>{error}</Text>
+      ) : hint ? (
+        <Text style={{ color: '#5d6177' }}>{hint}</Text>
+      ) : null}
+    </View>
+  );
+}
+```
+
+This is exactly PayDeck's `app/src/components/Field.tsx`, apart from the colours, which come from the theme there.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Spreading before your own props">
+In `<TextInput {...input} style={...} />`, your `style` wins over any `style` in `input`; in `<TextInput style={...} {...input} />`, the spread wins. Later props override earlier ones, as in style arrays.
+</Aside>
+
+<Aside type="caution" title="Text that will not clear">
+If you reset a form with `setEmail('')` but the box still shows text, the `TextInput` is missing `value={email}`: it is not controlled, so it ignores your state.
+</Aside>
+
+## Recap
+
+- `keyboardType`, `autoCapitalize`, `autoCorrect`, `secureTextEntry` and `autoComplete` fit a field to its data.
+- `TextInputProps & {...}` adds your own props to a component's existing ones.
+- `{ label, ...input }` collects the remaining props; `{...input}` passes them on.
+- A shared `Field` component keeps every form consistent and accessible.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which props suit an email field?',
+			options: ["secureTextEntry", "keyboardType='email-address' and autoCapitalize='none'", "multiline"],
+			answer: 1,
+			explanation: 'An @ key on the keyboard, and no capital letter at the start.',
+		},
+		{
+			question: 'In `function Field({ label, ...input })`, what is `input`?',
+			options: ['The label', 'All the props except label', 'The text typed so far'],
+			answer: 1,
+			explanation: 'The ... collects everything not taken out by name.',
+		},
+	]}
+/>
+
+<MarkComplete />

@@ -1,0 +1,157 @@
+---
+title: "12.6 Accessibility basics"
+description: "Make your app work for people using screen readers, larger text and keyboards: labels, roles, grouping, contrast and touch targets."
+sidebar:
+  order: 6
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can label and group components for screen readers, give controls their roles and states, and check contrast, text size and touch targets.
+
+## Why it matters
+
+Around one in six people lives with a disability. Some are blind and use a **screen reader**, which speaks what is on screen; some need larger text; some cannot use a mouse or touch screen precisely. A payments app that only works for some people locks the others out of their own money. Most accessibility comes from a few habits, and they make the app better for everyone.
+
+## The idea
+
+A screen reader moves from element to element and speaks each one. Android's is **TalkBack**; the Mac's is **VoiceOver**. It needs to know three things about each element:
+
+| What | Prop | Example |
+| --- | --- | --- |
+| What it is called | `accessibilityLabel` | `"Everyday card ending 4242"` |
+| What kind of thing it is | `accessibilityRole` | `"button"`, `"switch"`, `"header"`, `"link"`, `"image"` |
+| What state it is in | `accessibilityState` | `{ disabled: true }`, `{ checked: true }`, `{ selected: true }` |
+
+`Text` is read out automatically. Images and icons need a label. A `Pressable` needs a role, otherwise the screen reader does not say it can be pressed.
+
+**Grouping:** a card made of four separate `Text`s is read as four separate stops. Adding `accessible` to the outer `View` makes it one element, and its `accessibilityLabel` is what is spoken. PayDeck's card does this.
+
+Three checks that need no special tools:
+
+- **Contrast.** Text needs enough contrast with its background: at least 4.5 to 1 for normal text. Free contrast checkers online tell you the ratio for two colours. Light grey on white usually fails.
+- **Text size.** People can make text bigger in their system settings, and React Native follows it. Your layouts should survive text at twice the size: avoid fixed heights on boxes that contain text.
+- **Touch targets.** Anything tappable should be at least 44 × 44 points, so it is easy to hit. A small icon can keep its look and still have a bigger target with `hitSlop`.
+
+## Worked example
+
+```tsx
+import { useState } from 'react';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+
+export default function App() {
+  const [frozen, setFrozen] = useState(false);
+
+  return (
+    <View style={styles.screen}>
+      <Text accessibilityRole="header" style={styles.title}>Your cards</Text>
+
+      <View
+        accessible
+        accessibilityLabel={`Everyday card ending 4242, ${frozen ? 'frozen' : 'active'}`}
+        style={[styles.card, frozen && styles.frozen]}
+      >
+        <Text style={styles.cardText}>Everyday</Text>
+        <Text style={styles.cardText}>•••• 4242</Text>
+      </View>
+
+      <Pressable
+        accessibilityRole="switch"
+        accessibilityLabel="Freeze card"
+        accessibilityState={{ checked: frozen }}
+        onPress={() => setFrozen(!frozen)}
+        style={styles.button}
+      >
+        <Text>{frozen ? 'Unfreeze' : 'Freeze'}</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  screen: { flex: 1, padding: 24, gap: 16 },
+  title: { fontSize: 24, fontWeight: '700' },
+  card: { padding: 20, borderRadius: 16, backgroundColor: '#3c4fe0' },
+  frozen: { backgroundColor: '#55607f' },
+  cardText: { color: '#ffffff', fontSize: 18 },
+  button: { minHeight: 44, justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderRadius: 10 },
+});
+```
+
+What a screen reader says, moving through the screen:
+
+1. "Your cards, heading". People using screen readers jump between headings to find their way around.
+2. "Everyday card ending 4242, active". One stop for the whole card, instead of reading "Everyday", then four dots and numbers.
+3. "Freeze card, switch, off". After a double-tap: "on".
+
+Notice the card's label says "ending 4242" rather than reading out "•••• 4242" as dots.
+
+### Try it with a real screen reader
+
+- **Mac:** press <kbd>Cmd</kbd> + <kbd>F5</kbd> to turn VoiceOver on and off. <kbd>Ctrl</kbd> + <kbd>Option</kbd> + arrow keys move between elements; <kbd>Ctrl</kbd> + <kbd>Option</kbd> + <kbd>Space</kbd> presses.
+- **Android emulator:** Settings → Accessibility → TalkBack. Swipe right to move to the next element; double-tap to press. (If TalkBack is not installed on your emulator image, use a real phone or rely on the Mac.)
+
+The first time is confusing; give it ten minutes. It is the only way to really know what your app sounds like.
+
+## Try it
+
+<Exercise title="Try it: an accessible transaction row">
+Take the transaction row from the Flexbox lesson (a letter circle, merchant name, date and amount). Make it one screen reader stop that says, for example, "Bean There Coffee, 3 dollars 50 spent, 21 October". Make the whole row pressable with a button role, at least 44 points high.
+
+<Fragment slot="hint">Put `accessible`, `accessibilityRole` and `accessibilityLabel` on the outer `Pressable`. The letter circle is decoration, so the label simply leaves it out.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+<Pressable
+  accessible
+  accessibilityRole="button"
+  accessibilityLabel="Bean There Coffee, 3 dollars 50 spent, 21 October"
+  onPress={() => {}}
+  style={{ flexDirection: 'row', alignItems: 'center', gap: 12, padding: 16, minHeight: 44 }}
+>
+  {/* the same circle, name, date and amount as before */}
+</Pressable>
+```
+
+In a real app the label is built from the data, for example `` `${merchant}, ${amountForSpeech} spent, ${date}` ``. Writing "3 dollars 50" rather than "−$3.50" makes screen readers say the amount naturally; "minus dollar three point five zero" is what you might get otherwise.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Labels that repeat the role">
+`accessibilityLabel="Freeze button"` with `accessibilityRole="button"` is read as "Freeze button, button". Let the role say what it is.
+</Aside>
+
+<Aside type="caution" title="Colour as the only signal">
+A card that is only greyed out when frozen tells a colour-blind person, or a screen reader, nothing. Also say it in text, like the "Frozen" badge on PayDeck's card.
+</Aside>
+
+## Recap
+
+- Screen readers need a **label**, a **role** and a **state** for each element.
+- `accessible` on a container makes a group read as one element.
+- Check contrast (4.5 to 1), large text, and 44-point touch targets.
+- Test with VoiceOver (<kbd>Cmd</kbd> + <kbd>F5</kbd> on the Mac) or TalkBack.
+
+<Quiz
+	questions={[
+		{
+			question: 'A Pressable has text inside but no accessibilityRole. What does a screen reader miss?',
+			options: ['The text', 'That it can be pressed', 'Nothing'],
+			answer: 1,
+			explanation: 'Without a role it is read as plain text.',
+		},
+		{
+			question: 'What does `accessible` on a View do?',
+			options: ['Makes it bigger', 'Groups its children into one screen reader element', 'Hides it from screen readers'],
+			answer: 1,
+			explanation: 'The group is read once, using its accessibilityLabel.',
+		},
+	]}
+/>
+
+<MarkComplete />

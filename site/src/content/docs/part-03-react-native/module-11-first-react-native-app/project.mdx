@@ -1,0 +1,92 @@
+---
+title: "Mini-project: \"Hello, me\" profile screen"
+description: "Build a profile screen about yourself, with a photo, a switch and a tappable fun fact, and run it on Android and on the Mac."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Turn `HelloMe` into a screen about you, and prove it runs on both platforms.
+
+## What it does
+
+A centred, scrolling profile:
+
+- A round photo of you (or anything you like).
+- Your name in large bold text, and one line about you.
+- A switch that changes between "Free for coffee" and "Busy right now".
+- A "Fun fact" box: tapping it shows the next fact from a list, going back to the first after the last.
+- A small grey line at the bottom: "Running on Android" or "Running on macOS".
+
+## Requirements
+
+1. Put a photo in the project folder as `me.png` (or `.jpg`) and show it with `<Image source={require('./me.png')} />`, 120 points wide and high. `borderRadius: 60` (half the width) makes it round.
+2. Use `useState` for the switch and for which fact is showing.
+3. Give the photo an `accessibilityLabel` and the fact box `accessibilityRole="button"`.
+4. Run it on the emulator (or your phone) **and** on the Mac, and take a screenshot of each: <kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>4</kbd>, then <kbd>Space</kbd>, then click a window.
+5. Commit it to Git and push it to a new GitHub repository, as in Module 3.
+
+<Exercise title="Check your work">
+Tap the fact box until it comes back to the first fact. Flip the switch. Resize the Mac window and check the content stays centred.
+
+<Fragment slot="hint">`require('./me.png')` loads an image that is part of your project. Unlike a web image, React Native knows its size, but you still set one so it is not shown at full size.</Fragment>
+<Fragment slot="hint2">To go round a list, use the remainder operator from Module 4: `(index + 1) % facts.length` is 0 again after the last fact.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+import { useState } from 'react';
+import { Image, Platform, Pressable, ScrollView, Switch, Text, View } from 'react-native';
+
+const facts = [
+  'I have never coded before this course.',
+  'My favourite food is dosa.',
+  'I once froze my own bank card by accident.',
+];
+
+export default function App() {
+  const [factIndex, setFactIndex] = useState(0);
+  const [available, setAvailable] = useState(true);
+
+  return (
+    <ScrollView contentContainerStyle={{ padding: 32, gap: 16, alignItems: 'center' }}>
+      <Image
+        source={require('./me.png')}
+        style={{ width: 120, height: 120, borderRadius: 60 }}
+        accessibilityLabel="Photo of me"
+      />
+      <Text style={{ fontSize: 28, fontWeight: 'bold' }}>Asha Rao</Text>
+      <Text>Learning full-stack development, one module at a time.</Text>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+        <Switch value={available} onValueChange={setAvailable} />
+        <Text>{available ? 'Free for coffee' : 'Busy right now'}</Text>
+      </View>
+      <Pressable
+        accessibilityRole="button"
+        onPress={() => setFactIndex((factIndex + 1) % facts.length)}
+        style={{ padding: 12, borderWidth: 1, borderRadius: 8 }}
+      >
+        <Text>Fun fact: {facts[factIndex]}</Text>
+      </Pressable>
+      <Text style={{ color: 'gray' }}>
+        Running on {Platform.OS === 'android' ? 'Android' : 'macOS'}
+      </Text>
+    </ScrollView>
+  );
+}
+```
+
+`facts` lives outside the component because it never changes: there is no need to create it again on every render.
+
+Notice there is no `if (Platform.OS === ...)` anywhere except the last line. The same components work on both platforms, which is the point.
+</Fragment>
+</Exercise>
+
+<Aside type="tip" title="Commit the right files">
+The project already has a `.gitignore` that leaves out `node_modules`, build folders and pods. `git status` should show only your own files and the project's configuration. If you see thousands of files, check you are in the `HelloMe` folder.
+</Aside>
+
+<MarkComplete />

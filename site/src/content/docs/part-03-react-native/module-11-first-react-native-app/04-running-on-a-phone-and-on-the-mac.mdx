@@ -1,0 +1,141 @@
+---
+title: "11.4 Running on a phone and on the Mac"
+description: "Run your app on a real Android phone, use Metro's shortcuts, read logs in React Native DevTools, and know when to rebuild."
+sidebar:
+  order: 4
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can run the app on a real Android phone (if you have one), reload it, read its logs, and tell a "reload" problem from a "rebuild" problem.
+
+## Why it matters
+
+The emulator is great, but nothing beats holding your app in your hand: it shows you how big buttons really are and how fast the app really feels. And whatever device you use, you need a daily routine for running, reloading and debugging.
+
+## The idea
+
+Your app on a device and Metro on your Mac work as a pair:
+
+- The **native shell** (Java and Kotlin on Android, Swift on the Mac) is built once and installed. Rebuild it when you change anything in `android/` or `macos/`, or install a library with native code.
+- The **JavaScript bundle** comes from Metro every time the app starts or you save. Most of the time, this is the only part that changes.
+
+So there are three levels of "try again":
+
+| What you changed | What to do |
+| --- | --- |
+| Your `.tsx` files | Nothing: Fast Refresh updates the app when you save |
+| Something Fast Refresh could not handle, or state is in a strange place | **Reload**: press `r` in the Metro window |
+| `android/`, `macos/`, or a new library with native code | **Rebuild**: `npm run android` / `npm run macos` again (and `pod install` first, for the Mac) |
+
+## Worked example
+
+### Metro's keyboard shortcuts
+
+Click on the Metro terminal window and press:
+
+- `r` to reload every connected app.
+- `d` to open the **Dev Menu** in the app, with options such as Reload and turning Fast Refresh off.
+- `j` to open **React Native DevTools** in a browser window.
+
+### Reading logs
+
+Add a log to `App.tsx`, inside the `App` function:
+
+```tsx
+console.log('App rendered at', new Date().toLocaleTimeString());
+```
+
+Press `j` in Metro, and open the **Console** tab in the DevTools window: your message appears every time the app renders. This is the same `console.log` debugging as Module 5, now for your app. DevTools also has a **Components** tab showing the tree of components and each one's props and state.
+
+<Aside type="note" title="Logs are not in the Metro window">
+Older tutorials show logs in the Metro terminal. Since React Native 0.77 they are only in DevTools, so if you are looking at the terminal and see nothing, press `j`.
+</Aside>
+
+### Running on an Android phone
+
+<Steps>
+
+1. On the phone, open **Settings → About phone** and tap **Build number** seven times. A message says you are now a developer.
+2. Go back to **Settings → System → Developer options** (the exact place differs between phone makers) and turn on **USB debugging**.
+3. Connect the phone to your Mac with a USB cable that carries data (some cables only charge). On the phone, tap **Allow** when it asks whether to trust this computer.
+4. Check that your Mac can see it:
+
+   ```sh
+   adb devices
+   ```
+
+   ```
+   List of devices attached
+   R58N12ABCDE    device
+   ```
+
+   If it says `unauthorized`, look for the question on the phone's screen.
+5. Close the emulator (or keep it and choose the phone in the next step), then:
+
+   ```sh
+   npm run android
+   ```
+
+   If more than one device is connected, `npm run android -- --list-devices` lets you choose.
+
+</Steps>
+
+The app installs on your phone and opens. It loads its JavaScript from Metro on your Mac through the USB cable, so Fast Refresh works exactly as in the emulator. Unplug it and the installed app can no longer reach Metro; that is fine for development. Module 36 builds a **release** version that carries its own JavaScript and works anywhere.
+
+### Running on the Mac
+
+The Mac app is already on the device you are using. Two tips:
+
+- The app stays open after you stop Metro. If it shows a red "could not connect" screen, start Metro again with `npm start` and press `r`.
+- The built app lives in Xcode's build folder, not in Applications. You start it with `npm run macos` (fast after the first time) or from Xcode.
+
+## Try it
+
+<Exercise title="Try it: find the log">
+Add a button that logs "Button pressed" with the current count from a `useState` counter. Press it five times, then find the five messages in DevTools. Then reload with `r` in Metro. What happens to the count, and why?
+
+<Fragment slot="hint">Reloading restarts the JavaScript from the beginning.</Fragment>
+<Fragment slot="solution">
+After the reload the count is back to 0. State lives in memory in the running JavaScript; a reload throws that away and starts fresh. Fast Refresh, on the other hand, tries to **keep** state when you edit a component, which is why it feels so quick. Saving data so it survives a restart is lesson 14.5.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Unable to load script / could not connect to development server">
+Metro is not running, or the device cannot reach it. Run `npm start` in the project folder, then reload. For a USB phone, `adb reverse tcp:8081 tcp:8081` reconnects the cable route that `npm run android` normally sets up.
+</Aside>
+
+<Aside type="caution" title="Changes in android/ or macos/ do nothing">
+Fast Refresh and reload only update JavaScript. Native changes need a rebuild.
+</Aside>
+
+## Recap
+
+- The native shell is built and installed; the JavaScript comes from Metro.
+- Save for Fast Refresh, `r` to reload, rebuild for native changes.
+- Press `j` in Metro for React Native DevTools: logs in Console, the component tree in Components.
+- An Android phone needs USB debugging turned on; `adb devices` checks the connection.
+
+<Quiz
+	questions={[
+		{
+			question: 'You added a library with native code. What do you need to do?',
+			options: ['Save the file', 'Press r in Metro', 'Rebuild the app (and pod install for the Mac)'],
+			answer: 2,
+			explanation: 'Native code is part of the installed shell, which only a rebuild changes.',
+		},
+		{
+			question: 'Where do console.log messages appear?',
+			options: ['On the phone screen', 'In React Native DevTools (press j in Metro)', 'In Android Studio only'],
+			answer: 1,
+			explanation: 'Since React Native 0.77, logs are shown in DevTools.',
+		},
+	]}
+/>
+
+<MarkComplete />

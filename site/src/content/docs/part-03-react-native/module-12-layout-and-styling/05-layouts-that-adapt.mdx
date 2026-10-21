@@ -1,0 +1,172 @@
+---
+title: "12.5 Layouts that adapt from phone to desktop"
+description: "Use the window's size to choose a layout: one column on a phone, a grid on a wide Mac window, and content that never stretches too wide."
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can read the window size with `useWindowDimensions`, switch layouts at breakpoints, and limit how wide content gets.
+
+## Why it matters
+
+A phone screen is about 400 points wide. A Mac window can be 400 points or 2,000, and people resize it while using the app. A layout designed only for the phone looks lost on a big window: one huge card stretched across the whole screen. PayDeck shows cards in one column on a phone and in a grid on the Mac, and its tab bar becomes a sidebar on wide windows.
+
+## The idea
+
+`useWindowDimensions()` returns the window's current `width` and `height` in points, and re-renders the component whenever they change, for example when someone resizes the Mac window or turns their phone sideways.
+
+```tsx
+const { width } = useWindowDimensions();
+```
+
+Choose layouts with **breakpoints**: widths at which the layout changes. Keep the decision in a small function, so it is easy to read and test:
+
+```ts
+function columnsFor(width: number): number {
+  if (width >= 1000) return 3;
+  if (width >= 640) return 2;
+  return 1;
+}
+```
+
+Three more tools help content look right at any size:
+
+- **`maxWidth`** stops a box growing beyond a comfortable size. Lines of text longer than about 70 characters are hard to read.
+- **`alignSelf: 'center'`** centres that box in the space around it.
+- **`flexWrap: 'wrap'`** lets a row of items continue on the next line when it runs out of room, which makes a grid.
+
+## Worked example
+
+A grid of cards whose number of columns follows the window:
+
+```tsx
+import { ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+
+const MAX_WIDTH = 1100;
+const PADDING = 16;
+const GAP = 16;
+
+function columnsFor(width: number): number {
+  if (width >= 1000) return 3;
+  if (width >= 640) return 2;
+  return 1;
+}
+
+const cards = ['Everyday', 'Travel', 'Groceries', 'Gym', 'Gifts'];
+
+export default function App() {
+  const { width } = useWindowDimensions();
+  const columns = columnsFor(width);
+  const pageWidth = Math.min(width, MAX_WIDTH) - PADDING * 2;
+  const cardWidth = (pageWidth - GAP * (columns - 1)) / columns;
+
+  return (
+    <ScrollView contentContainerStyle={styles.page}>
+      <Text>
+        {Math.round(width)} points wide: {columns} {columns === 1 ? 'column' : 'columns'}
+      </Text>
+      <View style={styles.grid}>
+        {cards.map((name) => (
+          <View key={name} style={[styles.card, { width: cardWidth }]}>
+            <Text style={styles.cardText}>{name}</Text>
+          </View>
+        ))}
+      </View>
+    </ScrollView>
+  );
+}
+
+const styles = StyleSheet.create({
+  page: { padding: PADDING, gap: GAP, width: '100%', maxWidth: MAX_WIDTH, alignSelf: 'center' },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: GAP },
+  card: { aspectRatio: 1.586, borderRadius: 16, padding: 16, backgroundColor: '#3c4fe0' },
+  cardText: { color: '#fff', fontSize: 18, fontWeight: '600' },
+});
+```
+
+Run it on the Mac and drag the window narrower and wider. The text at the top shows the width, and the grid jumps between 1, 2 and 3 columns. Above 1100 points, the content stops growing and stays centred.
+
+How the card width is worked out: the page is the window width (at most 1100) minus the padding on both sides. Between `columns` cards there are `columns - 1` gaps. What is left is shared equally.
+
+On the Android emulator you see one column; rotate the emulator (the rotate buttons in its side toolbar) and you get two.
+
+<Aside type="tip" title="Design for the narrowest first">
+Start with the phone layout, then add what changes for wider windows. Most of a screen usually stays the same; only a few places need a breakpoint.
+</Aside>
+
+### Where PayDeck does this
+
+Open `app/src/navigation/AppNavigator.tsx` in the course repository. It uses `useWindowDimensions` to decide between a tab bar at the bottom (narrow) and a sidebar on the left (wide). You will build the same thing in Module 14.
+
+## Try it
+
+<Exercise title="Try it: a side panel">
+Make a screen with a list of three card names and a "details" area. When the window is at least 800 points wide, show the list on the left (300 points wide) and the details on the right, filling the rest. When it is narrower, show the list above the details.
+
+<Fragment slot="hint">Keep `const wide = width >= 800;` and switch `flexDirection` between `'row'` and `'column'` on the outer `View`.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+export default function App() {
+  const { width } = useWindowDimensions();
+  const wide = width >= 800;
+
+  return (
+    <View style={{ flex: 1, flexDirection: wide ? 'row' : 'column' }}>
+      <View style={{ width: wide ? 300 : '100%', padding: 16, gap: 8, backgroundColor: '#dfe1ea' }}>
+        <Text>Everyday</Text>
+        <Text>Travel</Text>
+        <Text>Groceries</Text>
+      </View>
+      <View style={{ flex: 1, padding: 16 }}>
+        <Text>Details of the selected card</Text>
+      </View>
+    </View>
+  );
+}
+```
+
+In a row, `flex: 1` on the details fills the remaining **width**; in a column, the remaining **height**. One property, both layouts.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Using Dimensions.get once">
+Old tutorials use `Dimensions.get('window')`. It reads the size once and does not update when the window changes. Use the `useWindowDimensions` hook.
+</Aside>
+
+<Aside type="caution" title="Using the platform instead of the size">
+`Platform.OS === 'macos'` is not the same as "wide": a Mac window can be narrow, and an Android tablet is wide. Choose layouts by size, and use `Platform.OS` only for real platform differences.
+</Aside>
+
+## Recap
+
+- `useWindowDimensions()` gives the window's width and height and updates when they change.
+- Choose layouts at breakpoints, kept in a small function.
+- `maxWidth` with `alignSelf: 'center'` stops content stretching on big windows.
+- `flexWrap: 'wrap'` turns a row into a grid.
+
+<Quiz
+	questions={[
+		{
+			question: 'Someone makes the Mac window narrower. What re-renders your component?',
+			options: ['Nothing; you must restart the app', 'useWindowDimensions, which reports the new size', 'Platform.OS'],
+			answer: 1,
+			explanation: 'The hook re-renders the component with the new width and height.',
+		},
+		{
+			question: 'Why choose a layout by window width rather than by Platform.OS?',
+			options: ['Platform.OS is slow', 'A Mac window can be narrow and a tablet can be wide', 'It is the same thing'],
+			answer: 1,
+			explanation: 'The space available is what matters for layout.',
+		},
+	]}
+/>
+
+<MarkComplete />

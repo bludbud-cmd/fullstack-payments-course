@@ -1,0 +1,200 @@
+---
+title: "Mini-project: payment card component"
+description: "Build PayDeck's virtual card component: the shape of a real bank card, colours for each status, light and dark mode, and a screen reader label."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Build the most recognisable piece of PayDeck: the card. You will use it again in Modules 13 and 14, and the finished app uses almost exactly this component.
+
+## What it does
+
+A list of three cards, each drawn like a real bank card:
+
+- Top row: the card's nickname on the left, a small status badge ("Active", "Frozen", "Cancelled") on the right.
+- Middle: `•••• •••• •••• 4242`, showing only the last four digits.
+- Bottom row: "PayDeck virtual" on the left, the spending limit ("Limit $500.00" or "No limit") on the right.
+- Blue when active, grey-blue when frozen, grey when cancelled, with darker shades in dark mode.
+
+## Requirements
+
+1. A `Card` type with `id`, `nickname`, `last4`, `status` (`'ACTIVE' | 'FROZEN' | 'CANCELLED'`) and `spendingLimitCents` (`number | null`).
+2. A `PaymentCard` component in its own file, `PaymentCard.tsx`, that takes one prop, `card`.
+3. The card keeps the shape of a real bank card (`aspectRatio: 1.586`), fills the available width, but is never wider than 380 points.
+4. Colours come from a theme with light and dark versions (lesson 12.4), including one colour per status.
+5. The whole card is **one** screen reader element, with a label such as "Everyday card ending 4242, Active, Limit $500.00".
+6. `App.tsx` shows three sample cards, one in each status, centred, in a `ScrollView`.
+
+<Exercise title="Check your work">
+Run it on both platforms, in light and dark mode. Make the Mac window very wide (the cards stop at 380 points) and narrow (they shrink but keep their shape). Turn on VoiceOver (<kbd>Cmd</kbd> + <kbd>F5</kbd>) and check each card is read once, with its status.
+
+<Fragment slot="hint">Pick the background colour with a ternary on `card.status`, and add it after the static style: `style={[styles.card, { backgroundColor: background }]}`.</Fragment>
+<Fragment slot="hint2">`justifyContent: 'space-between'` on the card (a column) pushes the top row up, the bottom row down, and leaves the number in the middle.</Fragment>
+<Fragment slot="solution">
+
+`theme.ts`:
+
+```ts
+import { useColorScheme } from 'react-native';
+
+const light = {
+  background: '#f5f6fa',
+  text: '#14162b',
+  cardActive: '#3c4fe0',
+  cardFrozen: '#7b8bb0',
+  cardCancelled: '#9a9cab',
+};
+
+const dark: typeof light = {
+  background: '#0f1020',
+  text: '#f1f2f8',
+  cardActive: '#4b5cf0',
+  cardFrozen: '#55607f',
+  cardCancelled: '#4a4c5e',
+};
+
+export function useTheme() {
+  return useColorScheme() === 'dark' ? dark : light;
+}
+```
+
+`PaymentCard.tsx`:
+
+```tsx
+import { StyleSheet, Text, View } from 'react-native';
+import { useTheme } from './theme';
+
+export type CardStatus = 'ACTIVE' | 'FROZEN' | 'CANCELLED';
+
+export type Card = {
+  id: string;
+  nickname: string;
+  last4: string;
+  status: CardStatus;
+  spendingLimitCents: number | null;
+};
+
+const statusLabel = {
+  ACTIVE: 'Active',
+  FROZEN: 'Frozen',
+  CANCELLED: 'Cancelled',
+};
+
+function formatDollars(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
+export function PaymentCard({ card }: { card: Card }) {
+  const theme = useTheme();
+  const background =
+    card.status === 'ACTIVE'
+      ? theme.cardActive
+      : card.status === 'FROZEN'
+      ? theme.cardFrozen
+      : theme.cardCancelled;
+  const limit =
+    card.spendingLimitCents === null
+      ? 'No limit'
+      : `Limit ${formatDollars(card.spendingLimitCents)}`;
+
+  return (
+    <View
+      accessible
+      accessibilityLabel={`${card.nickname} card ending ${card.last4}, ${statusLabel[card.status]}, ${limit}`}
+      style={[styles.card, { backgroundColor: background }]}
+    >
+      <View style={styles.row}>
+        <Text style={styles.nickname}>{card.nickname}</Text>
+        <Text style={styles.badge}>{statusLabel[card.status]}</Text>
+      </View>
+      <Text style={styles.number}>•••• •••• •••• {card.last4}</Text>
+      <View style={styles.row}>
+        <Text style={styles.small}>PayDeck virtual</Text>
+        <Text style={styles.small}>{limit}</Text>
+      </View>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  card: {
+    width: '100%',
+    maxWidth: 380,
+    aspectRatio: 1.586,
+    borderRadius: 16,
+    padding: 20,
+    justifyContent: 'space-between',
+  },
+  row: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  nickname: { color: '#ffffff', fontSize: 18, fontWeight: '700' },
+  badge: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '600',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    overflow: 'hidden',
+  },
+  number: { color: '#ffffff', fontSize: 20, letterSpacing: 2, fontVariant: ['tabular-nums'] },
+  small: { color: 'rgba(255, 255, 255, 0.85)', fontSize: 13 },
+});
+```
+
+`App.tsx`:
+
+```tsx
+import { ScrollView, StyleSheet } from 'react-native';
+import { Card, PaymentCard } from './PaymentCard';
+import { useTheme } from './theme';
+
+const cards: Card[] = [
+  { id: 'c1', nickname: 'Everyday', last4: '4242', status: 'ACTIVE', spendingLimitCents: 50000 },
+  { id: 'c2', nickname: 'Travel', last4: '1881', status: 'FROZEN', spendingLimitCents: null },
+  { id: 'c3', nickname: 'Old gym', last4: '0005', status: 'CANCELLED', spendingLimitCents: 2500 },
+];
+
+export default function App() {
+  const theme = useTheme();
+
+  return (
+    <ScrollView
+      style={{ backgroundColor: theme.background }}
+      contentContainerStyle={styles.page}
+    >
+      {cards.map((card) => (
+        <PaymentCard key={card.id} card={card} />
+      ))}
+    </ScrollView>
+  );
+}
+
+const styles = StyleSheet.create({
+  page: { padding: 24, gap: 16, alignItems: 'center' },
+});
+```
+
+Details worth noticing:
+
+- `export type Card` lets `App.tsx` import the type along with the component.
+- `fontVariant: ['tabular-nums']` gives every digit the same width, so card numbers line up.
+- `overflow: 'hidden'` makes the badge's rounded corners work on text.
+- The label is built from the same values as the visible text, so the two can never disagree.
+</Fragment>
+</Exercise>
+
+<Aside type="tip" title="Compare with the real thing">
+Open `app/src/components/PaymentCardView.tsx` in the course repository and compare. It is almost the same; it formats money for several currencies, which you will add in Module 13.
+</Aside>
+
+<MarkComplete />

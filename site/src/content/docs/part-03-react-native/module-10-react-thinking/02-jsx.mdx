@@ -1,0 +1,190 @@
+---
+title: "10.2 JSX"
+description: "Mix values into your user interface with curly braces, show things only sometimes, and turn an array into a list."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can put values into JSX, show something only when a condition is true, and draw a list from an array.
+
+## Why it matters
+
+A real screen shows **data**: your name, your balance, your last ten payments. JSX is where that data meets the screen. Everything you learned in Part 2 (variables, conditions, `map`) works inside it.
+
+## The idea
+
+JSX looks like tags, but inside **curly braces** `{ }` you can write any JavaScript **expression**, meaning anything that produces a value:
+
+```tsx
+<Text>Hi {name}!</Text>
+<Text>Balance: ${(balanceCents / 100).toFixed(2)}</Text>
+```
+
+In the second line, the first `$` is just a dollar sign on screen; `{...}` is the expression.
+
+Three patterns cover most screens:
+
+**Show something only sometimes** with `&&`: if the left side is true, you get the right side; if not, nothing is shown.
+
+```tsx
+{isFrozen && <Text>Your card is frozen.</Text>}
+```
+
+**Pick one of two** with the **ternary operator** `condition ? ifTrue : ifFalse`:
+
+```tsx
+<Text>{isFrozen ? 'Frozen' : 'Active'}</Text>
+```
+
+**Draw a list** with `map`, turning each item into JSX:
+
+```tsx
+{recent.map((item) => (
+  <Text key={item}>• {item}</Text>
+))}
+```
+
+Every item in a list needs a `key`: a value that is different for each item and stays the same for that item. React uses it to keep track of which row is which when the list changes. In PayDeck, keys are IDs such as a card's `id`.
+
+Two more rules:
+
+- A component returns **one** outer element. To return several things, wrap them in a `View`.
+- Attributes (called **props**, next lesson) use `{ }` for values that are not plain strings: `style={{ padding: 40 }}`. The outer braces mean "an expression", the inner ones are an object.
+
+## Worked example
+
+Replace your Snack's `App.tsx`:
+
+```tsx
+import { Text, View } from 'react-native';
+
+export default function App() {
+  const name = 'Asha';
+  const balanceCents = 12550;
+  const isFrozen = false;
+  const recent = ['Coffee', 'Train ticket', 'Lunch'];
+
+  return (
+    <View style={{ padding: 40 }}>
+      <Text>Hi {name}!</Text>
+      <Text>Balance: ${(balanceCents / 100).toFixed(2)}</Text>
+      {isFrozen && <Text>Your card is frozen.</Text>}
+      <Text>{isFrozen ? 'Frozen' : 'Active'}</Text>
+      {recent.map((item) => (
+        <Text key={item}>• {item}</Text>
+      ))}
+    </View>
+  );
+}
+```
+
+The preview shows:
+
+```
+Hi Asha!
+Balance: $125.50
+Active
+• Coffee
+• Train ticket
+• Lunch
+```
+
+Change `isFrozen` to `true`: the warning appears and "Active" becomes "Frozen". Add `'Cinema'` to the array: a new row appears. The screen is a picture of the data.
+
+<Aside type="note" title="JSX becomes function calls">
+Behind the scenes, `<Text>Hi</Text>` turns into an ordinary function call that creates an object describing the text. That is why JSX can go anywhere a value can: in a variable, in an array, as a return value.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a spending list with totals">
+Start from this data. Show each payment as "Coffee: $3.50", then a line "Total: $X". If the total is more than $20, also show "Big spender!".
+
+```tsx
+const payments = [
+  { id: 'p1', label: 'Coffee', cents: 350 },
+  { id: 'p2', label: 'Lunch', cents: 1200 },
+  { id: 'p3', label: 'Cinema', cents: 950 },
+];
+```
+
+<Fragment slot="hint">Work out the total before the `return`, with a loop or `reduce`. Use `payment.id` as the `key`.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+import { Text, View } from 'react-native';
+
+const payments = [
+  { id: 'p1', label: 'Coffee', cents: 350 },
+  { id: 'p2', label: 'Lunch', cents: 1200 },
+  { id: 'p3', label: 'Cinema', cents: 950 },
+];
+
+export default function App() {
+  let total = 0;
+  for (const payment of payments) {
+    total += payment.cents;
+  }
+
+  return (
+    <View style={{ padding: 40 }}>
+      {payments.map((payment) => (
+        <Text key={payment.id}>
+          {payment.label}: ${(payment.cents / 100).toFixed(2)}
+        </Text>
+      ))}
+      <Text>Total: ${(total / 100).toFixed(2)}</Text>
+      {total > 2000 && <Text>Big spender!</Text>}
+    </View>
+  );
+}
+```
+
+The total is $25.00, so "Big spender!" appears.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title={`Each child in a list should have a unique "key" prop`}>
+This warning means a `map` is missing `key={...}`, or two items have the same key. Use an ID from the data, not the item's position.
+</Aside>
+
+<Aside type="caution" title="Adjacent JSX elements must be wrapped in an enclosing tag">
+A component tried to return two things side by side. Wrap them in one `View`.
+</Aside>
+
+<Aside type="caution" title="if inside JSX">
+`{if (isFrozen) ...}` is an error: `if` is a statement, not an expression. Use `&&` or `? :` inside JSX, or an `if` before the `return`.
+</Aside>
+
+## Recap
+
+- `{ }` in JSX holds any expression: a variable, a calculation, a function call.
+- `condition && <X />` shows X only when the condition is true; `a ? b : c` chooses between two.
+- `array.map(...)` draws lists; each item needs a unique, stable `key`.
+- A component returns one outer element.
+
+<Quiz
+	questions={[
+		{
+			question: 'What does `{count > 0 && <Text>New!</Text>}` show when count is 0?',
+			options: ['New!', 'Nothing', 'false'],
+			answer: 1,
+			explanation: 'The condition is false, so nothing is drawn.',
+		},
+		{
+			question: 'What makes a good `key` for a list of cards?',
+			options: ['The position in the array', 'A random number', "The card's id"],
+			answer: 2,
+			explanation: 'A key must be unique and stay the same for the same item, which is exactly what an id is.',
+		},
+	]}
+/>
+
+<MarkComplete />

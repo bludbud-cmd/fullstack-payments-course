@@ -1,0 +1,203 @@
+---
+title: "14.5 Saving data on the device"
+description: "Keep data between app launches with AsyncStorage, wrapped in a useStoredState hook, and know what must never be stored this way."
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson your app remembers data after it is closed and opened again, using AsyncStorage and a `useStoredState` hook you write yourself.
+
+## Why it matters
+
+Freeze a card, quit the app, open it again: the card should still be frozen. State lives in memory and disappears when the app stops (you saw this in lesson 11.4). Until Part 7 connects PayDeck to its server, the app keeps its data on the device. Later, the device still remembers small things, such as which account you last used.
+
+## The idea
+
+**AsyncStorage** is a simple key-value store on the device: you save a string under a name (the **key**) and read it back later. It is a library with native code, from the React Native community, and works on Android and macOS.
+
+- `AsyncStorage.setItem(key, text)` saves.
+- `AsyncStorage.getItem(key)` reads, giving `null` if nothing was saved.
+- Both are **asynchronous**: they return promises (Module 8), because reading and writing files takes a moment.
+- It stores strings, so objects go through JSON: `JSON.stringify` to save, `JSON.parse` to read (Module 7).
+
+The plan for a component:
+
+1. Start with a default value in state.
+2. When the component appears, read the saved value; if there is one, put it in state.
+3. Whenever the value changes, save it.
+
+Step 3 must wait until step 2 has finished, otherwise the first render would save the default value over what was stored before it was even read. A `loaded` flag takes care of that.
+
+Wrap all of this in a **custom hook** that works like `useState`, and any component can use it in one line.
+
+<Aside type="danger" title="Never store secrets here">
+AsyncStorage is not encrypted. Do not use it for passwords, sign-in tokens or card numbers. Module 28 stores tokens in the Android Keystore and the macOS Keychain, which are built for secrets.
+</Aside>
+
+## Worked example
+
+### Install it
+
+In `HelloMe`:
+
+```sh
+npm install @react-native-async-storage/async-storage@2.2.0
+cd macos && pod install && cd ..
+```
+
+It has native code, so the apps must be **rebuilt**: stop them, then `npm run android` and `npm run macos` again (lesson 11.4).
+
+### The hook
+
+`src/state/useStoredState.ts`:
+
+```ts
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useEffect, useState } from 'react';
+
+/**
+ * Like useState, but the value is saved on the device under `key`
+ * and loaded again next time the app starts.
+ */
+export function useStoredState<T>(key: string, initial: T) {
+  const [value, setValue] = useState<T>(initial);
+  const [loaded, setLoaded] = useState(false);
+
+  // Load what was saved last time, once.
+  useEffect(() => {
+    AsyncStorage.getItem(key)
+      .then((saved) => {
+        if (saved !== null) {
+          setValue(JSON.parse(saved));
+        }
+      })
+      .catch(() => {
+        // Nothing could be read: keep the starting value.
+      })
+      .finally(() => setLoaded(true));
+  }, [key]);
+
+  // Save after every change, once loading has finished.
+  useEffect(() => {
+    if (loaded) {
+      AsyncStorage.setItem(key, JSON.stringify(value)).catch(() => {});
+    }
+  }, [key, value, loaded]);
+
+  return [value, setValue, loaded] as const;
+}
+```
+
+New pieces:
+
+- `<T>` makes this a **generic** function: `T` stands for whatever type the caller uses. `useStoredState('cards', sampleCards)` makes `T` the card array type; `useStoredState('count', 0)` makes it `number`. The hook works for any type, and TypeScript still checks each use.
+- `.finally(...)` runs after the promise either succeeds or fails, so `loaded` becomes `true` either way.
+- `return [value, setValue, loaded] as const` returns a fixed-length list, like `useState` does, so callers can destructure it: `const [cards, setCards, loaded] = useStoredState(...)`.
+
+### Using it
+
+A counter that survives restarts:
+
+```tsx
+import { Button, Text, View } from 'react-native';
+import { useStoredState } from './src/state/useStoredState';
+
+export default function App() {
+  const [count, setCount, loaded] = useStoredState('demo.count', 0);
+
+  if (!loaded) {
+    return null;
+  }
+
+  return (
+    <View style={{ padding: 40, gap: 12 }}>
+      <Text>You tapped {count} times, ever.</Text>
+      <Button title="Tap me" onPress={() => setCount(count + 1)} />
+    </View>
+  );
+}
+```
+
+Tap a few times, then reload with `r` in Metro, or quit the app completely and start it again. The count is still there.
+
+`if (!loaded) return null;` shows nothing for the split second while the saved value loads, instead of briefly showing 0 and then jumping to the real number.
+
+<Aside type="tip" title="Name your keys">
+Keys share one store for the whole app. Prefix them with the app's name and say what they hold, for example `paydeck.cards`, so they never clash. If the shape of stored data ever changes, a new key (`paydeck.cards.v2`) avoids reading old data as if it were new.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: remember the tab">
+Make the navigator from this module remember which tab was open, so the app reopens on the same tab.
+
+<Fragment slot="hint">Store only the tab's name, for example with `useStoredState<TabName>('paydeck.tab', 'home')`. When the navigator has loaded it, start the stack with `[{ name: tab }]`. Remember to save the new tab whenever one is pressed.</Fragment>
+<Fragment slot="solution">
+One way is to keep the stack in ordinary state, and the last tab in stored state:
+
+```tsx
+const [tab, setTab, tabLoaded] = useStoredState<TabName>('paydeck.tab', 'home');
+const [stack, setStack] = useState<NavState>([{ name: 'home' }]);
+
+// Once the saved tab has loaded, start there.
+useEffect(() => {
+  if (tabLoaded) {
+    setStack([{ name: tab }]);
+  }
+  // Only when loading finishes, not every time the tab changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [tabLoaded]);
+
+const navigation: Navigation = {
+  // ...as before, but switching tab also saves it:
+  switchTab: (next) => {
+    setTab(next);
+    setStack([{ name: next }]);
+  },
+};
+```
+
+The `eslint-disable` comment tells the linter that leaving `tab` out of the dependency array is deliberate: the effect should run once, when loading finishes, not every time the tab changes. Comments like this should be rare, and should always say why.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="AsyncStorage is null / NativeModule: AsyncStorage is null">
+The library is installed but the app was not rebuilt. Stop the app and run `npm run android` or `npm run macos` again (after `pod install` for the Mac).
+</Aside>
+
+<Aside type="caution" title="Saved data disappears on start">
+The save effect ran before the load finished and saved the default value. Make sure saving waits for `loaded`.
+</Aside>
+
+## Recap
+
+- AsyncStorage saves strings under keys on the device; objects go through JSON.
+- Load once when the component appears, save on every change, and only save after loading.
+- A generic custom hook, `useStoredState<T>`, makes that one line for any component.
+- Never store secrets in AsyncStorage.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why does the hook wait for `loaded` before saving?',
+			options: ['Saving is slow', 'Otherwise the default value could overwrite the saved one before it is read', 'AsyncStorage requires it'],
+			answer: 1,
+			explanation: 'The first render has only the default value.',
+		},
+		{
+			question: 'Where should a sign-in token be stored?',
+			options: ['AsyncStorage', 'The Keychain or Keystore', 'A state variable only'],
+			answer: 1,
+			explanation: 'AsyncStorage is not encrypted; the Keychain and Keystore are made for secrets.',
+		},
+	]}
+/>
+
+<MarkComplete />
