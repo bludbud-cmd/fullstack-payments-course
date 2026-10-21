@@ -1,0 +1,223 @@
+---
+title: "19.3 Status codes"
+description: "Read the three-digit status at the top of every response: the five families, the dozen codes you will meet constantly, and what each tells you to do next."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can tell from a status code whether a request worked, whose fault it is if it did not, and what to do about it.
+
+## Why it matters
+
+The status code is the first thing to look at when anything goes wrong between the app and the API. "The app shows nothing" could be the API being down, the app sending the wrong thing, or the user not being logged in, and the status code tells you which in three digits. In Part 6 you choose the status code for every answer the PayDeck API gives, so the app can react properly.
+
+## The idea
+
+The first digit gives the **family**:
+
+| Family | Meaning | Whose problem? |
+| --- | --- | --- |
+| `1xx` | Information (rare; you can ignore these) | |
+| `2xx` | **Success** | Nobody's |
+| `3xx` | **Redirect**: look somewhere else | Nobody's; clients usually follow it automatically |
+| `4xx` | **Client error**: the request was wrong | The client's: fix the request |
+| `5xx` | **Server error**: the server failed | The server's: the request may be fine |
+
+The codes you will meet over and over:
+
+| Code | Name | Means | In PayDeck |
+| --- | --- | --- | --- |
+| `200` | OK | It worked; here is the result | Reading a card |
+| `201` | Created | A new thing was made; the `Location` header says where | Issuing a card |
+| `204` | No Content | It worked, and there is nothing to send back | Deleting a device |
+| `400` | Bad Request | The request is malformed or the data is invalid | A limit of "lots" |
+| `401` | Unauthorized | You did not say who you are, or your login has expired | Not logged in |
+| `403` | Forbidden | We know who you are, and you are not allowed | Freezing someone else's card |
+| `404` | Not Found | No such thing | Card 9999 |
+| `405` | Method Not Allowed | That path exists, but not with that method | `PUT /cards` |
+| `409` | Conflict | It clashes with the current state | Paying with a frozen card |
+| `415` | Unsupported Media Type | The body is in a format the server does not accept | Sending a form instead of JSON |
+| `500` | Internal Server Error | The server crashed while handling it | A bug in the API |
+| `503` | Service Unavailable | The server is down or overloaded for now | During a deployment |
+
+Two that people often mix up: **401** means "who are you?" (log in and try again), while **403** means "I know who you are, and the answer is no" (logging in again will not help).
+
+<Aside type="note" title="The body explains, the code classifies">
+A good API pairs the code with a body that says what exactly went wrong, as the practice API does with `{"error": "..."}`. The code tells the app **how** to react (show a login screen, show a "not found" message, try again later); the body tells the person **why**.
+</Aside>
+
+## Worked example
+
+With the practice API running (`node practice-api.mjs` in `~/Projects/course/http`), make it produce one code from each kind of mistake.
+
+A card that does not exist:
+
+```sh
+curl -i http://localhost:4000/cards/9
+```
+
+```
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+
+{
+  "error": "No card with id 9"
+}
+```
+
+A path that does not exist at all:
+
+```sh
+curl -i http://localhost:4000/accounts
+```
+
+```
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+
+{
+  "error": "Nothing at /accounts"
+}
+```
+
+Changing something without saying who you are:
+
+```sh
+curl -i -X POST http://localhost:4000/cards \
+  -H 'Content-Type: application/json' \
+  -d '{"nickname": "Groceries"}'
+```
+
+```
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json
+WWW-Authenticate: Bearer
+
+{
+  "error": "Send the header Authorization: Bearer practice-token"
+}
+```
+
+Valid JSON with an invalid value:
+
+```sh
+curl -i -X PATCH http://localhost:4000/cards/2 \
+  -H 'Authorization: Bearer practice-token' \
+  -H 'Content-Type: application/json' \
+  -d '{"limitCents": "lots"}'
+```
+
+```
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+
+{
+  "error": "limitCents must be a whole number of cents, 0 or more"
+}
+```
+
+Broken JSON, with a stray comma:
+
+```sh
+curl -i -X POST http://localhost:4000/cards \
+  -H 'Authorization: Bearer practice-token' \
+  -H 'Content-Type: application/json' \
+  -d '{"nickname": "Gifts",}'
+```
+
+```
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+
+{
+  "error": "That is not valid JSON: Expected double-quoted property name in JSON at position 21 (line 1 column 22)"
+}
+```
+
+Every one of these is a `4xx`: the server is fine, and the request needs fixing. A `5xx` from the practice API would mean a bug in `practice-api.mjs`.
+
+### Status codes in code
+
+`fetch` in JavaScript does **not** throw for a `4xx` or `5xx`; you saw this in Module 8. It only throws when there is no response at all. Your code has to check:
+
+```js
+const response = await fetch('http://localhost:4000/cards/9');
+if (!response.ok) {                       // ok is true for 200-299
+  const problem = await response.json();
+  console.log(response.status, problem.error);   // 404 No card with id 9
+}
+```
+
+## Try it
+
+<Exercise title="Try it: what would you do?">
+For each response, say whose problem it is, and what the PayDeck app should do:
+
+1. `401 Unauthorized` when loading the wallet.
+2. `403 Forbidden` when a cardholder tries to raise their own limit.
+3. `409 Conflict` when paying with a frozen card.
+4. `503 Service Unavailable` when loading the transaction list.
+5. `400 Bad Request` with `"limitCents must be a whole number"` after typing a limit.
+
+<Fragment slot="hint">Ask two questions each time: is it `4xx` (the request) or `5xx` (the server)? And would trying again, unchanged, ever help?</Fragment>
+<Fragment slot="solution">
+
+1. The client's: the login is missing or expired. Show the login screen; retrying unchanged will not help.
+2. The client's, but logging in again will not help either: this person is not allowed. Explain that only the account owner can change limits.
+3. The client's: the request is fine, but the card's state forbids it. Say the card is frozen and offer to unfreeze it.
+4. The server's: the request was probably fine. Show "PayDeck is having trouble, try again in a moment", and it is safe to retry a `GET` later.
+5. The client's: the typed value was wrong. Show the server's message next to the limit field.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Treating every non-200 as the same error">
+"Something went wrong" for everything leaves people stuck. A `401` needs a login screen, a `404` a "not found" message, a `5xx` a "try again later". Branch on the status.
+</Aside>
+
+<Aside type="caution" title="Assuming fetch throws on 404">
+It does not. Check `response.ok` or `response.status` before using the body.
+</Aside>
+
+<Aside type="caution" title="Blaming the server for a 4xx">
+A `4xx` is the server telling you the request is wrong. Read the body: it usually says exactly what to fix.
+</Aside>
+
+## Recap
+
+- `2xx` success, `3xx` redirect, `4xx` the request is wrong, `5xx` the server failed.
+- Learn these by heart: 200, 201, 204, 400, 401, 403, 404, 409, 500.
+- 401 is "who are you?"; 403 is "you may not".
+- The code says how to react; the body says why.
+- `fetch` does not throw for error statuses: check `response.ok`.
+
+<Quiz
+	questions={[
+		{
+			question: 'A request returns 404. Whose problem is it?',
+			options: ['The server crashed', 'The client asked for something that does not exist', 'The network'],
+			answer: 1,
+			explanation: '4xx codes are client errors.',
+		},
+		{
+			question: 'You are logged in but get 403 when deleting another person\'s card. What does logging in again do?',
+			options: ['Fixes it', 'Nothing: you are not allowed', 'Turns it into a 401'],
+			answer: 1,
+			explanation: '403 means the server knows who you are and still says no.',
+		},
+		{
+			question: 'Which status should an API return after creating a card?',
+			options: ['200 OK', '201 Created', '204 No Content'],
+			answer: 1,
+			explanation: '201 says something new was created, with a Location header pointing to it.',
+		},
+	]}
+/>
+
+<MarkComplete />

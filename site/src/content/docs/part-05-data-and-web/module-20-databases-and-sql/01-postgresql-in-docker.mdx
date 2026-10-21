@@ -1,0 +1,198 @@
+---
+title: "20.1 PostgreSQL in Docker"
+description: "Install Docker Desktop, run a PostgreSQL database in a container with one command, and talk to it with psql."
+sidebar:
+  order: 1
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can start and stop a PostgreSQL database in Docker and run commands in it with `psql`.
+
+## Why it matters
+
+The practice API from Module 19 forgets everything when it stops. A real bank cannot. The PayDeck API keeps users, accounts, cards and every cent that moves in **PostgreSQL** (often just "Postgres"), a free database used by companies of every size. In Module 1 you met the idea of a database; now you run one. Rather than installing Postgres directly on your Mac, you run it inside **Docker**, which is how the PayDeck API runs it too, and how it will run on a server in Part 10.
+
+## The idea
+
+**Docker** runs programs in **containers**: sealed boxes that hold a program plus everything it needs, isolated from the rest of your Mac. Three words to know:
+
+- An **image** is the packaged program, downloaded once. `postgres:17-alpine` is the official PostgreSQL 17 image, in a small variant built on Alpine Linux.
+- A **container** is a running copy of an image. You can start, stop and delete it without affecting your Mac.
+- A **volume** is storage that lives outside the container, so the data survives when the container is stopped or even deleted.
+
+You talk to the database with **psql**, Postgres's own command-line client. It is already inside the image, so you do not need to install it on your Mac.
+
+The language you type into `psql` is **SQL** (Structured Query Language, said "S-Q-L" or "sequel"): the language almost every relational database speaks. The rest of this module teaches it.
+
+## Worked example
+
+<Steps>
+
+1. **Install Docker Desktop.** Go to [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/), download the Mac version for your chip (**Apple silicon** for M1 or later; **Intel** for older Macs; the Apple menu → **About This Mac** tells you which you have), open the `.dmg` and drag Docker to Applications. Open Docker from Applications and accept the terms. Docker Desktop is free for personal use and learning. A whale icon in the menu bar shows it is running.
+
+2. **Check it** in Terminal:
+
+   ```sh
+   docker --version
+   ```
+
+   ```
+   Docker version 29.9.1, build ...
+   ```
+
+   Your numbers may differ; any recent version is fine.
+
+3. **Start PostgreSQL.** This is one command over several lines:
+
+   ```sh
+   docker run --name course-postgres \
+     -e POSTGRES_USER=course \
+     -e POSTGRES_PASSWORD=course \
+     -e POSTGRES_DB=course \
+     -p 5433:5432 \
+     -v course-pgdata:/var/lib/postgresql/data \
+     -d postgres:17-alpine
+   ```
+
+   - `--name course-postgres` names the container so you can refer to it.
+   - `-e NAME=value` sets **environment variables** the image reads on its first start: here, a user called `course`, its password, and a database called `course`.
+   - `-p 5433:5432` connects port 5433 on your Mac to port 5432 (Postgres's usual port) inside the container. The PayDeck API's own database will use 5432 in Part 6, so the course database stays out of its way.
+   - `-v course-pgdata:/var/lib/postgresql/data` keeps the data in a volume called `course-pgdata`.
+   - `-d` runs it in the background ("detached").
+   - `postgres:17-alpine` is the image. The first time, Docker downloads it, which takes a minute.
+
+   Docker prints a long ID: the new container's.
+
+4. **Check it is running:**
+
+   ```sh
+   docker ps
+   ```
+
+   ```
+   CONTAINER ID   IMAGE                COMMAND                  CREATED          STATUS          PORTS                    NAMES
+   a6559d2b614f   postgres:17-alpine   "docker-entrypoint.s…"   10 seconds ago   Up 9 seconds    0.0.0.0:5433->5432/tcp   course-postgres
+   ```
+
+5. **Open psql inside it:**
+
+   ```sh
+   docker exec -it course-postgres psql -U course
+   ```
+
+   ```
+   psql (17.11)
+   Type "help" for help.
+
+   course=#
+   ```
+
+   `docker exec` runs a command inside a running container; `-it` makes it interactive. `course=#` is psql's prompt: you are connected to the `course` database.
+
+6. **Ask it something.** SQL commands end with a semicolon:
+
+   ```sql
+   SELECT version();
+   ```
+
+   ```
+                                            version
+   ------------------------------------------------------------------------------------------
+    PostgreSQL 17.11 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+   (1 row)
+   ```
+
+   Your exact version may be newer. Results come back as a table, with a row count underneath.
+
+7. **Leave psql** with `\q`. Commands starting with a backslash are psql's own commands, not SQL, and need no semicolon.
+
+</Steps>
+
+### Day-to-day commands
+
+```sh
+docker stop course-postgres     # stop it (the data is kept in the volume)
+docker start course-postgres    # start it again
+docker logs course-postgres     # see what Postgres has printed
+docker ps -a                    # list all containers, including stopped ones
+```
+
+<Aside type="note" title="Starting fresh">
+To throw everything away and start over: `docker rm -f course-postgres` deletes the container, and `docker volume rm course-pgdata` deletes its data. Then run the `docker run` command again. You never need to do this for PayDeck's real data.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: stop, start, check">
+Stop the container, check with `docker ps` that it is gone from the list, find it again with `docker ps -a`, start it, and connect with psql again. In psql, type `\conninfo` and `\l`. What do they show?
+
+<Fragment slot="hint">`docker ps` only lists running containers; `-a` means all.</Fragment>
+<Fragment slot="solution">
+
+```sh
+docker stop course-postgres
+docker ps            # course-postgres is not listed
+docker ps -a         # listed, with STATUS "Exited (0) ..."
+docker start course-postgres
+docker exec -it course-postgres psql -U course
+```
+
+`\conninfo` says which database and user you are connected as, for example: `You are connected to database "course" as user "course" via socket in "/var/run/postgresql" at port "5432".` (Inside the container, Postgres is on its usual port, 5432.)
+
+`\l` lists the databases on this server: `course` (yours), `postgres` (a default one), and `template0` and `template1` (templates Postgres copies new databases from).
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Cannot connect to the Docker daemon">
+Docker Desktop is not running. Open it from Applications and wait for the whale icon to stop animating.
+</Aside>
+
+<Aside type="caution" title={`The container name "/course-postgres" is already in use`}>
+You ran `docker run` a second time. The container already exists: use `docker start course-postgres` instead.
+</Aside>
+
+<Aside type="caution" title="Bind for 0.0.0.0:5433 failed: port is already allocated">
+Something else on your Mac is already using port 5433. Stop it, or pick another port such as `-p 5434:5432`.
+</Aside>
+
+<Aside type="caution" title="The prompt changed to course-#">
+psql is waiting for the rest of a command, usually because you forgot the `;`. Type `;` and press Return.
+</Aside>
+
+## Recap
+
+- An image is a packaged program; a container is a running copy; a volume keeps data safe outside it.
+- `docker run ... postgres:17-alpine` starts PostgreSQL; `docker stop` and `docker start` control it.
+- `docker exec -it course-postgres psql -U course` opens psql inside the container.
+- SQL commands end with `;`; psql's own commands start with `\`, such as `\q` to quit.
+
+<Quiz
+	questions={[
+		{
+			question: 'You stop and start the container. What happens to the data?',
+			options: ['It is lost', 'It is kept, because it lives in the volume', 'It is copied to your Desktop'],
+			answer: 1,
+			explanation: 'The -v option stores the data in a volume outside the container.',
+		},
+		{
+			question: 'What does -p 5433:5432 do?',
+			options: ['Sets the password', 'Connects port 5433 on the Mac to port 5432 in the container', 'Limits Postgres to 5432 rows'],
+			answer: 1,
+			explanation: 'Mac port first, container port second.',
+		},
+		{
+			question: 'How do you quit psql?',
+			options: ['exit;', '\\q', 'Ctrl+Z'],
+			answer: 1,
+			explanation: 'Backslash commands belong to psql itself.',
+		},
+	]}
+/>
+
+<MarkComplete />

@@ -1,0 +1,223 @@
+---
+title: "19.2 Methods"
+description: "GET, POST, PUT, PATCH and DELETE: what each HTTP method means, how a REST API uses them with paths, and how to send each one with curl."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can choose the right HTTP method for an action, explain what REST means, and send `POST`, `PATCH` and `DELETE` requests with `curl`.
+
+## Why it matters
+
+The PayDeck app does more than read: it issues cards, freezes them, changes limits and cancels them. The **method** at the start of each request tells the API which kind of action you want. Choosing them consistently is what makes an API predictable, so that someone who has never seen it can guess how it works.
+
+## The idea
+
+### The methods you need
+
+| Method | Means | Has a body? | Example |
+| --- | --- | --- | --- |
+| `GET` | Give me this | No | `GET /cards/1`: read card 1 |
+| `POST` | Create something new here | Yes | `POST /cards`: issue a new card |
+| `PUT` | Replace this completely | Yes | `PUT /cards/1`: replace card 1 with what I send |
+| `PATCH` | Change part of this | Yes | `PATCH /cards/1` with `{"frozen": true}`: freeze card 1 |
+| `DELETE` | Remove this | No | `DELETE /cards/1`: cancel card 1 |
+
+### REST
+
+**REST** is a style for designing APIs that most web APIs follow, including PayDeck's:
+
+- The path names a **thing** (a **resource**), using nouns: `/cards`, `/cards/1`, `/accounts/7/transactions`. Never verbs like `/getCard` or `/freezeCard`.
+- The method says **what to do** with it.
+- A **collection** path (`/cards`) is for listing (`GET`) and creating (`POST`); an **item** path (`/cards/1`) is for reading, changing and deleting that one thing.
+
+So the whole practice API is five endpoints:
+
+```
+GET    /cards          list cards
+POST   /cards          create a card
+GET    /cards/{id}     read one card
+PATCH  /cards/{id}     change part of a card
+DELETE /cards/{id}     delete a card
+```
+
+### Safe and idempotent
+
+Two words you will meet in documentation:
+
+- **Safe**: it never changes anything. `GET` is safe, so browsers and apps may repeat it, pre-load it, or cache it freely.
+- **Idempotent**: sending it twice has the same effect as sending it once. `PUT`, `PATCH` with fixed values, and `DELETE` are idempotent: freezing a frozen card leaves it frozen. `POST` is **not**: sending "create a card" twice creates two cards.
+
+That last point matters enormously for money. If a phone loses signal just after sending "pay $50", the app cannot know whether the payment happened. Sending it again might pay twice. Module 24 shows how PayDeck makes payments safe to retry.
+
+## Worked example
+
+Start the practice API in one Terminal window (`node practice-api.mjs` in `~/Projects/course/http`) and use a second for these.
+
+Changing data needs permission, so the practice API wants a password-like header on everything except `GET`. Lesson 19.4 explains headers; for now, copy them as they are. `-X` sets the method, `-H` adds a header and `-d` sends a body. A `\` at the end of a line lets one command continue on the next line.
+
+**Create** a card:
+
+```sh
+curl -i -X POST http://localhost:4000/cards \
+  -H 'Authorization: Bearer practice-token' \
+  -H 'Content-Type: application/json' \
+  -d '{"nickname": "Groceries", "limitCents": 20000}'
+```
+
+```
+HTTP/1.1 201 Created
+Content-Type: application/json
+Location: /cards/3
+
+{
+  "id": 3,
+  "nickname": "Groceries",
+  "last4": "5676",
+  "limitCents": 20000,
+  "frozen": false
+}
+```
+
+(From here on, the `Date`, `Connection`, `Keep-Alive` and `Transfer-Encoding` headers are left out to save space.) The server chose the `id` and `last4`, and replied with the whole new card, so the app does not need a second request to see it.
+
+**Change** part of a card: unfreeze card 2.
+
+```sh
+curl -i -X PATCH http://localhost:4000/cards/2 \
+  -H 'Authorization: Bearer practice-token' \
+  -H 'Content-Type: application/json' \
+  -d '{"frozen": false}'
+```
+
+```
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "id": 2,
+  "nickname": "Travel",
+  "last4": "1881",
+  "limitCents": 200000,
+  "frozen": false
+}
+```
+
+Only `frozen` was sent, so only `frozen` changed. That is the difference between `PATCH` and `PUT`: a `PUT` would have to send every field.
+
+**Delete** card 3, then try again:
+
+```sh
+curl -i -X DELETE http://localhost:4000/cards/3 -H 'Authorization: Bearer practice-token'
+curl -i -X DELETE http://localhost:4000/cards/3 -H 'Authorization: Bearer practice-token'
+```
+
+```
+HTTP/1.1 204 No Content
+
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+
+{
+  "error": "No card with id 3"
+}
+```
+
+The first deletes it and answers with no body at all. The second finds nothing to delete. Either way, card 3 is gone afterwards, which is what idempotent means.
+
+**A method the endpoint does not support:**
+
+```sh
+curl -i -X PUT http://localhost:4000/cards -H 'Authorization: Bearer practice-token'
+```
+
+```
+HTTP/1.1 405 Method Not Allowed
+Content-Type: application/json
+Allow: GET, POST
+
+{
+  "error": "PUT is not allowed on /cards"
+}
+```
+
+The `Allow` header lists what the endpoint does accept.
+
+## Try it
+
+<Exercise title="Try it: a card's life">
+Using only curl, give a new card the whole life it would have in PayDeck: create a card called "Gifts" with a limit of 10000 cents, raise its limit to 15000, freeze it, check it with a `GET`, then delete it. Finally, list the cards to make sure it has gone.
+
+<Fragment slot="hint">Create it with `POST /cards`, read the `id` from the response, then use that `id` in the path for the `PATCH`, `GET` and `DELETE` requests. Two changes can be two `PATCH` requests or one with both fields.</Fragment>
+<Fragment slot="solution">
+
+If the server was restarted since the worked example, the new card gets `id` 3; otherwise it may be 4. Use whatever your `POST` returned.
+
+```sh
+curl -X POST http://localhost:4000/cards -H 'Authorization: Bearer practice-token' \
+  -H 'Content-Type: application/json' -d '{"nickname": "Gifts", "limitCents": 10000}'
+
+curl -X PATCH http://localhost:4000/cards/3 -H 'Authorization: Bearer practice-token' \
+  -H 'Content-Type: application/json' -d '{"limitCents": 15000, "frozen": true}'
+
+curl http://localhost:4000/cards/3
+
+curl -i -X DELETE http://localhost:4000/cards/3 -H 'Authorization: Bearer practice-token'
+
+curl http://localhost:4000/cards
+```
+
+The `GET` shows `"limitCents": 15000` and `"frozen": true`; the `DELETE` answers `204 No Content`; the final list has only Everyday and Travel.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Verbs in paths">
+`POST /freezeCard?id=1` works, but it is not REST, and every such API is different. Name the thing in the path and use the method for the action: `PATCH /cards/1` with `{"frozen": true}`.
+</Aside>
+
+<Aside type="caution" title="curl sent a POST when you meant GET">
+`-d` makes curl send a `POST` even without `-X POST`. If you only want to read, leave out `-d`.
+</Aside>
+
+<Aside type="caution" title="Retrying a POST blindly">
+Repeating a `GET` is harmless; repeating a `POST` may create a second card, or a second payment. Never retry a `POST` automatically unless the API says it is safe (Module 24).
+</Aside>
+
+## Recap
+
+- `GET` reads, `POST` creates, `PUT` replaces, `PATCH` changes part, `DELETE` removes.
+- REST: nouns in the path for the resource, the method for the action; `/cards` for the collection, `/cards/{id}` for one item.
+- `GET` is safe; `GET`, `PUT` and `DELETE` are idempotent; `POST` is neither.
+- curl: `-X` method, `-H` header, `-d` body.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which request freezes card 7 in a REST API?',
+			options: ['POST /freezeCard/7', 'PATCH /cards/7 with {"frozen": true}', 'GET /cards/7/freeze'],
+			answer: 1,
+			explanation: 'The path names the card; PATCH changes part of it.',
+		},
+		{
+			question: 'Which method is NOT idempotent?',
+			options: ['GET', 'DELETE', 'POST'],
+			answer: 2,
+			explanation: 'Each POST may create something new.',
+		},
+		{
+			question: 'Which path lists all cards?',
+			options: ['GET /cards', 'GET /cards/all', 'GET /listCards'],
+			answer: 0,
+			explanation: 'The collection path with GET lists the collection.',
+		},
+	]}
+/>
+
+<MarkComplete />

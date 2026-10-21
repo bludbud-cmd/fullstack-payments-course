@@ -1,0 +1,225 @@
+---
+title: "19.5 JSON"
+description: "The format almost every API speaks: JSON's six kinds of value, its strict rules, how it maps to TypeScript and Java types, and how to explore it with jq."
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can read and write JSON without syntax errors, describe the same data as a TypeScript interface and a Java record, and pick values out of a response with `jq`.
+
+## Why it matters
+
+Every PayDeck request body and response body is JSON. The app turns it into TypeScript objects; the API turns it into Java records. If the JSON is malformed, or one side expects `"limitCents"` while the other sends `"limit"`, the two halves simply do not understand each other. JSON looks like JavaScript, and that is exactly the trap: it is stricter.
+
+## The idea
+
+**JSON** (JavaScript Object Notation) is text describing data with six kinds of value:
+
+| Kind | Example | Notes |
+| --- | --- | --- |
+| object | `{"nickname": "Travel", "frozen": true}` | Keys in **double quotes** |
+| array | `[350, 1200, 990]` | Values in order |
+| string | `"Corner Cafe"` | Always **double quotes** |
+| number | `350`, `-12`, `0.015` | No quotes; no `NaN` or `Infinity` |
+| boolean | `true`, `false` | Lower case, no quotes |
+| null | `null` | "No value" |
+
+Values nest freely: an object can hold arrays of objects, and so on.
+
+```json
+{
+  "id": 7,
+  "owner": "Asha",
+  "currency": "USD",
+  "balanceCents": 12550,
+  "cards": [
+    { "id": 1, "nickname": "Everyday", "frozen": false },
+    { "id": 2, "nickname": "Travel", "frozen": true }
+  ],
+  "closedAt": null,
+  "openedAt": "2026-03-14T09:30:00Z"
+}
+```
+
+### Stricter than JavaScript
+
+Things JavaScript accepts that JSON does not:
+
+- single quotes: `{'a': 1}`
+- keys without quotes: `{a: 1}`
+- a comma after the last item: `[1, 2, 3,]`
+- comments: `// like this`
+- `undefined`, functions, dates
+
+Dates have no JSON type, so APIs send them as strings in a standard format, **ISO 8601**: `"2026-03-14T09:30:00Z"` (the `Z` means UTC time).
+
+### Money in JSON
+
+JSON numbers become JavaScript numbers, which have the rounding problems from Module 4 (`0.1 + 0.2`). So PayDeck sends money as a whole number of **cents** plus a currency: `"balanceCents": 12550, "currency": "USD"`. Never `"balance": 125.5`.
+
+### The same data, three ways
+
+The JSON for a card, the TypeScript type the app uses for it (Module 9), and the Java record the API uses for it (Module 16):
+
+```json
+{ "id": 2, "nickname": "Travel", "last4": "1881", "limitCents": 200000, "frozen": true }
+```
+
+```ts
+interface Card {
+  id: number;
+  nickname: string;
+  last4: string;
+  limitCents: number;
+  frozen: boolean;
+}
+```
+
+```java
+record Card(long id, String nickname, String last4, long limitCents, boolean frozen) {}
+```
+
+The **names must match exactly** on all three, including capitals. This shared shape is the **contract** between the app and the API.
+
+## Worked example
+
+`jq` is a small tool for exploring JSON in the terminal. Install it:
+
+```sh
+brew install jq
+```
+
+Restart the practice API so it has just its two starting cards, then, in your second window:
+
+```sh
+curl -s http://localhost:4000/cards | jq '.[0].nickname'
+```
+
+```
+"Everyday"
+```
+
+`-s` (silent) stops curl printing progress information, and `|` sends curl's output into `jq`. The **filter** in quotes picks out parts: `.` is the whole input, `.[0]` the first item of an array, `.nickname` a key of an object.
+
+More filters:
+
+```sh
+curl -s http://localhost:4000/cards | jq 'length'
+curl -s http://localhost:4000/cards | jq '.[] | select(.frozen) | .nickname'
+curl -s http://localhost:4000/cards | jq '[.[] | .limitCents] | add'
+curl -s http://localhost:4000/cards | jq -c '.[] | {nickname, limitCents}'
+```
+
+```
+2
+"Travel"
+250000
+{"nickname":"Everyday","limitCents":50000}
+{"nickname":"Travel","limitCents":200000}
+```
+
+- `length` counts the items.
+- `.[]` goes through each item; `select(.frozen)` keeps the ones where `frozen` is true. It reads like a stream from Module 17: `filter`, then `map`.
+- `[ ... ] | add` collects the limits into an array and adds them up.
+- `{nickname, limitCents}` builds a smaller object with just those keys; `-c` prints each on one line.
+
+`jq` also tells you when JSON is broken, which is handy before sending a body:
+
+```sh
+echo '{"nickname": "Gifts",}' | jq .
+```
+
+```
+jq: parse error: Expected another key-value pair at line 1, column 22
+```
+
+## Try it
+
+<Exercise title="Try it: fix the JSON">
+This is meant to be the body for creating a card. Find the five things wrong with it, write the corrected JSON, and check it with `jq .`:
+
+```
+{
+  nickname: 'Holiday',
+  "limitCents": 1500.00,
+  "frozen": False,
+  // this card is for the summer
+  "tags": ["travel", "summer",],
+}
+```
+
+<Fragment slot="hint">Check every key and every string for double quotes, every boolean for lower case, and the end of every list and object for a stray comma. And think about how PayDeck sends money.</Fragment>
+<Fragment slot="solution">
+
+1. `nickname` needs double quotes as a key.
+2. `'Holiday'` needs double quotes.
+3. `False` must be `false`.
+4. Comments are not allowed.
+5. Trailing commas after `"summer"` and after the `tags` array are not allowed.
+
+And one that is valid JSON but wrong for PayDeck: `1500.00` looks like dollars, but `limitCents` is a whole number of cents, so $1,500 is `150000`.
+
+```json
+{
+  "nickname": "Holiday",
+  "limitCents": 150000,
+  "frozen": false,
+  "tags": ["travel", "summer"]
+}
+```
+
+Save it as `holiday.json` and run `jq . holiday.json`: it prints it back neatly, which means it is valid.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title={`Expected property name or '}' in JSON`}>
+JavaScript says this (and `jq` says "Invalid numeric literal") for single quotes, or an unquoted key or word. JSON uses double quotes only.
+</Aside>
+
+<Aside type="caution" title="Expected double-quoted property name">
+Usually a trailing comma: the parser saw a `,` and expected another `"key"`, but found `}` instead.
+</Aside>
+
+<Aside type="caution" title="Names that almost match">
+The app sends `"limit"`, the API expects `"limitCents"`. Nothing crashes: the API sees no limit at all. Copy names from the API's documentation, and in Part 7 let TypeScript check them.
+</Aside>
+
+## Recap
+
+- JSON has objects, arrays, strings, numbers, booleans and null.
+- Double quotes for keys and strings; no trailing commas, no comments.
+- Dates travel as ISO 8601 strings; money as whole cents plus a currency.
+- The same shape appears as JSON, a TypeScript interface and a Java record; names must match exactly.
+- `jq` explores JSON: `.key`, `.[0]`, `.[]`, `select(...)`, `length`.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which is valid JSON?',
+			options: ["{'frozen': true}", '{"frozen": true}', '{"frozen": True}'],
+			answer: 1,
+			explanation: 'Double-quoted keys and lower-case booleans.',
+		},
+		{
+			question: 'How should an API send $125.50?',
+			options: ['"balance": 125.5', '"balanceCents": 12550, "currency": "USD"', '"balance": "125.50"'],
+			answer: 1,
+			explanation: 'Whole cents avoid rounding errors; the currency says what they are.',
+		},
+		{
+			question: 'What does `jq \'.[0].nickname\'` print for a list of cards?',
+			options: ['Every nickname', 'The first card\'s nickname', 'The number of cards'],
+			answer: 1,
+			explanation: '.[0] is the first item; .nickname its nickname.',
+		},
+	]}
+/>
+
+<MarkComplete />

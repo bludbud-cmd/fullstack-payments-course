@@ -1,0 +1,195 @@
+---
+title: "19.4 Headers"
+description: "The extra lines on every request and response: Content-Type, Accept, Authorization and Location, what they do, and how to send and read them with curl."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can explain what the common headers do, send headers with `curl -H`, and use the `Location` and `Authorization` headers.
+
+## Why it matters
+
+Every request from the PayDeck app carries a header that proves who is asking. Every `POST` carries a header that says "this body is JSON". Get either wrong and the API says no, even though the body is perfect. Headers are invisible in the app, so knowing they exist, and how to look at them, saves hours of confusion.
+
+## The idea
+
+A **header** is one line, `Name: value`, between the first line and the body. Header names do not care about upper or lower case: `Content-Type` and `content-type` are the same header.
+
+Some are sent by the client in **requests**:
+
+| Header | Says | Example |
+| --- | --- | --- |
+| `Content-Type` | The format of the body I am sending | `Content-Type: application/json` |
+| `Accept` | The format I would like back | `Accept: application/json` |
+| `Authorization` | Who I am: proof that I may do this | `Authorization: Bearer practice-token` |
+| `User-Agent` | What program is asking | `User-Agent: curl/8.7.1` |
+
+Some are sent by the server in **responses**:
+
+| Header | Says | Example |
+| --- | --- | --- |
+| `Content-Type` | The format of the body I am sending back | `Content-Type: application/json` |
+| `Location` | Where the thing you just created lives | `Location: /cards/3` |
+| `Allow` | Which methods this path accepts (with a 405) | `Allow: GET, POST` |
+| `WWW-Authenticate` | How to prove who you are (with a 401) | `WWW-Authenticate: Bearer` |
+
+### Content-Type
+
+The body is just text, so the receiver needs to be told how to read it. `application/json` means JSON. Other common types are `text/html` for web pages and `image/png` for pictures. The name is a **media type** (sometimes called a MIME type).
+
+### Authorization and tokens
+
+Most APIs, including PayDeck's from Part 8, use **bearer tokens**: after you log in, the server gives the app a long random-looking string, the **token**. The app sends it with every request:
+
+```
+Authorization: Bearer eyJhbGciOiJSUzI1NiIs...
+```
+
+"Bearer" means "whoever bears (holds) this token may use it", which is also why a token is as secret as a password. The practice API's token is the fixed word `practice-token`; real ones expire and are different for every login.
+
+## Worked example
+
+With the practice API running, send a `POST` without `Content-Type`:
+
+```sh
+curl -i -X POST http://localhost:4000/cards \
+  -H 'Authorization: Bearer practice-token' \
+  -d '{"nickname": "Groceries"}'
+```
+
+```
+HTTP/1.1 415 Unsupported Media Type
+Content-Type: application/json
+
+{
+  "error": "Send JSON, with the header Content-Type: application/json"
+}
+```
+
+The body was perfectly good JSON, but nobody said so. (curl's `-d` labels the body as a web form, `application/x-www-form-urlencoded`, unless you say otherwise.) Add the header and it works:
+
+```sh
+curl -i -X POST http://localhost:4000/cards \
+  -H 'Authorization: Bearer practice-token' \
+  -H 'Content-Type: application/json' \
+  -d '{"nickname": "Groceries", "limitCents": 20000}'
+```
+
+```
+HTTP/1.1 201 Created
+Content-Type: application/json
+Location: /cards/3
+```
+
+`Location: /cards/3` is the address of the new card. A client that wants to fetch it again does not have to build the URL itself.
+
+Now the `Authorization` header. Leave it out:
+
+```sh
+curl -i -X DELETE http://localhost:4000/cards/3
+```
+
+```
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json
+WWW-Authenticate: Bearer
+
+{
+  "error": "Send the header Authorization: Bearer practice-token"
+}
+```
+
+### Headers in JavaScript
+
+With `fetch`, headers go in an object, and the response's headers can be read with `response.headers.get(...)`:
+
+```js
+const response = await fetch('http://localhost:4000/cards', {
+  method: 'POST',
+  headers: {
+    'Authorization': 'Bearer practice-token',
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({ nickname: 'Gifts' }),
+});
+console.log(response.status, response.headers.get('Location'));   // 201 /cards/4
+```
+
+Part 7 does exactly this from the PayDeck app.
+
+## Try it
+
+<Exercise title="Try it: follow the Location">
+Create a card called "Fuel" with curl, using `-i`. Read the `Location` header from the response, and use it to `GET` the new card. Then try the `POST` again with the token misspelled, `practice-tokn`, and note the status.
+
+<Fragment slot="hint">The `Location` is a path. Put `http://localhost:4000` in front of it to make a full URL.</Fragment>
+<Fragment slot="solution">
+
+```sh
+curl -i -X POST http://localhost:4000/cards \
+  -H 'Authorization: Bearer practice-token' \
+  -H 'Content-Type: application/json' \
+  -d '{"nickname": "Fuel"}'
+```
+
+The response includes a line such as `Location: /cards/4` (the number depends on how many cards you have created since starting the server). Then:
+
+```sh
+curl http://localhost:4000/cards/4
+```
+
+With `practice-tokn` the answer is `401 Unauthorized`: a wrong token is treated exactly like no token. The server does not say which part was wrong, which is deliberate: it gives nothing away to someone guessing.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="415 Unsupported Media Type">
+You sent a body without `Content-Type: application/json`. In curl add `-H 'Content-Type: application/json'`; with `fetch`, add it to `headers`.
+</Aside>
+
+<Aside type="caution" title="Bearer with no space, or no Bearer">
+The value is the word `Bearer`, one space, then the token: `Authorization: Bearer abc123`. `Authorization: abc123` and `Authorization: Bearerabc123` both get a 401.
+</Aside>
+
+<Aside type="caution" title="Pasting a real token into chat or screenshots">
+Anyone holding a bearer token can act as you until it expires. Treat it like a password: never post it in a question, an issue or a screenshot.
+</Aside>
+
+## Recap
+
+- Headers are `Name: value` lines before the body; names ignore case.
+- `Content-Type` labels the body; send `application/json` with every JSON body.
+- `Authorization: Bearer <token>` says who you are; tokens are secrets.
+- `Location` tells you where a newly created thing lives.
+- curl: `-H 'Name: value'`; fetch: the `headers` object and `response.headers.get(...)`.
+
+<Quiz
+	questions={[
+		{
+			question: 'Your POST body is valid JSON but the server answers 415. What is missing?',
+			options: ['The Authorization header', 'Content-Type: application/json', 'The Location header'],
+			answer: 1,
+			explanation: '415 means the server does not accept the body\'s declared format.',
+		},
+		{
+			question: 'Which header tells you where a newly created card lives?',
+			options: ['Location', 'Host', 'Accept'],
+			answer: 0,
+			explanation: 'A 201 Created response usually carries a Location header.',
+		},
+		{
+			question: 'Why must a bearer token be kept secret?',
+			options: ['It is long', 'Whoever holds it can act as you', 'It contains your password'],
+			answer: 1,
+			explanation: 'The server trusts whoever bears the token.',
+		},
+	]}
+/>
+
+<MarkComplete />

@@ -1,0 +1,203 @@
+---
+title: "19.6 Testing APIs with an HTTP client"
+description: "Save your API requests in a .http file and send them from VS Code with the REST Client extension, using variables and the result of one request in the next."
+sidebar:
+  order: 6
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can write requests in a `.http` file, send them from VS Code, use variables for the address and token, and feed one response into the next request.
+
+## Why it matters
+
+curl is perfect for one request. But while building the PayDeck API you will send the same dozen requests again and again: log in, list cards, freeze one, try a payment. Typing them each time is slow and error-prone. An **HTTP client** keeps them in a file, sends each with one click, and shows the response neatly. Because the file is plain text, it lives in the project and goes into Git, so the requests are documented for everyone.
+
+## The idea
+
+A `.http` file is a list of requests written exactly as HTTP looks, separated by lines starting with `###`:
+
+```http
+### List cards
+GET http://localhost:4000/cards
+
+### Create a card
+POST http://localhost:4000/cards
+Authorization: Bearer practice-token
+Content-Type: application/json
+
+{
+  "nickname": "Groceries",
+  "limitCents": 20000
+}
+```
+
+Method and URL, then headers, then a blank line, then the body. You already know this shape from lesson 19.1.
+
+The **REST Client** extension for VS Code reads these files and puts a small **Send Request** link above each request. Click it and the response opens beside your file.
+
+<Aside type="note" title="Other HTTP clients">
+Many tools do the same job. **Bruno** and **Postman** are separate apps with buttons and forms; IntelliJ IDEA Ultimate understands the same `.http` files as REST Client. Everything in this lesson carries over; the course uses REST Client because it is free and lives in the editor you already have.
+</Aside>
+
+## Worked example
+
+<Steps>
+
+1. In VS Code, open the **Extensions** view (the four squares in the left bar, or Cmd+Shift+X), search for **REST Client** (by Huachao Mao), and click **Install**.
+
+2. In your `~/Projects/course/http` folder, create `cards.http`:
+
+   ```http
+   @baseUrl = http://localhost:4000
+   @token = practice-token
+
+   ### Is the server up?
+   GET {{baseUrl}}/health
+
+   ### List cards
+   GET {{baseUrl}}/cards
+
+   ### List frozen cards
+   GET {{baseUrl}}/cards?frozen=true
+
+   ### Create a card
+   # @name createCard
+   POST {{baseUrl}}/cards
+   Authorization: Bearer {{token}}
+   Content-Type: application/json
+
+   {
+     "nickname": "Groceries",
+     "limitCents": 20000
+   }
+
+   ### Read the card we just created
+   GET {{baseUrl}}{{createCard.response.headers.Location}}
+
+   ### Freeze it
+   PATCH {{baseUrl}}/cards/{{createCard.response.body.$.id}}
+   Authorization: Bearer {{token}}
+   Content-Type: application/json
+
+   {
+     "frozen": true
+   }
+
+   ### Delete it
+   DELETE {{baseUrl}}/cards/{{createCard.response.body.$.id}}
+   Authorization: Bearer {{token}}
+   ```
+
+   - `@baseUrl = ...` and `@token = ...` define **variables**; `{{baseUrl}}` uses one. When the API moves to the internet in Part 10, you change one line.
+   - `# @name createCard` gives a request a name, so later requests can use its response.
+   - `{{createCard.response.headers.Location}}` is the `Location` header of the last `createCard` response, such as `/cards/3`.
+   - `{{createCard.response.body.$.id}}` is the `id` field of its JSON body. `$` means "the whole body", the same as `.` in `jq`.
+
+3. Make sure the practice API is running, then click **Send Request** above `### Is the server up?`. A panel opens with the status line, headers and body:
+
+   ```
+   HTTP/1.1 200 OK
+   Content-Type: application/json
+   ...
+
+   {
+     "status": "UP"
+   }
+   ```
+
+4. Send **Create a card**, then **Read the card we just created**, **Freeze it** and **Delete it**, in that order. Each uses the `id` from the create step, so you never type it yourself. If you send **Read** before **Create**, REST Client has no `createCard` response to use yet and the request fails, so order matters.
+
+</Steps>
+
+<Aside type="tip" title="Keyboard shortcut">
+With the cursor anywhere inside a request, press **Cmd+Option+R** to send it.
+</Aside>
+
+<Aside type="caution" title="Secrets in .http files">
+The practice token is harmless, but real tokens are not. When you test the PayDeck API in Part 8, keep real tokens out of files that go into Git. REST Client can read variables from VS Code settings or a `.env` file instead; Part 8 shows how.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: the error collection">
+Add a section to `cards.http` called `### Errors` with one request for each of these, and check that each gives the status you expect: a card that does not exist (404), a `POST` with no token (401), a `POST` with no `Content-Type` (415), a `PATCH` with `"limitCents": -5` (400), and `PUT /cards` (405).
+
+<Fragment slot="hint">Copy a working request and break exactly one thing in it. Every request needs its own `###` line above it.</Fragment>
+<Fragment slot="solution">
+
+```http
+### Errors: card that does not exist (404)
+GET {{baseUrl}}/cards/9999
+
+### Errors: no token (401)
+POST {{baseUrl}}/cards
+Content-Type: application/json
+
+{ "nickname": "Nope" }
+
+### Errors: no Content-Type (415)
+POST {{baseUrl}}/cards
+Authorization: Bearer {{token}}
+
+{ "nickname": "Nope" }
+
+### Errors: negative limit (400)
+PATCH {{baseUrl}}/cards/1
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "limitCents": -5 }
+
+### Errors: wrong method (405)
+PUT {{baseUrl}}/cards
+Authorization: Bearer {{token}}
+```
+
+Keeping the failures next to the successes is a habit worth having: when you change the API in Part 6, sending them all again checks that it still says no to the right things. Module 25 turns the same idea into automatic tests.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="No Send Request link appears">
+The file must end in `.http` (or `.rest`) and the REST Client extension must be installed and enabled. Check the language shown in the bottom-right corner of VS Code: it should say **HTTP**.
+</Aside>
+
+<Aside type="caution" title="The body is ignored">
+There must be exactly one blank line between the last header and the body. Without it, REST Client reads the body as more headers.
+</Aside>
+
+<Aside type="caution" title="Two requests run as one">
+Each request needs its own `###` line above it. Without it, REST Client thinks the second request is part of the first one's body.
+</Aside>
+
+## Recap
+
+- A `.http` file holds requests in plain HTTP form, separated by `###`.
+- REST Client sends the request under the cursor and shows the response beside it.
+- `@name = value` defines a variable; `{{name}}` uses it.
+- `# @name x` names a request; `{{x.response.body.$.id}}` and `{{x.response.headers.Location}}` reuse its response.
+- Keep `.http` files in the project, and real secrets out of them.
+
+<Quiz
+	questions={[
+		{
+			question: 'What separates two requests in a .http file?',
+			options: ['A blank line', 'A line starting with ###', 'A semicolon'],
+			answer: 1,
+			explanation: 'Blank lines separate headers from bodies; ### separates requests.',
+		},
+		{
+			question: 'Why put the base URL in a variable?',
+			options: ['It is required', 'So moving the API to a new address means changing one line', 'It makes requests faster'],
+			answer: 1,
+			explanation: 'The same requests then work against your Mac and against the live API.',
+		},
+	]}
+/>
+
+<MarkComplete />
