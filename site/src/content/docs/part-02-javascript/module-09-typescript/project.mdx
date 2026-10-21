@@ -1,0 +1,131 @@
+---
+title: "Mini-project: contacts list in TypeScript"
+description: "Convert the Module 7 contacts list to TypeScript: an interface for a contact, typed functions, and a union type for 'added or rejected'."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Converting working JavaScript to TypeScript is something you will do for real: plenty of projects start in JavaScript and add types later. Take your contacts list from the [Module 7 mini-project](../../module-07-working-with-data/project/) and make the checker happy.
+
+## What it does
+
+Exactly what it did before. From the outside nothing changes; that is the point. What changes is that mistakes inside the code now show up before you run it.
+
+## Requirements
+
+1. Copy `contacts.mjs` into your `typescript` project folder from lesson 9.1 and rename it `contacts.ts`.
+2. Run `npx tsc`. With `strict` on, you get an error for every untyped parameter. Fix them all by adding types.
+3. Add an `interface Contact` with `name` and `email`, and use it everywhere a contact appears: `load(): Contact[]`, `save(contacts: Contact[])`, `show(contact: Contact)` and `search(contacts: Contact[], text: string)`.
+4. Move the checks for the `add` command into a function `parseContact(text: string): AddResult`, where `AddResult` is a union: either `{ ok: true; contact: Contact }` or `{ ok: false; error: string }`.
+5. `npx tsc` prints nothing, and `node contacts.ts` behaves exactly as before, including with the `contacts.json` file you already have.
+
+<Exercise title="Check your work">
+Run `npx tsc` and then `node contacts.ts`. Try every command again, including the mistakes. Then prove the types are doing their job: misspell `email` as `emial` in `show`, and check that `npx tsc` catches it. Put it back.
+
+<Fragment slot="hint">`save` returns nothing. Its return type is `void`, TypeScript's word for "returns nothing useful".</Fragment>
+<Fragment slot="hint2">`JSON.parse` returns `any`, because TypeScript cannot know what is in a file. Put the result in a variable with a type, `const data: Contact[] = JSON.parse(...)`, so the rest of the program is checked.</Fragment>
+<Fragment slot="solution">
+
+```ts
+import * as fs from "node:fs";
+import * as readline from "node:readline/promises";
+
+interface Contact {
+  name: string;
+  email: string;
+}
+
+type AddResult =
+  | { ok: true; contact: Contact }
+  | { ok: false; error: string };
+
+const FILE = "contacts.json";
+const terminal = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+});
+
+function load(): Contact[] {
+  if (!fs.existsSync(FILE)) return [];
+  const data: Contact[] = JSON.parse(fs.readFileSync(FILE, "utf8"));
+  return data;
+}
+
+function save(contacts: Contact[]): void {
+  fs.writeFileSync(FILE, JSON.stringify(contacts, null, 2));
+}
+
+function show(contact: Contact): string {
+  return `${contact.name} <${contact.email}>`;
+}
+
+function search(contacts: Contact[], text: string): Contact[] {
+  const wanted = text.toLowerCase();
+  return contacts.filter(
+    (c) => c.name.toLowerCase().includes(wanted) || c.email.toLowerCase().includes(wanted),
+  );
+}
+
+function parseContact(text: string): AddResult {
+  const [name, email] = text.split(",").map((part) => part.trim());
+  if (!name || !email || !email.includes("@")) {
+    return { ok: false, error: "Use: add Name, email@example.com" };
+  }
+  return { ok: true, contact: { name, email } };
+}
+
+let contacts = load();
+console.log(`${contacts.length} contacts loaded.`);
+
+while (true) {
+  const command = (await terminal.question("> ")).trim();
+
+  if (command === "list") {
+    contacts.forEach((c, i) => console.log(`${i + 1}. ${show(c)}`));
+  } else if (command.startsWith("add ")) {
+    const result = parseContact(command.slice(4));
+    if (result.ok) {
+      contacts.push(result.contact);
+      save(contacts);
+      console.log(`Added ${show(result.contact)}`);
+    } else {
+      console.log(result.error);
+    }
+  } else if (command.startsWith("find ")) {
+    const found = search(contacts, command.slice(5));
+    console.log(found.length ? found.map(show).join("\n") : "Nobody found.");
+  } else if (command.startsWith("delete ")) {
+    const number = Number(command.slice(7));
+    if (!Number.isInteger(number) || number < 1 || number > contacts.length) {
+      console.log("No contact with that number. Try list first.");
+    } else {
+      const [removed] = contacts.splice(number - 1, 1);
+      save(contacts);
+      console.log(`Deleted ${show(removed)}`);
+    }
+  } else if (command === "quit") {
+    break;
+  } else {
+    console.log("Commands: list, add Name, email, find text, delete number, quit");
+  }
+}
+
+terminal.close();
+```
+
+Notice what you did **not** have to type: `contacts`, `command`, `found` and `result` all have their types inferred. You wrote types on function parameters and return values, and TypeScript worked out the rest.
+
+`parseContact` also makes the code easier to test later: it takes a string and returns a result, without touching the terminal or the file.
+</Fragment>
+</Exercise>
+
+<Aside type="tip" title="You have finished Part 2">
+You can now write programs in JavaScript and TypeScript: values, decisions, loops, functions, arrays and objects, JSON, asynchronous code and types. Part 3 puts all of it to work in React Native: you build the screens of the PayDeck app, in TypeScript, for Android and macOS.
+</Aside>
+
+<MarkComplete />

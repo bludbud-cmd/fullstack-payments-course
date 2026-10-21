@@ -1,0 +1,182 @@
+---
+title: "9.4 Why types catch bugs early"
+description: "See the kinds of mistakes TypeScript catches, how it makes changing code safer, and the two escape hatches to avoid."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can name the kinds of bugs types catch, use the checker to change code safely, and recognise `any` and `as` as warning signs.
+
+## Why it matters
+
+A bug costs more the later you find it. Found while typing: seconds. Found by a test: minutes. Found by a customer whose card showed the wrong balance: hours of work, an apology, and maybe lost trust. Types move a large group of bugs to the cheapest spot: your editor.
+
+## The idea
+
+Here is what you have seen TypeScript catch in this module, all before running anything:
+
+| Mistake | Example | What TypeScript says |
+| --- | --- | --- |
+| Typo in a property | `card.nickame` | `Property 'nickame' does not exist on type 'Card'. Did you mean 'nickname'?` |
+| Wrong kind of value | `formatMoney("12")` | `Argument of type 'string' is not assignable to parameter of type 'number'.` |
+| Missing property | `{ id: "c3", nickname: "Gym" }` | `Property 'spendingLimitCents' is missing ...` |
+| Value not in the list | `status = "PAUSED"` | `Type '"PAUSED"' is not assignable to type 'CardStatus'.` |
+| Forgetting "nothing" | `card.spendingLimitCents / 100` | `'card.spendingLimitCents' is possibly 'null'.` |
+
+None of these crash JavaScript straight away. JavaScript gives you `undefined`, or `NaN`, or `$0.12`, and carries on. The wrong value then travels through the program and shows up somewhere else, far from the real mistake. That is what makes bugs slow to find.
+
+Types also help in two quieter ways:
+
+- **Autocomplete.** Type `card.` in VS Code and it lists `id`, `nickname`, `spendingLimitCents`. You stop guessing names.
+- **Safe changes.** When you change a type, the checker lists every place in the program that no longer fits. That list is your to-do list.
+
+## Worked example
+
+### Renaming a property
+
+Say PayDeck decides `spendingLimitCents` is too long and renames it to `limitCents`. Change only the interface:
+
+```ts
+interface Card {
+  id: string;
+  nickname: string;
+  limitCents: number | null;
+}
+
+function limitText(card: Card): string {
+  return card.spendingLimitCents === null ? "No limit" : `${card.spendingLimitCents} cents`;
+}
+
+const everyday: Card = { id: "c1", nickname: "Everyday", spendingLimitCents: 50000 };
+```
+
+```sh
+npx tsc
+```
+
+```
+bugs.ts(8,15): error TS2339: Property 'spendingLimitCents' does not exist on type 'Card'.
+bugs.ts(8,66): error TS2339: Property 'spendingLimitCents' does not exist on type 'Card'.
+bugs.ts(11,58): error TS2353: Object literal may only specify known properties, and 'spendingLimitCents' does not exist in type 'Card'.
+```
+
+Every line that needs updating, with line numbers. Fix them, run `npx tsc` until it prints nothing, and you know you have not missed one. In plain JavaScript you would search the code and hope.
+
+<Aside type="tip" title="Let the editor rename for you">
+In VS Code, put the cursor on a name and press <kbd>F2</kbd> (Rename Symbol). Because VS Code understands the types, it renames the property everywhere it is used, and leaves unrelated words with the same spelling alone.
+</Aside>
+
+### The two escape hatches
+
+TypeScript has two ways to say "stop checking", and you will see them in code online:
+
+```ts
+const fromServer: any = JSON.parse('{"id":"c9","nickname":"Gym"}');
+console.log(fromServer.nickame.toUpperCase());
+```
+
+`any` turns checking **off** for that value. TypeScript accepts the typo `nickame`, and the program crashes when it runs:
+
+```
+TypeError: Cannot read properties of undefined (reading 'toUpperCase')
+```
+
+The other is `as`, which tells TypeScript "trust me, this is a Card" without checking:
+
+```ts
+const card = JSON.parse(text) as Card;
+```
+
+If `text` turns out to be something else, TypeScript cannot help you. Sometimes `as` is the honest best you can do, for example when reading JSON, which TypeScript cannot see inside. Treat every `any` and `as` as a place where a bug could hide, and keep them few. PayDeck's code has no `any` at all.
+
+<Aside type="note" title="Types are not tests">
+Types check that values have the right **shape**. They cannot check that the **logic** is right: `feeFor` returning 2% instead of 1.5% is a perfectly well-typed number. That is what tests are for, starting in Module 18.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: find the bugs without running">
+Paste this into `orders.ts` and run only `npx tsc`, not `node`. Fix every error it reports.
+
+```ts
+type OrderStatus = "PENDING" | "PAID" | "REFUNDED";
+
+interface Order {
+  id: string;
+  amountCents: number;
+  status: OrderStatus;
+  couponCode?: string;
+}
+
+function receipt(order: Order): string {
+  const coupon = order.couponCode.toUpperCase();
+  return `${order.id}: ${order.ammountCents / 100} (${order.status}) ${coupon}`;
+}
+
+const first: Order = { id: "o1", amountCents: "1999", status: "Paid" };
+console.log(receipt(first));
+```
+
+<Fragment slot="hint">There are four errors: a possibly-undefined property, a typo, a string where a number belongs, and a status that is not in the list (check the capitals).</Fragment>
+<Fragment slot="solution">
+
+```ts
+function receipt(order: Order): string {
+  const coupon = order.couponCode?.toUpperCase() ?? "no coupon";
+  return `${order.id}: ${order.amountCents / 100} (${order.status}) ${coupon}`;
+}
+
+const first: Order = { id: "o1", amountCents: 1999, status: "PAID" };
+console.log(receipt(first)); // o1: 19.99 (PAID) no coupon
+```
+
+`order.couponCode?.toUpperCase()` uses `?.`, **optional chaining**: if `couponCode` is missing, the whole expression is `undefined` instead of a crash, and `?? "no coupon"` replaces that `undefined`. Four bugs, and you found them all without running the program once.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Silencing errors instead of fixing them">
+When an error is confusing, it is tempting to add `any` or `as` until it goes away. Read the message first: the last line usually says exactly what TypeScript expected and what it got.
+</Aside>
+
+<Aside type="caution" title="Only checking in the editor">
+VS Code only checks the files you have open. Run `npx tsc` to check the whole project, especially after a change like a rename.
+</Aside>
+
+## Recap
+
+- Types catch typos, wrong kinds of value, missing properties, values outside a list, and forgotten `null`/`undefined`, before the code runs.
+- Change a type, run `npx tsc`, and fix the list it gives you: refactoring with a safety net.
+- `any` turns checking off; `as` tells TypeScript to trust you. Use them rarely.
+- Types check shapes, not logic. Tests check logic.
+
+<Quiz
+	questions={[
+		{
+			question: 'You rename a property in an interface. What is the fastest way to find every place that needs updating?',
+			options: ['Search the code for the old name', 'Run npx tsc and fix the errors it lists', 'Run the app and click every screen'],
+			answer: 1,
+			explanation: 'The checker lists every line that no longer matches the type, with line numbers.',
+		},
+		{
+			question: 'What does `any` do?',
+			options: ['Allows any of the listed values', 'Turns type checking off for that value', 'Makes a property optional'],
+			answer: 1,
+			explanation: 'Anything goes with any, including typos, so bugs come back.',
+		},
+		{
+			question: 'Your fee function returns 2% instead of 1.5%. Will TypeScript catch it?',
+			options: ['Yes', 'No: the result is still a number, so the types are fine'],
+			answer: 1,
+			explanation: 'Types check shapes, not arithmetic. Tests catch wrong logic.',
+		},
+	]}
+/>
+
+<MarkComplete />

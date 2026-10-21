@@ -1,0 +1,198 @@
+---
+title: "9.3 Union types"
+description: "Say that a value can be one of several things, such as a card status or a missing limit, and let TypeScript make sure you handle every case."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can write union types, use them for fixed lists of values and for "maybe missing" values, and narrow them with `if`.
+
+## Why it matters
+
+A PayDeck card is always **one** of three things: active, frozen or cancelled. Its spending limit is either a number **or** nothing at all. A request to the API either succeeds **or** fails. Union types say exactly that, and TypeScript then makes sure your code deals with every possibility, not just the one you were thinking about.
+
+## The idea
+
+A **union type** joins types with `|`, read as "or":
+
+```ts
+let limit: number | null = 50000;   // a number, or null
+limit = null;                       // fine
+```
+
+The parts of a union can be exact values, called **literal types**. This is how you write a fixed list of allowed strings:
+
+```ts
+type CardStatus = "ACTIVE" | "FROZEN" | "CANCELLED";
+
+let status: CardStatus = "ACTIVE";
+status = "PAUSED";
+```
+
+```
+error TS2322: Type '"PAUSED"' is not assignable to type 'CardStatus'.
+```
+
+When you have a union, TypeScript only lets you do what is safe for **every** part of it. You cannot divide `number | null` by 2, because you cannot divide `null`. Checking with `if` **narrows** the type: inside the check, TypeScript knows which part you have.
+
+```ts
+function half(limit: number | null): number | null {
+  if (limit === null) {
+    return null;          // here, limit is null
+  }
+  return limit / 2;       // here, limit can only be a number
+}
+```
+
+## Worked example
+
+Create `unions.ts`:
+
+```ts
+type CardStatus = "ACTIVE" | "FROZEN" | "CANCELLED";
+
+interface Card {
+  nickname: string;
+  status: CardStatus;
+  spendingLimitCents: number | null;
+}
+
+function limitText(card: Card): string {
+  if (card.spendingLimitCents === null) {
+    return "No limit";
+  }
+  return `$${(card.spendingLimitCents / 100).toFixed(2)} a month`;
+}
+
+function statusLabel(status: CardStatus): string {
+  if (status === "ACTIVE") {
+    return "Ready to use";
+  } else if (status === "FROZEN") {
+    return "Frozen";
+  } else {
+    return "Cancelled";
+  }
+}
+
+const travel: Card = { nickname: "Travel", status: "FROZEN", spendingLimitCents: null };
+console.log(statusLabel(travel.status), "-", limitText(travel));
+```
+
+```sh
+npx tsc && node unions.ts
+```
+
+```
+Frozen - No limit
+```
+
+`npx tsc && node unions.ts` runs the checker, and only if it passes (that is what `&&` means in the terminal), runs the program.
+
+Delete the `if` in `limitText` and check again:
+
+```
+error TS18047: 'card.spendingLimitCents' is possibly 'null'.
+```
+
+In JavaScript, `null / 100` is `0`, so the card would quietly show "$0.00 a month", which looks like a card that can spend nothing. TypeScript makes you decide what "no limit" should look like.
+
+<Aside type="tip" title="Hover to see narrowing">
+In VS Code, hover over `card.spendingLimitCents` before the `if`, inside it, and after it. The tooltip shows `number | null`, then `null`, then `number`.
+</Aside>
+
+### A result that can succeed or fail
+
+Unions of objects are just as useful. Give each part a property that tells them apart, here `ok`:
+
+```ts
+type Result =
+  | { ok: true; card: Card }
+  | { ok: false; error: string };
+
+function freeze(card: Card): Result {
+  if (card.status === "CANCELLED") {
+    return { ok: false, error: "A cancelled card cannot be frozen." };
+  }
+  return { ok: true, card: { ...card, status: "FROZEN" } };
+}
+
+const result = freeze({ nickname: "Old", status: "CANCELLED", spendingLimitCents: 1000 });
+if (result.ok) {
+  console.log(`${result.card.nickname} is now ${result.card.status}`);
+} else {
+  console.log(result.error);
+}
+```
+
+```
+A cancelled card cannot be frozen.
+```
+
+You cannot read `result.card` until you have checked `result.ok`, because a failed result has no card. TypeScript says so: `Property 'card' does not exist on type 'Result'.` The PayDeck API answers in a similar way: either the data you asked for, or an error message.
+
+## Try it
+
+<Exercise title="Try it: a transaction kind">
+Add a `kind` to transactions: `"TOP_UP"`, `"PAYMENT"` or `"REFUND"`. Write `sign(kind)` that returns `"+"` for top-ups and refunds and `"-"` for payments. Then try calling `sign("TRANSFER")` and read the error.
+
+<Fragment slot="hint">Start with `type TransactionKind = ...`, then `function sign(kind: TransactionKind): string`.</Fragment>
+<Fragment slot="solution">
+
+```ts
+type TransactionKind = "TOP_UP" | "PAYMENT" | "REFUND";
+
+function sign(kind: TransactionKind): string {
+  if (kind === "PAYMENT") {
+    return "-";
+  }
+  return "+";
+}
+
+console.log(sign("REFUND"));   // +
+console.log(sign("TRANSFER"));
+```
+
+The last line gives `Argument of type '"TRANSFER"' is not assignable to parameter of type 'TransactionKind'.` Typos in status strings, such as `"FORZEN"`, are caught the same way.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Function lacks ending return statement">
+If an `if`/`else if` chain does not end with a plain `else`, TypeScript may say the function can finish without returning anything. End the chain with `else`, or add a final `return`.
+</Aside>
+
+<Aside type="caution" title="Checking with `if (limit)` instead of `if (limit === null)`">
+`if (limit)` is also false when the limit is `0`, so a card with a $0 limit would be treated as having no limit at all. Compare with `null` directly.
+</Aside>
+
+## Recap
+
+- `A | B` means "A or B". Literal unions like `"ACTIVE" | "FROZEN"` list the allowed values.
+- `number | null` says a value may be missing; TypeScript makes you handle `null` before using it.
+- An `if` check **narrows** a union to the part you checked for.
+- Unions of objects, told apart by a property like `ok`, model "success or failure".
+
+<Quiz
+	questions={[
+		{
+			question: 'What does `type Size = "S" | "M" | "L"` allow?',
+			options: ['Any string', 'Exactly "S", "M" or "L"', 'The letters S, M and L in any order'],
+			answer: 1,
+			explanation: 'A union of literal types allows exactly those values and nothing else.',
+		},
+		{
+			question: 'Inside `if (limit !== null) { ... }`, what is the type of `limit` (declared `number | null`)?',
+			options: ['number | null', 'null', 'number'],
+			answer: 2,
+			explanation: 'The check rules out null, so TypeScript narrows the type to number.',
+		},
+	]}
+/>
+
+<MarkComplete />
