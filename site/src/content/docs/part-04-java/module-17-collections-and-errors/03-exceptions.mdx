@@ -1,0 +1,254 @@
+---
+title: "17.3 Exceptions"
+description: "Catch exceptions to recover from bad input, throw your own exception types with useful details, and handle the checked exceptions Java insists on."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can catch exceptions with `try` and `catch`, write your own exception class, and deal with a checked exception such as `IOException`.
+
+## Why it matters
+
+So far, every exception has ended the program. That is right when something is truly broken, but most problems in a payments app are expected: someone types letters for an amount, a card is frozen, there is not enough money. The program should explain and carry on. In Part 6, the PayDeck API turns each kind of exception into the right answer for the app, such as "404 Not Found" or "409 Conflict", and that starts with throwing the right exception and catching it in the right place.
+
+## The idea
+
+### try and catch
+
+```java
+try {
+    long amount = Long.parseLong(text);
+    pay(amount);
+} catch (NumberFormatException e) {
+    IO.println("That is not a whole number of cents: " + text);
+}
+```
+
+Java runs the `try` block. If something in it throws a `NumberFormatException`, Java jumps straight to the matching `catch` block, skipping the rest of `try`, and then carries on after the whole thing. `e` is the exception object; `e.getMessage()` is its message. JavaScript has the same `try`/`catch`; Java's difference is that you say **which kinds** of exception each `catch` handles. A `try` can have several `catch` blocks, and Java uses the first one that matches.
+
+### Kinds of exception
+
+Exceptions are classes, arranged in families. `NumberFormatException` is a kind of `IllegalArgumentException`, which is a kind of `RuntimeException`. Catching a family catches all its members, which is why the bank project's `catch (IllegalArgumentException | IllegalStateException e)` also caught bad numbers.
+
+### Your own exceptions
+
+When a problem has its own meaning, give it its own class:
+
+```java
+class InsufficientFundsException extends RuntimeException {
+    InsufficientFundsException(long shortByCents) {
+        super("Not enough money: short by " + shortByCents + " cents");
+    }
+}
+```
+
+- `extends RuntimeException` means "this is a kind of `RuntimeException`": it **inherits** everything a `RuntimeException` has, such as `getMessage()`, and can add more. (Interfaces describe what a class can do; `extends` says what a class **is**. In this course you will mostly use `extends` for exceptions.)
+- `super(...)` calls the parent class's constructor, here to set the message.
+
+A custom exception can carry extra fields, such as how much money was missing, and code can catch exactly this problem and nothing else.
+
+### Checked exceptions
+
+Some exceptions are **checked**: the compiler makes you deal with them. Reading a file can fail for reasons outside your control, so `Files.readString` declares that it may throw `IOException`:
+
+```java
+String rates = Files.readString(Path.of("rates.txt"));
+```
+
+```
+Rates.java:2: error: unreported exception IOException; must be caught or declared to be thrown
+```
+
+You either catch it:
+
+```java
+try {
+    String rates = Files.readString(Path.of("rates.txt"));
+    IO.println(rates);
+} catch (IOException e) {
+    IO.println("Could not read the rates: " + e);
+}
+```
+
+or **declare** it, passing the problem up to whoever called you: `void main() throws IOException { ... }`.
+
+Exceptions that extend `RuntimeException` are **unchecked**: the compiler does not insist. Modern Java code, including Spring, mostly uses unchecked exceptions, which is why the custom one above extends `RuntimeException`.
+
+<Aside type="note" title="finally">
+A `finally { ... }` block after the `catch` blocks runs whether or not an exception happened. It is for clean-up, such as closing a connection. You will rarely write one yourself; Spring does the clean-up for you.
+</Aside>
+
+## Worked example
+
+A wallet that keeps asking until the money runs out. In a new folder `~/Projects/course/java/wallet`, create `InsufficientFundsException.java`:
+
+```java
+/** Thrown when a payment is bigger than the money available. */
+class InsufficientFundsException extends RuntimeException {
+    private final long shortByCents;
+
+    InsufficientFundsException(long shortByCents) {
+        super("Not enough money: short by " + shortByCents + " cents");
+        this.shortByCents = shortByCents;
+    }
+
+    long shortByCents() {
+        return shortByCents;
+    }
+}
+```
+
+And `Main.java`:
+
+```java
+long balanceCents = 2000;
+
+void main() {
+    while (balanceCents > 0) {
+        String text = IO.readln("Pay how many cents? ");
+        if (text == null) {
+            break;
+        }
+        try {
+            pay(Long.parseLong(text));
+            IO.println("Paid. Balance: " + balanceCents);
+        } catch (NumberFormatException e) {
+            IO.println("That is not a whole number of cents: " + text);
+        } catch (IllegalArgumentException e) {
+            IO.println(e.getMessage());
+        } catch (InsufficientFundsException e) {
+            IO.println(e.getMessage() + ". Top up or pay less.");
+        }
+    }
+    IO.println("Wallet empty. Goodbye.");
+}
+
+void pay(long amountCents) {
+    if (amountCents <= 0) {
+        throw new IllegalArgumentException("Pay a positive amount");
+    }
+    if (amountCents > balanceCents) {
+        throw new InsufficientFundsException(amountCents - balanceCents);
+    }
+    balanceCents -= amountCents;
+}
+```
+
+```
+Pay how many cents? abc
+That is not a whole number of cents: abc
+Pay how many cents? -5
+Pay a positive amount
+Pay how many cents? 5000
+Not enough money: short by 3000 cents. Top up or pay less.
+Pay how many cents? 1500
+Paid. Balance: 500
+Pay how many cents? 500
+Paid. Balance: 0
+Wallet empty. Goodbye.
+```
+
+- When `parseLong` fails, `pay` never runs: Java jumps straight to the first `catch`.
+- The order of the `catch` blocks matters. `NumberFormatException` comes before `IllegalArgumentException` because it is a member of that family; the other way round, the family would catch everything first.
+- `pay` does not catch anything. It **throws**, and the code that asked for the payment decides what to tell the person. Throw where you find the problem, catch where you can do something about it.
+- `if (text == null)` stops the loop if the input ends (Ctrl+D), instead of complaining about `null` forever.
+
+## Try it
+
+<Exercise title="Try it: a payment limit">
+Add a `long limitCents = 1500;` and a new `LimitExceededException` (unchecked) with the message "Over the limit of 1500 cents per payment". `pay` throws it for any payment over the limit, and `main` catches it and prints the message. Try 1600, then 1500, then 600.
+
+<Fragment slot="hint">Copy the shape of `InsufficientFundsException`. The constructor can take the limit and build the message with `super(...)`. Check the limit in `pay` before checking the balance.</Fragment>
+<Fragment slot="solution">
+
+`LimitExceededException.java`:
+
+```java
+/** Thrown when a single payment is over the card's limit. */
+class LimitExceededException extends RuntimeException {
+    LimitExceededException(long limitCents) {
+        super("Over the limit of " + limitCents + " cents per payment");
+    }
+}
+```
+
+In `Main.java`, add `long limitCents = 1500;` under the balance, this to `pay` just before the balance check:
+
+```java
+if (amountCents > limitCents) {
+    throw new LimitExceededException(limitCents);
+}
+```
+
+and a new `catch` block after the others:
+
+```java
+} catch (LimitExceededException e) {
+    IO.println(e.getMessage());
+}
+```
+
+```
+Pay how many cents? 1600
+Over the limit of 1500 cents per payment
+Pay how many cents? 1500
+Paid. Balance: 500
+Pay how many cents? 600
+Not enough money: short by 100 cents. Top up or pay less.
+```
+
+PayDeck's per-card spending limits (Module 32) work just like this, with the limit stored on the card.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="exception NumberFormatException has already been caught">
+A `catch` for a family (`IllegalArgumentException`) comes before a `catch` for one of its members (`NumberFormatException`), so the second can never run. Put the more specific one first.
+</Aside>
+
+<Aside type="caution" title="unreported exception IOException; must be caught or declared to be thrown">
+You called a method that throws a checked exception. Wrap the call in `try`/`catch`, or add `throws IOException` to your method.
+</Aside>
+
+<Aside type="caution" title="Catching everything and saying nothing">
+`catch (Exception e) { }` with an empty block hides every problem, including real bugs. Catch the specific exceptions you expect, and always tell someone: print a message, or, in the API, send an error response.
+</Aside>
+
+## Recap
+
+- `try { ... } catch (SomeException e) { ... }` recovers from an exception instead of stopping the program.
+- Exceptions come in families; catching a family catches all its members, so list specific ones first.
+- Make your own with `class XException extends RuntimeException` and `super(message)`.
+- Checked exceptions, such as `IOException`, must be caught or declared with `throws`.
+- Throw where you find a problem; catch where you can do something useful about it.
+
+<Quiz
+	questions={[
+		{
+			question: 'An exception is thrown on the first line inside try. What happens to the rest of the try block?',
+			options: ['It runs anyway', 'It is skipped, and the matching catch runs', 'The program stops'],
+			answer: 1,
+			explanation: 'Java jumps straight to the first matching catch.',
+		},
+		{
+			question: 'Why do custom exceptions in this course extend RuntimeException?',
+			options: ['They are faster', 'They are unchecked, so callers are not forced to catch them everywhere', 'Java requires it'],
+			answer: 1,
+			explanation: 'Unchecked exceptions are the modern default, and what Spring uses.',
+		},
+		{
+			question: 'Where should a method like pay handle "not enough money"?',
+			options: ['Catch it inside pay and print a message', 'Throw it, and let the caller decide what to tell the person'],
+			answer: 1,
+			explanation: 'pay finds the problem; the code that talks to the person knows how to explain it.',
+		},
+	]}
+/>
+
+<MarkComplete />

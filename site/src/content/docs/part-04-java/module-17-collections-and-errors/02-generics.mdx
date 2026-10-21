@@ -1,0 +1,179 @@
+---
+title: "17.2 Generics"
+description: "Understand the angle brackets in List<String>, and write your own generic record and method that work with any type while staying type-safe."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can read types such as `Map<String, List<Long>>`, and write a record and a method with a type parameter.
+
+## Why it matters
+
+Spring Boot is full of angle brackets: `List<CardResponse>`, `ResponseEntity<AccountResponse>`, `JpaRepository<Card, UUID>`. They are **generics**, and once you can read them, the API code in Part 6 stops looking like noise. You will mostly use generic types other people wrote, but writing one yourself is the best way to understand them.
+
+## The idea
+
+`List` is written once, but works for any type: a `List<String>`, a `List<Long>`, a `List<Account>`. Inside its code, the type of the items is a **type parameter**, a placeholder usually called `T` (for "type"), which is filled in when you use it. You did the same thing in TypeScript with `Array<string>`.
+
+What you get in return is safety. The compiler knows what is in the list:
+
+```java
+List<String> names = new ArrayList<>();
+names.add(42);                        // error: this is a list of Strings
+String first = names.get(0);          // no conversion needed: it is a String
+```
+
+You can read nested types from the outside in: `Map<String, List<Long>>` is "a map from strings to lists of longs", for example each category's list of amounts.
+
+### Writing your own
+
+A record or class can take type parameters in angle brackets after its name:
+
+```java
+record Page<T>(List<T> items, int number, int totalPages) {}
+```
+
+`Page<String>` is a page of strings; `Page<Account>` a page of accounts. The PayDeck API returns lists of transactions in pages exactly like this, so the app never downloads a whole history at once.
+
+A **method** can have its own type parameter too. It goes in angle brackets **before** the return type:
+
+```java
+<T> Page<T> pageOf(List<T> all, int number, int pageSize) { ... }
+```
+
+Read it as: "for any type `T`, take a list of `T` and give back a page of `T`". Java works out `T` from what you pass in.
+
+## Worked example
+
+In a new folder `~/Projects/course/java/pages`, create `Page.java`:
+
+```java
+import java.util.List;
+
+/** One page of results: some items, which page this is, and how many pages there are. */
+record Page<T>(List<T> items, int number, int totalPages) {}
+```
+
+`Page.java` is not a compact source file, so it needs the `import` (try it without, and you get "cannot find symbol: class List").
+
+`Main.java`:
+
+```java
+void main() {
+    List<String> merchants = List.of("Bookshop", "Corner Cafe", "Metro", "Pharmacy", "Taxi");
+    List<Long> amounts = List.of(350L, 1200L, 990L, 4275L, 600L, 1500L, 80L);
+
+    Page<String> first = pageOf(merchants, 1, 2);
+    IO.println(first);
+    String top = first.items().get(0);
+    IO.println(top.toUpperCase());
+
+    Page<Long> last = pageOf(amounts, 3, 3);
+    IO.println(last);
+}
+
+/** Cuts a list into pages of pageSize items and returns page number (counting from 1). */
+<T> Page<T> pageOf(List<T> all, int number, int pageSize) {
+    int totalPages = (all.size() + pageSize - 1) / pageSize;
+    int from = (number - 1) * pageSize;
+    int to = Math.min(from + pageSize, all.size());
+    return new Page<>(all.subList(from, to), number, totalPages);
+}
+```
+
+```
+Page[items=[Bookshop, Corner Cafe], number=1, totalPages=3]
+BOOKSHOP
+Page[items=[80], number=3, totalPages=3]
+```
+
+- One `pageOf` method served both a list of strings and a list of longs.
+- `first.items().get(0)` is known to be a `String`, so `toUpperCase()` is allowed without any conversion.
+- `totalPages` uses the round-up division from the Module 15 project: 5 merchants in pages of 2 is 3 pages.
+- `subList(from, to)` gives the items from position `from` up to, but not including, `to`.
+
+Now try to mix the types up. Add this as the last line of `main`:
+
+```java
+long cents = first.items().get(0);
+```
+
+```
+Main.java:12: error: incompatible types: String cannot be converted to long
+```
+
+The compiler remembered that `first` is a page of `String`s.
+
+## Try it
+
+<Exercise title="Try it: firstOr">
+Write a generic method `firstOr(List<T> items, T fallback)` that returns the first item, or `fallback` when the list is empty. Check that all three of these work:
+
+```java
+IO.println(firstOr(List.of("Everyday", "Travel"), "No cards"));
+IO.println(firstOr(List.<String>of(), "No cards"));
+IO.println(firstOr(List.of(350L, 1200L), 0L) + 1);
+```
+
+<Fragment slot="hint">Start with `<T> T firstOr(List<T> items, T fallback)`. `items.isEmpty()` tells you whether the list is empty.</Fragment>
+<Fragment slot="solution">
+
+```java
+<T> T firstOr(List<T> items, T fallback) {
+    if (items.isEmpty()) {
+        return fallback;
+    }
+    return items.get(0);
+}
+```
+
+```
+Everyday
+No cards
+351
+```
+
+In the third call `T` is `Long`, so the result is a number and `+ 1` adds rather than joining text. `List.<String>of()` tells Java what kind of empty list you mean; normally Java can work it out, but an empty list on its own gives it no clue.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="no suitable method found for add(int)">
+The message goes on: "int cannot be converted to String". You added the wrong type to a typed list. Either the value or the list's type is wrong.
+</Aside>
+
+<Aside type="caution" title="incompatible types: Page<String> cannot be converted to Page<Long>">
+A page of strings is not a page of longs, even though both are pages. The type in the brackets is part of the type.
+</Aside>
+
+## Recap
+
+- Generics let one class or method work with many types: `List<String>`, `List<Long>`.
+- The compiler tracks the type in the brackets, so wrong items are caught and no conversions are needed.
+- Declare type parameters after a class or record's name (`record Page<T>`) or before a method's return type (`<T> T firstOr(...)`).
+- Read nested types from the outside in.
+
+<Quiz
+	questions={[
+		{
+			question: 'How do you read Map<String, List<Long>>?',
+			options: ['A list of maps', 'A map from strings to lists of longs', 'A map from lists to strings'],
+			answer: 1,
+			explanation: 'Outside in: a Map whose keys are Strings and whose values are List<Long>.',
+		},
+		{
+			question: 'Where does a generic method declare its type parameter?',
+			options: ['After the method name', 'Before the return type, as in <T> T firstOr(...)', 'In the parameter list only'],
+			answer: 1,
+			explanation: 'The <T> comes first, so the return type can use it.',
+		},
+	]}
+/>
+
+<MarkComplete />
