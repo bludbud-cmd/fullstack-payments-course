@@ -1,0 +1,146 @@
+---
+title: "4.4 Operators"
+description: "Calculate with arithmetic operators, update variables with shortcuts, and avoid the string-plus-number trap."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can do calculations in JavaScript, control the order they happen in, and avoid the most common operator trap.
+
+## Why it matters
+
+Splitting a bill, adding a fee, checking a spending limit, rounding to whole cents: payments code is full of small calculations. Getting the order of operations or the rounding wrong by one cent is a real bug, and in a payments app, a real complaint.
+
+## The idea
+
+An **operator** is a symbol that does something with values.
+
+### Arithmetic
+
+| Operator | Meaning | Example | Result |
+| --- | --- | --- | --- |
+| `+` | add | `2550 + 1000` | `3550` |
+| `-` | subtract | `10000 - 1200` | `8800` |
+| `*` | multiply | `1999 * 3` | `5997` |
+| `/` | divide | `10 / 4` | `2.5` |
+| `%` | remainder | `17 % 5` | `2` |
+| `**` | power | `2 ** 3` | `8` |
+
+Like in maths, `*` and `/` happen before `+` and `-`: `2 + 3 * 4` is `14`. Use brackets to choose the order yourself: `(2 + 3) * 4` is `20`. When in doubt, add brackets; they also make code easier to read.
+
+### Rounding
+
+Percentages of cents rarely come out whole. `Math` has three rounding tools:
+
+- `Math.round(878.25)` → `878` (to the nearest whole number)
+- `Math.floor(878.75)` → `878` (always down)
+- `Math.ceil(878.25)` → `879` (always up)
+
+### Update shortcuts
+
+```js
+let balanceCents = 10000;
+balanceCents += 2550;   // the same as balanceCents = balanceCents + 2550
+balanceCents -= 1200;   // subtract and store
+let count = 0;
+count++;                // add one
+```
+
+### Logic
+
+`&&` (and), `||` (or) and `!` (not) combine booleans. You will use them with comparisons in Module 5:
+
+```js
+const isActive = true;
+const hasMoney = false;
+console.log(isActive && hasMoney); // false: both must be true
+console.log(isActive || hasMoney); // true: at least one is true
+console.log(!isActive);            // false: the opposite
+```
+
+## Worked example: a fee
+
+PayDeck might charge 1.5% on a top-up, rounded to the nearest cent:
+
+```js
+const topUpCents = 4999;              // $49.99
+const feePercent = 1.5;
+
+const feeCents = Math.round(topUpCents * feePercent / 100);
+const totalCents = topUpCents + feeCents;
+
+console.log("Fee:", feeCents);        // Fee: 75
+console.log("Total:", totalCents);    // Total: 5074
+```
+
+- `topUpCents * feePercent / 100` is `74.985`. `*` and `/` run left to right.
+- `Math.round` turns it into `75` cents. Without rounding you would have a fraction of a cent, which cannot be paid.
+
+## Try it
+
+<Exercise title="Try it: split it fairly">
+Three friends share a $100.00 dinner (10000 cents). Work out how many cents each pays if everyone pays the same whole number of cents and nobody pays less than their share. How many cents are left over?
+
+<Fragment slot="hint">10000 / 3 is not a whole number. Which rounding function always goes up?</Fragment>
+<Fragment slot="hint2">The leftover is what was collected, minus the bill.</Fragment>
+<Fragment slot="solution">
+
+```js
+const billCents = 10000;
+const people = 3;
+const eachCents = Math.ceil(billCents / people);   // 3334
+const leftoverCents = eachCents * people - billCents; // 2
+console.log(eachCents, leftoverCents);
+```
+
+Each pays 3334 cents ($33.34), and 2 cents are collected over the bill. Using `Math.floor` would collect 9999, one cent short. This exact problem appears in every bill-splitting app.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title='"10" + 5 is "105"'>
+`+` also joins strings. If either side is a string, JavaScript joins instead of adding: `"10" + 5` is `"105"`. This happens most with things people type, which always arrive as strings. Convert first: `Number("10") + 5` is `15`.
+</Aside>
+
+<Aside type="caution" title="= versus ===">
+`=` puts a value into a variable. Checking whether two values are equal is `===`, which you will meet in the next module. Mixing them up is one of the most common bugs in any language.
+</Aside>
+
+## Recap
+
+- `+ - * / % **` do arithmetic; `*` and `/` go before `+` and `-`, and brackets change the order.
+- `Math.round`, `Math.floor` and `Math.ceil` turn results into whole cents.
+- `+=`, `-=` and `++` update a variable in place.
+- `&&`, `||` and `!` combine booleans.
+- `+` joins strings, so convert typed input with `Number(...)` first.
+
+<Quiz
+	questions={[
+		{
+			question: 'What is `2 + 3 * 4`?',
+			options: ['20', '14', '24'],
+			answer: 1,
+			explanation: 'Multiplication happens first: 3 * 4 is 12, plus 2 is 14.',
+		},
+		{
+			question: 'What is `"5" + 5`?',
+			options: ['10', '"55"', 'An error'],
+			answer: 1,
+			explanation: 'One side is a string, so `+` joins them into "55".',
+		},
+		{
+			question: 'What is `17 % 5`?',
+			options: ['3.4', '2', '3'],
+			answer: 1,
+			explanation: '`%` gives the remainder: 17 is 3 fives (15) with 2 left over.',
+		},
+	]}
+/>
+
+<MarkComplete />

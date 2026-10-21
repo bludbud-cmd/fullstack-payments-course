@@ -1,0 +1,130 @@
+---
+title: "5.1 if and else"
+description: "Make a program choose between different actions with if, else if and else."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can write code that does different things depending on a condition.
+
+## Why it matters
+
+When someone pays with a PayDeck card, the server decides: is the card frozen? Over its limit? Is there enough money? Each answer leads somewhere different: approve, or decline with a reason. Every decision like that in every app is built from `if` and `else`.
+
+## The idea
+
+```js
+if (condition) {
+  // runs only when the condition is true
+} else {
+  // runs only when it is false
+}
+```
+
+- The **condition** goes in round brackets. It is anything that is `true` or `false`, such as `amountCents > balanceCents` ("is the amount greater than the balance?").
+- The code to run goes in curly braces `{ }`, called a **block**. It is indented by two spaces so you can see what belongs to what.
+- `else` is optional.
+
+For more than two choices, chain `else if`. JavaScript checks each condition from the top and runs the **first** block whose condition is true, then skips the rest:
+
+```js
+if (first) {
+  // ...
+} else if (second) {
+  // ...
+} else {
+  // none of the above
+}
+```
+
+The comparison operators you need for now: `>` greater than, `<` less than, `>=` greater than or equal, `<=` less than or equal, `===` equal, `!==` not equal. The next lesson covers them in depth.
+
+## Worked example: should this payment go through?
+
+Create `pay.js`:
+
+```js
+const balanceCents = 5000;
+const isFrozen = false;
+const amountCents = 1200;
+
+if (isFrozen) {
+  console.log("Declined: this card is frozen.");
+} else if (amountCents > balanceCents) {
+  console.log("Declined: not enough money.");
+} else {
+  console.log("Approved.");
+}
+```
+
+`node pay.js` prints `Approved.` Now change the inputs and run it again:
+
+- `isFrozen = true` → `Declined: this card is frozen.`
+- `amountCents = 9000` → `Declined: not enough money.`
+- Both → `Declined: this card is frozen.` Only the first matching branch runs, so the **order** of the checks is part of the logic. PayDeck's real API checks in this order: frozen, cancelled, over the limit, then not enough money.
+
+Notice `if (isFrozen)`: a boolean is already true or false, so you do not need `if (isFrozen === true)`.
+
+## Try it
+
+<Exercise title="Try it: add a spending limit">
+Add `const limitCents = 2500;` and a check that declines payments over the card's limit with `Declined: over the card's limit.` It should be checked after "frozen" and before "not enough money".
+
+<Fragment slot="hint">Add one more `else if` between the two existing checks.</Fragment>
+<Fragment slot="solution">
+
+```js
+if (isFrozen) {
+  console.log("Declined: this card is frozen.");
+} else if (amountCents > limitCents) {
+  console.log("Declined: over the card's limit.");
+} else if (amountCents > balanceCents) {
+  console.log("Declined: not enough money.");
+} else {
+  console.log("Approved.");
+}
+```
+
+Try `amountCents = 3000`: it is over the limit (2500) but within the balance (5000), so it prints the limit message.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="if (amountCents = 0)">
+A single `=` **puts** 0 into the variable instead of comparing, and the condition is then 0, which counts as false. To compare, always use `===`.
+</Aside>
+
+<Aside type="caution" title="Unexpected token 'else'">
+Usually a missing or extra curly brace before the `else`. Each `{` needs a matching `}`. Turn on **Format Document** (Shift + Option + F) in VS Code: when the indentation looks wrong, a brace is out of place.
+</Aside>
+
+## Recap
+
+- `if (condition) { ... }` runs a block only when the condition is true; `else` runs when it is false.
+- `else if` adds more choices; only the **first** matching block runs, so order matters.
+- A boolean can be the whole condition: `if (isFrozen)`.
+
+<Quiz
+	questions={[
+		{
+			question: 'A card is frozen and over its limit. The code checks "frozen" first. Which message appears?',
+			options: ['Frozen', 'Over the limit', 'Both'],
+			answer: 0,
+			explanation: 'Only the first true branch runs.',
+		},
+		{
+			question: 'What runs when no condition in an if / else if chain is true and there is no else?',
+			options: ['The first block', 'Nothing in the chain', 'An error'],
+			answer: 1,
+			explanation: 'Without an else, nothing in the chain runs and the program carries on after it.',
+		},
+	]}
+/>
+
+<MarkComplete />

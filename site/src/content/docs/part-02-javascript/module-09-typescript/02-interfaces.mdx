@@ -1,0 +1,208 @@
+---
+title: "9.2 Interfaces"
+description: "Describe the shape of an object once, with an interface, and let TypeScript check every object against it."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can describe an object's shape with an `interface`, mark properties as optional, and type an array of objects.
+
+## Why it matters
+
+Most data in PayDeck is objects: a card, an account, a transaction. Each one has a fixed set of properties. If you describe that set **once**, TypeScript checks every card you create, every function that takes a card, and every property you read, against it. The PayDeck app keeps all of these descriptions in one file, `src/types.ts`.
+
+## The idea
+
+An **interface** names the shape of an object: which properties it has, and the type of each.
+
+```ts
+interface Card {
+  id: string;
+  nickname: string;
+  spendingLimitCents: number;
+}
+```
+
+Now `Card` is a type, like `string` or `number`, and you can use it anywhere a type goes:
+
+```ts
+const everyday: Card = { id: "c1", nickname: "Everyday", spendingLimitCents: 50000 };
+
+function describe(card: Card): string {
+  return `${card.nickname}: limit ${card.spendingLimitCents} cents`;
+}
+```
+
+A few more pieces:
+
+- **Optional properties** have a `?` after the name. The property may be missing, so its type is "a string, or `undefined`".
+- **Arrays of objects** are written `Card[]`, the same as `number[]`.
+- A **type alias** gives any type a new name with `type`: `type CardList = Card[];`. Interfaces are for object shapes; `type` works for anything.
+
+<Aside type="note" title="Naming">
+Interfaces and type names start with a capital letter (`Card`, `CardList`). Variables start with a lowercase letter (`card`, `cards`). This makes `card: Card` easy to read: "the variable `card` is a `Card`".
+</Aside>
+
+## Worked example
+
+In your `typescript` project from lesson 9.1, create `cards.ts`:
+
+```ts
+interface Card {
+  id: string;
+  nickname: string;
+  spendingLimitCents: number;
+  cardholderEmail?: string;
+}
+
+type CardList = Card[];
+
+const cards: CardList = [
+  { id: "c1", nickname: "Everyday", spendingLimitCents: 50000 },
+  { id: "c2", nickname: "Travel", spendingLimitCents: 200000, cardholderEmail: "ben@example.com" },
+];
+
+function describe(card: Card): string {
+  const holder = card.cardholderEmail ?? "you";
+  return `${card.nickname} (used by ${holder})`;
+}
+
+console.log(cards.map(describe));
+```
+
+`card.cardholderEmail ?? "you"` reads as "the email, or if there is none, `"you"`". The `??` operator gives back the right-hand value when the left side is `null` or `undefined`.
+
+Check, then run:
+
+```sh
+npx tsc
+node cards.ts
+```
+
+```
+[ 'Everyday (used by you)', 'Travel (used by ben@example.com)' ]
+```
+
+Now break it on purpose, one line at a time, and read each error.
+
+Forget a property:
+
+```ts
+const gym: Card = { id: "c3", nickname: "Gym" };
+```
+
+```
+error TS2741: Property 'spendingLimitCents' is missing in type '{ id: string; nickname: string; }' but required in type 'Card'.
+```
+
+Add one that the interface does not list:
+
+```ts
+const gym: Card = { id: "c3", nickname: "Gym", spendingLimitCents: 0, colour: "red" };
+```
+
+```
+error TS2353: Object literal may only specify known properties, and 'colour' does not exist in type 'Card'.
+```
+
+Use an optional property as if it were always there:
+
+```ts
+function shout(card: Card) {
+  return card.cardholderEmail.toUpperCase();
+}
+```
+
+```
+error TS18048: 'card.cardholderEmail' is possibly 'undefined'.
+```
+
+That last one is TypeScript at its most useful. In plain JavaScript, `shout(everyday)` crashes with `Cannot read properties of undefined`, but only when it runs, and only for cards without an email. TypeScript makes you handle the missing case first, for example with `??` or an `if`.
+
+## Try it
+
+<Exercise title="Try it: describe a transaction">
+Write an interface `Transaction` for objects like these, then a function `total(transactions: Transaction[]): number` that adds up `amountCents`. Check with `npx tsc` and run it.
+
+```ts
+const transactions = [
+  { id: "t1", amountCents: 10000, description: "Top-up" },
+  { id: "t2", amountCents: -1250, description: "Coffee", merchant: "Bean There" },
+];
+```
+
+<Fragment slot="hint">`merchant` is only on some transactions, so it needs a `?`. For the total, a `for...of` loop works, as in Module 5.</Fragment>
+<Fragment slot="solution">
+
+```ts
+interface Transaction {
+  id: string;
+  amountCents: number;
+  description: string;
+  merchant?: string;
+}
+
+const transactions: Transaction[] = [
+  { id: "t1", amountCents: 10000, description: "Top-up" },
+  { id: "t2", amountCents: -1250, description: "Coffee", merchant: "Bean There" },
+];
+
+function total(transactions: Transaction[]): number {
+  let sum = 0;
+  for (const t of transactions) {
+    sum += t.amountCents;
+  }
+  return sum;
+}
+
+console.log(total(transactions)); // 8750
+```
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Commas or semicolons?">
+Inside an interface, properties end with `;` (commas also work). Inside an object value, they are separated with `,`. Mixing them up is harmless in an interface, and a syntax error in an object.
+</Aside>
+
+<Aside type="caution" title="Writing the interface where only the variable belongs">
+`const card = Card;` is an error: `Card` is a type, not a value. Types go after a `:`, as in `const card: Card = { ... }`.
+</Aside>
+
+## Recap
+
+- `interface Name { prop: type; ... }` describes an object's shape.
+- `prop?: type` makes a property optional; TypeScript then makes you handle it being missing.
+- `Card[]` is an array of cards; `type CardList = Card[]` gives a type a new name.
+- TypeScript reports missing properties, unknown properties, and possibly-`undefined` reads.
+
+<Quiz
+	questions={[
+		{
+			question: 'An interface has `merchant?: string`. What is the type of `t.merchant`?',
+			options: ['string', 'string or undefined', 'any'],
+			answer: 1,
+			explanation: 'The ? means the property may be missing, and a missing property reads as undefined.',
+		},
+		{
+			question: 'How do you write the type "an array of Transaction objects"?',
+			options: ['Transaction[]', '[Transaction]', 'Array'],
+			answer: 0,
+			explanation: 'Add [] after any type to get an array of it, as with number[].',
+		},
+		{
+			question: 'You create a Card but leave out a required property. When do you find out?',
+			options: ['When the code runs', 'When a customer complains', 'As soon as the checker reads the file'],
+			answer: 2,
+			explanation: 'VS Code underlines it straight away, and npx tsc reports it.',
+		},
+	]}
+/>
+
+<MarkComplete />

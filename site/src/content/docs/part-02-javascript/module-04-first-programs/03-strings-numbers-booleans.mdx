@@ -1,0 +1,145 @@
+---
+title: "4.3 Strings, numbers and booleans"
+description: "Work with the three basic kinds of value, and see why PayDeck stores money in cents."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can use strings, numbers and booleans, and explain why money should be stored as whole cents.
+
+## Why it matters
+
+Every value in PayDeck is one of a few kinds, called **types**. A card's nickname is text, its spending limit is a number, and "is it frozen?" is yes or no. Each type has its own abilities and its own traps. One of those traps, with decimal numbers, is why real payment systems never store money as `12.50`.
+
+## The idea
+
+| Type | Examples | What it is |
+| --- | --- | --- |
+| **string** | `"Everyday"`, `'4242'` | Text, in quotes |
+| **number** | `42`, `-1200`, `0.15` | Numbers, whole or decimal |
+| **boolean** | `true`, `false` | Yes or no |
+
+`typeof` tells you the type of a value: `typeof "hi"` is `"string"`.
+
+There is also `undefined`, which means "no value yet": a `let` variable you have not filled in is `undefined`.
+
+## Worked example
+
+### Strings
+
+```js
+const merchant = "Corner Café";
+const last4 = "4242";
+
+console.log(merchant.length);            // 11
+console.log(merchant.toUpperCase());     // CORNER CAFÉ
+console.log(merchant.includes("Café"));  // true
+console.log("  hi  ".trim());            // hi
+
+const label = `Card ending ${last4}`;
+console.log(label);                      // Card ending 4242
+```
+
+- `.length` is how many characters a string has.
+- `.toUpperCase()`, `.includes(...)` and `.trim()` are **methods**: actions a string can do. `.trim()` removes spaces at both ends, which is useful for things people type.
+- Strings in **backticks** (`` ` ``) are **template literals**: `${...}` inside them is replaced by a value. This is the easiest way to build sentences.
+
+Why is the last four digits of a card a string, not a number? Because you never do maths with it, and a number would turn `"0042"` into `42`.
+
+### Numbers, and a surprise
+
+```js
+console.log(10 / 4);        // 2.5
+console.log(0.1 + 0.2);     // 0.30000000000000004
+```
+
+That second line is not a JavaScript bug. Computers store numbers in binary, and most decimals, like 0.1, cannot be stored exactly in binary, the same way 1/3 cannot be written exactly as a decimal (0.333…). Tiny errors creep in. For a game score that is fine. For money, it is not: errors add up over millions of payments, and the books stop balancing.
+
+The fix is to store money as **whole numbers of the smallest unit**: cents, pence or paise. Whole numbers are always exact.
+
+```js
+const priceCents = 1999;                   // $19.99
+const totalCents = priceCents * 3;         // 5997, exact
+console.log((totalCents / 100).toFixed(2)); // 59.97
+```
+
+`.toFixed(2)` turns a number into a string with exactly two decimal places, only for showing it. PayDeck does exactly this: cents everywhere, and decimals only on screen.
+
+### Booleans
+
+```js
+const isFrozen = false;
+const hasLimit = true;
+console.log(typeof isFrozen);   // boolean
+```
+
+Booleans are named like questions: `isFrozen`, `hasLimit`, `canPay`. In the next module, they decide what a program does.
+
+## Try it
+
+<Exercise title="Try it: a card description">
+Given these variables, print the sentence `Travel card ending 1881 has a limit of $250.00` using one template literal.
+
+```js
+const nickname = "Travel";
+const last4 = "1881";
+const limitCents = 25000;
+```
+
+<Fragment slot="hint">Inside `${...}` you can put any calculation, such as `(limitCents / 100).toFixed(2)`.</Fragment>
+<Fragment slot="solution">
+
+```js
+console.log(`${nickname} card ending ${last4} has a limit of $${(limitCents / 100).toFixed(2)}`);
+```
+
+The first `$` in `$${...}` is a plain dollar sign; the `${` that follows starts the value.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="${amount} is printed literally">
+Template literals only work with **backticks**, not quotes. `"Total: ${amount}"` prints exactly that. Use `` `Total: ${amount}` ``.
+</Aside>
+
+<Aside type="caution" title="Comparing money with decimals">
+`0.1 + 0.2 === 0.3` is `false`. Do the maths in cents, and these comparisons always behave.
+</Aside>
+
+## Recap
+
+- The basic types are **string** (text), **number** and **boolean** (true or false). `typeof` tells you which.
+- Template literals in backticks build strings with `${...}`.
+- Decimal maths has tiny errors, so money is stored as **whole cents** and only formatted with decimals for display.
+- Name booleans like questions: `isFrozen`, `hasLimit`.
+
+<Quiz
+	questions={[
+		{
+			question: 'How should $12.50 be stored in PayDeck?',
+			options: ['12.50', '"12.50"', '1250'],
+			answer: 2,
+			explanation: 'As whole cents: 1250. Whole numbers are always exact.',
+		},
+		{
+			question: 'What does `typeof "42"` give?',
+			options: ['"number"', '"string"', '"boolean"'],
+			answer: 1,
+			explanation: 'The quotes make it a string, even though it looks like a number.',
+		},
+		{
+			question: 'Which line prints `Hi Asha` when name is "Asha"?',
+			options: ['console.log("Hi ${name}")', 'console.log(`Hi ${name}`)', "console.log('Hi ${name}')"],
+			answer: 1,
+			explanation: 'Only backticks fill in `${...}`.',
+		},
+	]}
+/>
+
+<MarkComplete />

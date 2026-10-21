@@ -1,0 +1,134 @@
+---
+title: "Mini-project: weather lookup"
+description: "Build a command that looks up a city's current weather using two real APIs, one after the other."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Build a small tool that chains two real API calls, where the second depends on the first: the same shape as "sign in, then load the account".
+
+```sh
+node weather.mjs Lisbon
+```
+
+```
+Lisbon, Portugal: 18.4°C, wind 12.0 km/h
+```
+
+## The APIs
+
+[Open-Meteo](https://open-meteo.com) is free and needs no account or key.
+
+**Step 1: find the city.** Weather is looked up by latitude and longitude, so first turn the name into coordinates:
+
+```
+https://geocoding-api.open-meteo.com/v1/search?name=Lisbon&count=1
+```
+
+The response (shortened) looks like this. If nothing matches, there is no `results` property at all.
+
+```json
+{
+  "results": [
+    { "name": "Lisbon", "country": "Portugal", "latitude": 38.71667, "longitude": -9.13333 }
+  ]
+}
+```
+
+**Step 2: get the weather** at those coordinates:
+
+```
+https://api.open-meteo.com/v1/forecast?latitude=38.71667&longitude=-9.13333&current=temperature_2m,wind_speed_10m
+```
+
+```json
+{
+  "current_units": { "temperature_2m": "°C", "wind_speed_10m": "km/h" },
+  "current": { "time": "2026-10-21T18:30", "temperature_2m": 18.4, "wind_speed_10m": 12.0 }
+}
+```
+
+Open both addresses in your browser first, to see the real responses.
+
+## Requirements
+
+1. Read the city from the command line. `process.argv` is an array of the command's words: `["/path/to/node", "/path/to/weather.mjs", "Lisbon"]`. So the city is `process.argv[2]`. For a city with a space, like `New York`, join everything from index 2: `process.argv.slice(2).join(" ")`.
+2. With no city given, print `Usage: node weather.mjs <city>`.
+3. Write two functions, `findCity(name)` and `currentWeather(latitude, longitude)`, each checking `response.ok`.
+4. Print the result as shown, using the units from the response.
+5. Clear messages for: an unknown city, no internet connection, and an error status from either API.
+
+City names can contain spaces and accents, which are not allowed in a URL as-is. Wrap them with `encodeURIComponent(name)` when building the address: `encodeURIComponent("São Paulo")` is `"S%C3%A3o%20Paulo"`.
+
+<Exercise title="Check your work">
+Try `Lisbon`, `New York`, `São Paulo`, `Nowhereville`, no city at all, and any city with your Wi-Fi off.
+
+<Fragment slot="hint">`findCity` should return `null` when `data.results` is missing, and the main code turns that into "No city called … was found."</Fragment>
+<Fragment slot="solution">
+
+```js
+async function getJson(url) {
+  let response;
+  try {
+    response = await fetch(url);
+  } catch {
+    throw new Error("Could not reach the weather service. Check your internet connection.");
+  }
+  if (!response.ok) {
+    throw new Error(`The weather service answered ${response.status}. Try again later.`);
+  }
+  return await response.json();
+}
+
+async function findCity(name) {
+  const data = await getJson(
+    `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=1`,
+  );
+  return data.results ? data.results[0] : null;
+}
+
+async function currentWeather(latitude, longitude) {
+  const data = await getJson(
+    `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}` +
+      "&current=temperature_2m,wind_speed_10m",
+  );
+  return { values: data.current, units: data.current_units };
+}
+
+const name = process.argv.slice(2).join(" ");
+
+if (!name) {
+  console.log("Usage: node weather.mjs <city>");
+} else {
+  try {
+    const city = await findCity(name);
+    if (!city) {
+      console.log(`No city called ${name} was found.`);
+    } else {
+      const { values, units } = await currentWeather(city.latitude, city.longitude);
+      console.log(
+        `${city.name}, ${city.country}: ` +
+          `${values.temperature_2m}${units.temperature_2m}, ` +
+          `wind ${values.wind_speed_10m.toFixed(1)} ${units.wind_speed_10m}`,
+      );
+    }
+  } catch (error) {
+    console.log(error.message);
+  }
+}
+```
+
+`getJson` holds the checks both calls need, so each API function is three lines. The second call uses the first one's result, so it must come after an `await`: there is no way to run these two in parallel.
+</Fragment>
+</Exercise>
+
+<Aside type="tip" title="You can now read the PayDeck client">
+Open `app/src/api/client.ts` in the course repository. It is longer, because it also adds sign-in tokens and retries, but you will recognise its shape: one helper that calls `fetch`, checks the response and turns failures into readable errors.
+</Aside>
+
+<MarkComplete />

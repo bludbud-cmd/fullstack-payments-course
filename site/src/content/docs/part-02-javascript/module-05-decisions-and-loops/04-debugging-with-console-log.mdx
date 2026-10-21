@@ -1,0 +1,130 @@
+---
+title: "5.4 Debugging with console.log"
+description: "Find out what your program is really doing by printing values at the right moments."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can track down a bug by printing the values your program is actually using.
+
+## Why it matters
+
+Most bugs come down to one thing: a value is not what you think it is. A balance is a string instead of a number, a loop runs once too often, a condition is false when you expected true. Printing values is the oldest, simplest and still one of the most effective ways to find out. You will use it in PayDeck's app and server alike.
+
+## The idea
+
+When code misbehaves, stop guessing and **look**:
+
+1. **Say what you expect** at a certain line ("at this point, `totalCents` should be 8400").
+2. **Print the real value** there with `console.log`.
+3. **Compare.** The first place where reality differs from your expectation is where the bug is (or just above it).
+
+Tips that make this much faster:
+
+- **Label every print:** `console.log("totalCents", totalCents)`, not just `console.log(totalCents)`. With several prints you need to know which is which.
+- **Print the type** when something is odd: `console.log(typeof amount, amount)`. `"25"` and `25` look the same when printed on their own.
+- **Print inside loops** to see each round.
+- **Print before and after** a change, to see what the change did.
+- **Remove the prints** when the bug is fixed.
+
+<Aside type="tip" title="Shorthand for labels">
+`console.log({ totalCents })` prints `{ totalCents: 8400 }`: the name and the value, with less typing. You will learn what the curly braces mean in Module 7.
+</Aside>
+
+## Worked example: the balance that is too big
+
+This program should add three top-ups to a balance of $10.00:
+
+```js
+let balanceCents = 1000;
+const topUps = ["500", "250", "100"];
+
+for (let i = 0; i <= topUps.length; i++) {
+  balanceCents = balanceCents + topUps[i];
+}
+
+console.log(balanceCents);
+```
+
+It prints `1000500250100undefined`. Clearly wrong, but why? Add a labelled print inside the loop:
+
+```js
+for (let i = 0; i <= topUps.length; i++) {
+  console.log("round", i, "adding", typeof topUps[i], topUps[i]);
+  balanceCents = balanceCents + topUps[i];
+}
+```
+
+```
+round 0 adding string 500
+round 1 adding string 250
+round 2 adding string 100
+round 3 adding undefined undefined
+```
+
+Two bugs, both visible now:
+
+1. The top-ups are **strings**, so `+` joins them instead of adding (lesson 4.4). Fix: `Number(topUps[i])`.
+2. There is a **round 3** with nothing in it: the loop runs once too often. `topUps.length` is 3, and the positions are 0, 1 and 2. Fix: `i < topUps.length`.
+
+(The square brackets, `topUps[i]`, fetch the item at position `i` of a list. Lists are coming properly in Module 7.)
+
+With both fixes it prints `1850`. Remove the debugging line, and you are done.
+
+## Try it
+
+<Exercise title="Try it: find the bug">
+This should print `Approved` for a payment exactly at the limit, but prints the decline. Use `console.log` to find out why, then fix it.
+
+```js
+const limitCents = 2500;
+const typedAmount = "25.00";
+const amountCents = typedAmount * 100;
+
+if (amountCents < limitCents) {
+  console.log("Approved");
+} else {
+  console.log("Declined: over the limit");
+}
+```
+
+<Fragment slot="hint">Print `amountCents`, `limitCents` and the condition itself, `amountCents < limitCents`.</Fragment>
+<Fragment slot="solution">Printing shows `amountCents 2500`, `limitCents 2500` and the condition `false`: 2500 is not *less than* 2500. The comparison should be `amountCents <= limitCents` (lesson 5.2). Notice that `"25.00" * 100` did work here (`*` converts strings to numbers, unlike `+`), but relying on that is fragile. `Number(typedAmount)` is clearer.</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Changing code at random">
+"Let me just try `<=`… now `+ 1`…" Guessing can hide one bug while creating another. Print first, understand, then change one thing.
+</Aside>
+
+## Recap
+
+- Say what you expect, print what is real, and compare.
+- Label prints, print types when values look right but behave wrong, and print inside loops.
+- The first place reality differs from your expectation is where to look.
+- Remove debugging prints when you are done.
+
+<Quiz
+	questions={[
+		{
+			question: 'A value prints as 25 but `+` keeps joining it to other numbers. What should you print next?',
+			options: ['The value again', 'typeof the value', 'Nothing, rewrite the code'],
+			answer: 1,
+			explanation: 'It is probably the string "25". `typeof` will tell you.',
+		},
+		{
+			question: 'Why label your console.log output?',
+			options: ['It is required', 'So you can tell several printed values apart', 'It makes the program faster'],
+			answer: 1,
+			explanation: 'With more than one print, unlabelled numbers are easy to mix up.',
+		},
+	]}
+/>
+
+<MarkComplete />

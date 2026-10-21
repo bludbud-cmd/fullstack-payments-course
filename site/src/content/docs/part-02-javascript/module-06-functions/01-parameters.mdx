@@ -1,0 +1,130 @@
+---
+title: "6.1 Functions and parameters"
+description: "Write functions that take inputs, so one piece of code works for many values."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can write a function, give it inputs through parameters, and call it.
+
+## Why it matters
+
+PayDeck shows money on almost every screen: the balance, each transaction, each card's limit. Without functions you would copy the same "turn cents into $12.50" code into every one of those places, and fixing a bug would mean finding every copy. A **function** lets you write it once, give it a name, and use it everywhere.
+
+## The idea
+
+A function is a named, reusable block of code. You **define** it once, then **call** it as often as you like.
+
+```js
+function greet(name) {
+  console.log(`Hello, ${name}!`);
+}
+
+greet("Asha");   // Hello, Asha!
+greet("Ben");    // Hello, Ben!
+```
+
+- `function greet(name)` defines a function called `greet`.
+- `name` is a **parameter**: a variable that gets its value when the function is called.
+- `greet("Asha")` **calls** it. The value in the brackets, `"Asha"`, is the **argument**; it becomes the value of `name` for that call.
+
+A function can take several parameters, separated by commas. Arguments are matched to parameters **by position**: first to first, second to second.
+
+You have been calling functions all along: `console.log(...)`, `Math.round(...)`, `Number(...)`. Now you can write your own.
+
+### Default values
+
+A parameter can have a default, used when the argument is left out:
+
+```js
+function greet(name = "friend") {
+  console.log(`Hello, ${name}!`);
+}
+greet(); // Hello, friend!
+```
+
+## Worked example: printing a card
+
+```js
+function describeCard(nickname, last4, isFrozen) {
+  const status = isFrozen ? "frozen" : "active";
+  console.log(`${nickname} (•••• ${last4}) is ${status}`);
+}
+
+describeCard("Everyday", "4242", false);
+describeCard("Travel", "1881", true);
+```
+
+Output:
+
+```
+Everyday (•••• 4242) is active
+Travel (•••• 1881) is frozen
+```
+
+- Three parameters, filled in order by three arguments.
+- `isFrozen ? "frozen" : "active"` is a short `if`/`else` that produces a value, called the **ternary operator**: "if `isFrozen`, then `"frozen"`, otherwise `"active"`". It is handy for choosing between two values; for anything longer, use `if`.
+- `const status` exists only inside the function; more on that in lesson 6.3.
+
+## Try it
+
+<Exercise title="Try it: a receipt line">
+Write a function `printLine(merchant, amountCents)` that prints, for example, `Corner Café: $12.00`. Call it for three purchases.
+
+<Fragment slot="hint">Inside, turn cents into dollars with `(amountCents / 100).toFixed(2)`.</Fragment>
+<Fragment slot="solution">
+
+```js
+function printLine(merchant, amountCents) {
+  console.log(`${merchant}: $${(amountCents / 100).toFixed(2)}`);
+}
+
+printLine("Corner Café", 1200);
+printLine("Bookshop", 2599);
+printLine("Bus", 275);
+```
+
+The formatting rule lives in one place. If you later decide to show `USD 12.00` instead, you change one line.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="The function never runs">
+Defining a function does not run it. Check that you **call** it, with brackets: `greet("Asha")`. Writing just `greet` refers to the function without calling it.
+</Aside>
+
+<Aside type="caution" title="Arguments in the wrong order">
+`describeCard("4242", "Everyday", false)` runs without an error but prints nonsense, because arguments are matched by position. When a function has many parameters, Module 7 shows a clearer way: passing one object with named values.
+</Aside>
+
+## Recap
+
+- A **function** is named, reusable code: define it with `function name(parameters) { ... }`, call it with `name(arguments)`.
+- **Parameters** are the input names; **arguments** are the values passed in, matched by position.
+- Parameters can have defaults: `name = "friend"`.
+- `condition ? a : b` picks between two values.
+
+<Quiz
+	questions={[
+		{
+			question: 'In `greet("Asha")`, what is "Asha"?',
+			options: ['A parameter', 'An argument', 'The function name'],
+			answer: 1,
+			explanation: 'The value passed in a call is an argument. It fills the parameter `name`.',
+		},
+		{
+			question: 'What does `isFrozen ? "frozen" : "active"` give when isFrozen is false?',
+			options: ['"frozen"', '"active"', 'false'],
+			answer: 1,
+			explanation: 'The part after the colon is used when the condition is false.',
+		},
+	]}
+/>
+
+<MarkComplete />

@@ -1,0 +1,144 @@
+---
+title: "4.1 Running code with Node.js"
+description: "Install Node.js, run JavaScript in the terminal, and write and run your first program file."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you have Node.js installed and you have written and run your first program.
+
+## Why it matters
+
+**JavaScript** is the language of the PayDeck app: React Native screens are written in it (in its typed form, TypeScript, from Module 9). JavaScript was made for web browsers, but **Node.js** lets you run it in the terminal too, with no browser or phone needed. That makes it the perfect place to learn the language before adding screens.
+
+## The idea
+
+A program is a list of instructions in a file. JavaScript files end in `.js`. To run one, you hand it to Node, which reads it from top to bottom and follows each instruction, one line at a time.
+
+The first instruction everyone learns is `console.log(...)`, which prints whatever is between the brackets to the terminal. You will use it constantly, for showing results and for finding bugs.
+
+## Worked example
+
+### Install Node.js
+
+1. Go to [nodejs.org](https://nodejs.org) and download the **LTS** version for macOS. LTS means "long-term support": the stable version that tools expect.
+2. Open the downloaded `.pkg` file and click through the installer.
+3. Open a **new** terminal window and check:
+
+   ```sh
+   node --version
+   ```
+
+   You should see a version number such as `v22.21.0` or newer.
+
+### Try JavaScript interactively
+
+Type `node` on its own and press Return. The prompt changes to `>`: Node is waiting for JavaScript. Try:
+
+```js
+> 2 + 3
+5
+> console.log("Hello, PayDeck")
+Hello, PayDeck
+undefined
+```
+
+(The `undefined` is Node telling you that `console.log` itself gives back no value. Ignore it.) Press **Control + D** to leave.
+
+### Your first program file
+
+```sh
+cd ~/Projects/course/javascript
+code hello.js
+```
+
+In VS Code, type this into `hello.js` and save:
+
+```js
+// Lines starting with two slashes are comments: notes for people.
+// Node ignores them.
+console.log("Hello, PayDeck");
+console.log("2 + 3 is", 2 + 3);
+```
+
+Back in the terminal:
+
+```sh
+node hello.js
+```
+
+Output:
+
+```
+Hello, PayDeck
+2 + 3 is 5
+```
+
+Line by line:
+
+- `console.log("Hello, PayDeck");` prints the text between the quotes. Text in quotes is called a **string**.
+- `console.log("2 + 3 is", 2 + 3);` prints two things separated by a space: a string, and the result of the sum. Node works out `2 + 3` before printing.
+- The `;` at the end of each line marks the end of an instruction, like a full stop.
+
+<Aside type="tip" title="Run it in VS Code">
+Open VS Code's own terminal with **Control + `** (the key above Tab). It opens in your project folder, so you can edit and run without switching windows.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: your PayDeck welcome">
+Write a program `welcome.js` that prints three lines: a welcome to PayDeck, your name, and the number of seconds in a day (worked out by Node, not by you).
+
+<Fragment slot="hint">Multiply 60 seconds by 60 minutes by 24 hours. In JavaScript, `*` means multiply.</Fragment>
+<Fragment slot="solution">
+
+```js
+console.log("Welcome to PayDeck");
+console.log("Built by Asha");
+console.log("Seconds in a day:", 60 * 60 * 24);
+```
+
+`node welcome.js` prints `Seconds in a day: 86400` on the last line.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Error: Cannot find module '/Users/asha/hello.js'">
+Node looked for the file in the folder you are in, and it is not there. Run `pwd` and `ls`, then `cd` to the folder that has the file.
+</Aside>
+
+<Aside type="caution" title="SyntaxError: missing ) after argument list">
+A bracket or a quote is missing, such as `console.log("Hello);`. Every `(` needs a `)`, and every opening `"` needs a closing `"`. VS Code colours strings, so an unclosed one turns the rest of the line the string colour.
+</Aside>
+
+## Recap
+
+- **Node.js** runs JavaScript in the terminal. Check it with `node --version`.
+- `node` alone opens an interactive prompt; `node file.js` runs a file.
+- `console.log(...)` prints values. Text in quotes is a **string**.
+- `//` starts a comment, which Node ignores.
+
+<Quiz
+	questions={[
+		{
+			question: 'How do you run a file called tip.js?',
+			options: ['run tip.js', 'node tip.js', 'open tip.js'],
+			answer: 1,
+			explanation: '`node` followed by the file name runs it.',
+		},
+		{
+			question: 'What does `console.log("2 + 2")` print?',
+			options: ['4', '2 + 2', 'Nothing'],
+			answer: 1,
+			explanation: 'In quotes, it is a string: printed exactly as written, not calculated.',
+		},
+	]}
+/>
+
+<MarkComplete />

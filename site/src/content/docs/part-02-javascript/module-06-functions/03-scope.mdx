@@ -1,0 +1,143 @@
+---
+title: "6.3 Scope"
+description: "Know where a variable can be used, and why keeping variables local prevents bugs."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can tell where a variable exists and where it does not, and avoid bugs from shared variables.
+
+## Why it matters
+
+The PayDeck app has dozens of variables called `amount`, `card` or `error`, in different screens. They do not clash, because each lives only inside its own function. That rule, called **scope**, is what lets large programs be written by many people without everyone's names getting tangled.
+
+## The idea
+
+A variable created with `const` or `let` exists only inside the **block** `{ }` where it was created, and in blocks nested inside that one. That region is its **scope**.
+
+```js
+const currency = "USD";          // top level: visible everywhere below
+
+function showBalance(cents) {
+  const dollars = cents / 100;   // only inside showBalance
+  console.log(`${dollars} ${currency}`); // can see currency
+}
+
+showBalance(1250);  // 12.5 USD
+console.log(dollars); // ReferenceError: dollars is not defined
+```
+
+Think of scopes as rooms with one-way windows: code inside a room can see out into the rooms that contain it, but nobody outside can see in.
+
+- **Global** (top-level) variables are visible everywhere in the file.
+- **Function** variables, and parameters, are visible only inside that function.
+- **Block** variables, created inside an `if` or a loop's `{ }`, are visible only inside that block.
+
+### Shadowing
+
+If an inner scope creates a variable with the same name as an outer one, the inner one hides ("shadows") the outer one inside that scope. Legal, but confusing. Prefer different names.
+
+### Keep variables as local as you can
+
+A variable that many functions can change is hard to reason about: any of them might have changed it. Prefer functions that take what they need as **parameters** and **return** their result, without touching anything outside. These are called **pure functions**, and they are the easiest code there is to test and to trust.
+
+## Worked example: a bug from a shared variable
+
+```js
+let totalCents = 0;
+
+function addToBasket(priceCents) {
+  totalCents = totalCents + priceCents;
+  return totalCents;
+}
+
+console.log(addToBasket(500)); // 500
+console.log(addToBasket(300)); // 800
+
+// Later, someone else uses it for a second basket…
+console.log(addToBasket(100)); // 900, not 100!
+```
+
+`totalCents` lives outside the function, so every call adds to the same running total, including calls meant for a different basket. The pure version takes the total in and returns the new one:
+
+```js
+function addToBasket(totalCents, priceCents) {
+  return totalCents + priceCents;
+}
+
+let basketA = 0;
+basketA = addToBasket(basketA, 500);
+basketA = addToBasket(basketA, 300);
+
+let basketB = 0;
+basketB = addToBasket(basketB, 100);
+
+console.log(basketA, basketB); // 800 100
+```
+
+Each basket's total now belongs to whoever owns that basket. This is the same idea React uses for screen state in Part 3.
+
+## Try it
+
+<Exercise title="Try it: predict, then run">
+Predict what this prints, line by line, then run it to check.
+
+```js
+const label = "outer";
+
+function show() {
+  const label = "inner";
+  if (true) {
+    const extra = "block";
+    console.log(label, extra);
+  }
+  console.log(label);
+}
+
+show();
+console.log(label);
+```
+
+<Fragment slot="hint">Inside `show`, the inner `label` shadows the outer one. `extra` only exists inside the `if` block.</Fragment>
+<Fragment slot="solution">
+
+```
+inner block
+inner
+outer
+```
+
+Inside `show`, `label` means the inner one. After `show` finishes, its `label` is gone, and the top-level `console.log` sees the outer one. Adding `console.log(extra)` after the `if` block would throw `ReferenceError: extra is not defined`.
+</Fragment>
+</Exercise>
+
+## Recap
+
+- A variable exists only in the block where it was created, and blocks inside it: its **scope**.
+- Inner code can see outer variables; outer code cannot see inner ones.
+- A same-named inner variable **shadows** the outer one. Avoid it.
+- Prefer **pure functions**: inputs as parameters, result as a return value, nothing outside changed.
+
+<Quiz
+	questions={[
+		{
+			question: 'A variable is created with `const` inside a function. Where can it be used?',
+			options: ['Anywhere in the file', 'Only inside that function', 'Only on the line it was created'],
+			answer: 1,
+			explanation: 'Its scope is the function’s block (and blocks nested in it).',
+		},
+		{
+			question: 'Why are pure functions easier to trust?',
+			options: ['They run faster', 'Their result depends only on their inputs', 'They cannot have bugs'],
+			answer: 1,
+			explanation: 'Same inputs, same output, and nothing else changed: easy to test and reason about.',
+		},
+	]}
+/>
+
+<MarkComplete />

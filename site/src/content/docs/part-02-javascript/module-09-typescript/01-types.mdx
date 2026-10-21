@@ -1,0 +1,179 @@
+---
+title: "9.1 Types"
+description: "Set up TypeScript, add types to variables and functions, and let the checker find mistakes before you run anything."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can set up a TypeScript project, add types to variables and functions, and read the checker's errors.
+
+## Why it matters
+
+The PayDeck app is written in **TypeScript**: JavaScript plus **types**, which say what kind of value each variable holds. A program called the **type checker** reads your code and points out mistakes, such as passing a string where a number belongs, **before** the code runs. In an app that handles money, finding a bug in your editor beats finding it in a customer's statement.
+
+## The idea
+
+TypeScript is JavaScript with extra notes. You add `: type` after a name:
+
+```ts
+const nickname: string = "Everyday";
+let balanceCents: number = 10000;
+const isFrozen: boolean = false;
+const amounts: number[] = [2000, -1250];   // an array of numbers
+```
+
+And on function parameters and return values:
+
+```ts
+function feeFor(amountCents: number): number {
+  return Math.round(amountCents * 0.015);
+}
+```
+
+Read `amountCents: number` as "`amountCents` is a number", and `): number` as "this function returns a number".
+
+You often do not need to write types at all, because TypeScript **infers** them: after `const nickname = "Everyday";` it already knows `nickname` is a string. The usual habit is to write types on function parameters and let TypeScript infer the rest.
+
+Types exist only while you write code. When the program runs, they are removed, and it is plain JavaScript again.
+
+## Worked example
+
+### Set up a TypeScript project
+
+```sh
+mkdir -p ~/Projects/course/typescript && cd ~/Projects/course/typescript
+npm init -y
+npm pkg set type=module
+npm install --save-dev typescript @types/node
+```
+
+- `npm init -y` creates `package.json`, the file that describes a JavaScript project and its tools.
+- `npm pkg set type=module` tells Node this project uses modern `import` syntax (the same as `.mjs` files).
+- `npm install --save-dev typescript @types/node` downloads the TypeScript checker, plus type information about Node's built-in tools, into a `node_modules` folder. `npm` is Node's package manager; you will use it constantly from Part 3.
+
+Create `tsconfig.json`, which configures the checker:
+
+```json
+{
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "es2022",
+    "module": "nodenext",
+    "types": ["node"]
+  }
+}
+```
+
+`strict` turns on all the useful checks, `noEmit` means "only check, do not write any files", and `"types": ["node"]` loads the type information for Node's built-in tools that you just installed. Then `code .` to open the folder.
+
+### Your first checked file
+
+Create `fees.ts` (`.ts`, not `.js`):
+
+```ts
+function feeFor(amountCents: number): number {
+  return Math.round(amountCents * 0.015);
+}
+
+let totalCents = 4999;
+totalCents = totalCents + feeFor(totalCents);
+console.log(totalCents);
+
+totalCents = "50.74";
+```
+
+Before running it, look at the last line in VS Code: it has a red squiggle. Hover over it:
+
+```
+Type 'string' is not assignable to type 'number'.
+```
+
+TypeScript inferred `totalCents` is a number from its first value, and refuses a string. Check the whole project from the terminal:
+
+```sh
+npx tsc
+```
+
+```
+fees.ts(8,1): error TS2322: Type 'string' is not assignable to type 'number'.
+```
+
+`fees.ts(8,1)` is line 8, column 1. Delete the last line, run `npx tsc` again (no output means no errors), and then run the program itself:
+
+```sh
+node fees.ts
+```
+
+Recent versions of Node (22.18 and newer) run `.ts` files directly by removing the types first. It prints `5074`.
+
+<Aside type="note" title="Two separate steps">
+`npx tsc` **checks** types. `node file.ts` **runs** the code, and does not check anything. Node will happily run code with type errors. In PayDeck, the `npm run typecheck` command runs the checker, and CI runs it on every change.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: type a function">
+Add types to this function so that TypeScript rejects `formatMoney("12")`, then check with `npx tsc`.
+
+```ts
+function formatMoney(cents) {
+  return `$${(cents / 100).toFixed(2)}`;
+}
+console.log(formatMoney(1250));
+console.log(formatMoney("12"));
+```
+
+<Fragment slot="hint">Even before you add anything, `npx tsc` complains about `cents`: with `strict`, every parameter needs a type.</Fragment>
+<Fragment slot="solution">
+
+```ts
+function formatMoney(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
+}
+```
+
+`npx tsc` now reports `Argument of type 'string' is not assignable to parameter of type 'number'.` on the last line. In plain JavaScript, `"12" / 100` would have quietly worked, giving $0.12, a bug that only shows up when someone notices their money is wrong.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Parameter 'cents' implicitly has an 'any' type">
+With `strict` on, TypeScript will not guess a parameter's type. Add one: `(cents: number)`.
+</Aside>
+
+<Aside type="caution" title="Errors in VS Code but not in tsc (or the other way round)">
+VS Code reads `tsconfig.json` from the folder you opened. Open the project folder itself (`code .` inside it), not a parent folder.
+</Aside>
+
+## Recap
+
+- TypeScript is JavaScript plus types: `name: type` on variables, parameters and return values.
+- TypeScript **infers** many types; write them on function parameters.
+- `npx tsc` checks; `node file.ts` runs. They are separate steps.
+- `strict: true` in `tsconfig.json` turns on the useful checks.
+
+<Quiz
+	questions={[
+		{
+			question: 'When does TypeScript find a type error?',
+			options: ['While the program runs', 'Before it runs, while you write or check the code', 'Only in production'],
+			answer: 1,
+			explanation: 'The checker reads the code without running it. That is the whole point.',
+		},
+		{
+			question: 'What type does TypeScript infer for `const ids = ["c1", "c2"]`?',
+			options: ['string', 'string[]', 'any'],
+			answer: 1,
+			explanation: 'An array of strings is written string[].',
+		},
+	]}
+/>
+
+<MarkComplete />

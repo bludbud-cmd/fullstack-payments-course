@@ -1,0 +1,143 @@
+---
+title: "5.3 for and while loops"
+description: "Repeat work with for and while loops, and stop loops that would run forever."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can repeat code a set number of times with `for`, and until something changes with `while`.
+
+## Why it matters
+
+Computers are good at doing the same thing many times without getting bored. Adding up every entry in a ledger to get a balance, retrying a request that failed, checking every card on an account: all loops. PayDeck's balance is literally a loop over ledger entries.
+
+## The idea
+
+### for: a known number of times
+
+```js
+for (let i = 1; i <= 3; i++) {
+  console.log("Attempt", i);
+}
+```
+
+The three parts in the brackets, separated by `;`:
+
+1. **Start:** `let i = 1` creates a counter.
+2. **Keep going while:** `i <= 3` is checked before every round. When it is false, the loop ends.
+3. **After each round:** `i++` adds one to the counter.
+
+So the body runs with `i` as 1, 2 and 3, and prints `Attempt 1`, `Attempt 2`, `Attempt 3`. Each round is called an **iteration**.
+
+### while: until something changes
+
+```js
+while (condition) {
+  // repeats as long as the condition is true
+}
+```
+
+Use `while` when you do not know in advance how many rounds you need. Something inside the loop **must** eventually make the condition false, or it runs forever.
+
+### Stopping early
+
+`break` leaves a loop immediately. `continue` skips the rest of this round and goes on to the next.
+
+## Worked example: savings goal
+
+How many months does $1,000.00 take to reach $2,000.00 if it grows 10% a month?
+
+```js
+let balanceCents = 100000;
+let months = 0;
+
+while (balanceCents < 200000) {
+  balanceCents = Math.round(balanceCents * 1.1);
+  months++;
+}
+
+console.log(`${months} months, ending with ${balanceCents} cents`);
+```
+
+Output: `8 months, ending with 214359 cents`.
+
+- The condition `balanceCents < 200000` is checked before every round.
+- Each round grows the balance and counts a month. Because the balance keeps rising, the condition eventually becomes false.
+- We did not know the answer (8) in advance, which is why this is a `while` and not a `for`.
+
+And a `for` loop that adds up a week of spending, one day at a time:
+
+```js
+let totalCents = 0;
+for (let day = 1; day <= 7; day++) {
+  const spentCents = day * 300; // pretend: $3 on day 1, $6 on day 2…
+  totalCents += spentCents;
+}
+console.log(totalCents); // 8400
+```
+
+## Try it
+
+<Exercise title="Try it: a times table, with a skip">
+Print the 7 times table from 7 × 1 to 7 × 10, but skip any line whose answer is even, and stop completely once an answer goes over 50.
+
+<Fragment slot="hint">`answer % 2 === 0` is true for even numbers. Use `continue` to skip and `break` to stop.</Fragment>
+<Fragment slot="solution">
+
+```js
+for (let i = 1; i <= 10; i++) {
+  const answer = 7 * i;
+  if (answer > 50) {
+    break;
+  }
+  if (answer % 2 === 0) {
+    continue;
+  }
+  console.log(`7 x ${i} = ${answer}`);
+}
+```
+
+It prints the lines for 7, 21, 35 and 49. At `i = 8` the answer is 56, so `break` ends the loop.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="The program never finishes">
+An **infinite loop**: the condition never becomes false, usually because you forgot to change the variable it checks (`months++`, `i++`). Press **Control + C** to stop it, then check what inside the loop moves it towards the end.
+</Aside>
+
+<Aside type="caution" title="Off by one">
+`i < 10` runs 9 times when starting at 1; `i <= 10` runs 10 times. When a loop runs once too often or once too few, check `<` versus `<=` and the starting value.
+</Aside>
+
+## Recap
+
+- `for (start; keep going while; after each round)` repeats a known number of times.
+- `while (condition)` repeats until the condition is false; something inside must change it.
+- `break` leaves the loop; `continue` skips to the next round.
+- **Control + C** stops a runaway loop.
+
+<Quiz
+	questions={[
+		{
+			question: 'How many times does `for (let i = 0; i < 5; i++)` run?',
+			options: ['4', '5', '6'],
+			answer: 1,
+			explanation: 'i takes the values 0, 1, 2, 3 and 4: five rounds.',
+		},
+		{
+			question: 'When is a while loop a better fit than a for loop?',
+			options: ['When you know the number of rounds', 'When you repeat until something changes', 'Never'],
+			answer: 1,
+			explanation: 'while is for "keep going until…", when the number of rounds is not known up front.',
+		},
+	]}
+/>
+
+<MarkComplete />

@@ -1,0 +1,73 @@
+---
+title: "Mini-project: tip calculator"
+description: "Write a program that works out a tip and splits a bill between friends, in whole cents."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Put Module 4 together: variables, numbers in cents, operators, rounding and template literals.
+
+## The task
+
+Write `tip.js` in `~/Projects/course/javascript`. At the top, three `const` variables hold the inputs:
+
+```js
+const billCents = 4875;   // $48.75
+const tipPercent = 18;
+const people = 3;
+```
+
+The program prints a receipt like this:
+
+```
+Bill:      $48.75
+Tip (18%): $8.78
+Total:     $57.53
+Each pays: $19.18
+```
+
+Rules:
+
+- Do all maths in **cents**. Turn cents into dollars only when printing.
+- Round the tip to the **nearest** cent.
+- Round each person's share **up**, so the bill is always fully paid.
+
+When it works, change the three inputs and check the output by hand with a calculator.
+
+<Exercise title="Check your work">
+With the inputs above your output should match the receipt exactly. Try `billCents = 10000`, `tipPercent = 15`, `people = 4` as well: each person should pay $28.75.
+
+<Fragment slot="hint">Write a small helper first: `const dollars = (cents) => (cents / 100).toFixed(2);` turns 4875 into "48.75". (You will learn exactly how that line works in Module 6. For now, use it like `dollars(billCents)`.)</Fragment>
+<Fragment slot="solution">
+
+```js
+const billCents = 4875;
+const tipPercent = 18;
+const people = 3;
+
+const dollars = (cents) => (cents / 100).toFixed(2);
+
+const tipCents = Math.round(billCents * tipPercent / 100);
+const totalCents = billCents + tipCents;
+const eachCents = Math.ceil(totalCents / people);
+
+console.log(`Bill:      $${dollars(billCents)}`);
+console.log(`Tip (${tipPercent}%): $${dollars(tipCents)}`);
+console.log(`Total:     $${dollars(totalCents)}`);
+console.log(`Each pays: $${dollars(eachCents)}`);
+```
+
+The tip is 877.5 cents, rounded to 878. The total is 5753 cents, and 5753 / 3 is 1917.67, rounded up to 1918, or $19.18.
+</Fragment>
+</Exercise>
+
+<Aside type="tip" title="Commit it">
+Make `~/Projects/course/javascript` a Git repository (lesson 3.1), commit `tip.js`, and push it to GitHub. Do the same for every mini-project from now on.
+</Aside>
+
+<MarkComplete />

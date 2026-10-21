@@ -1,0 +1,155 @@
+---
+title: "6.2 Return values"
+description: "Write functions that calculate a result and give it back, and use arrow functions."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can write functions that return a value, and write short functions as arrow functions.
+
+## Why it matters
+
+The functions in the last lesson printed things. Most useful functions instead **calculate** something and hand it back, so the caller can decide what to do with it: show it on screen, compare it, store it. PayDeck's app has a `formatMoney` function that returns `"$1,243.50"`, and its server has functions that return "approved" or "declined".
+
+## The idea
+
+`return` ends a function and hands a value back to whoever called it:
+
+```js
+function addFee(amountCents) {
+  return amountCents + 50;
+}
+
+const total = addFee(1200);  // total is 1250
+console.log(addFee(100));    // 150
+```
+
+The call `addFee(1200)` is **replaced by** the value it returns. You can store it, print it, or use it in a bigger calculation, such as `addFee(1200) * 2`.
+
+Two rules:
+
+- `return` stops the function immediately. Code after it does not run.
+- A function without `return` gives back `undefined`.
+
+Returning early is a common pattern for decisions:
+
+```js
+function declineReason(isFrozen, amountCents, balanceCents) {
+  if (isFrozen) {
+    return "This card is frozen.";
+  }
+  if (amountCents > balanceCents) {
+    return "Not enough money.";
+  }
+  return null; // no reason: approve
+}
+```
+
+`null` means "deliberately nothing". Here it says "there is no reason to decline".
+
+### Arrow functions
+
+There is a shorter way to write functions, used everywhere in React Native:
+
+```js
+const addFee = (amountCents) => {
+  return amountCents + 50;
+};
+```
+
+And when the body is a single expression, you can drop the braces and `return`:
+
+```js
+const addFee = (amountCents) => amountCents + 50;
+```
+
+All three versions of `addFee` behave the same for our purposes. Use `function` for bigger, named functions, and arrows for short ones, especially ones you pass to other functions (which you will do a lot in Module 7).
+
+## Worked example: formatting money
+
+```js
+function formatMoney(cents) {
+  return new Intl.NumberFormat("en", {
+    style: "currency",
+    currency: "USD",
+  }).format(cents / 100);
+}
+
+console.log(formatMoney(124350)); // $1,243.50
+console.log(formatMoney(5));      // $0.05
+
+const message = `Your balance is ${formatMoney(124350)}`;
+console.log(message);             // Your balance is $1,243.50
+```
+
+- `Intl.NumberFormat` is built into JavaScript and knows how every currency is written, including the comma for thousands. PayDeck's app uses this exact approach in `src/money.ts`.
+- Because `formatMoney` **returns** the string instead of printing it, it works inside a template literal, in an `if`, or on a phone screen.
+
+## Try it
+
+<Exercise title="Try it: a fee with a minimum">
+Write `feeFor(amountCents)` that returns 1.5% of the amount, rounded to the nearest cent, but never less than 25 cents. Then print `feeFor(1000)` (should be 25) and `feeFor(10000)` (should be 150).
+
+<Fragment slot="hint">Work out the percentage first, then use an `if` or `Math.max(a, b)`, which returns the larger of two numbers.</Fragment>
+<Fragment slot="solution">
+
+```js
+function feeFor(amountCents) {
+  const percentFee = Math.round(amountCents * 1.5 / 100);
+  return Math.max(percentFee, 25);
+}
+
+console.log(feeFor(1000));  // 25  (1.5% would be 15)
+console.log(feeFor(10000)); // 150
+```
+
+Or as an arrow function: `const feeFor = (amountCents) => Math.max(Math.round(amountCents * 1.5 / 100), 25);`
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="The result is undefined">
+The function calculated something but did not `return` it. `console.log` inside a function only prints; it does not give anything back. Check every path through the function ends in a `return`.
+</Aside>
+
+<Aside type="caution" title="An arrow function with braces returns undefined">
+`(x) => { x + 50 }` returns `undefined`, because braces make a block, and blocks need `return`. Write `(x) => x + 50`, or `(x) => { return x + 50; }`.
+</Aside>
+
+## Recap
+
+- `return value` hands a result back and ends the function. Without it, a function returns `undefined`.
+- A call is replaced by its return value, so you can use it anywhere a value fits.
+- Returning early keeps decision functions simple.
+- Arrow functions, `(x) => x + 50`, are a shorter way to write small functions.
+
+<Quiz
+	questions={[
+		{
+			question: 'What does `const r = console.log("hi")` store in r?',
+			options: ['"hi"', 'undefined', 'true'],
+			answer: 1,
+			explanation: 'console.log prints but returns nothing, so r is undefined.',
+		},
+		{
+			question: 'What happens to code after a `return` in the same block?',
+			options: ['It runs afterwards', 'It never runs', 'It runs first'],
+			answer: 1,
+			explanation: '`return` ends the function immediately.',
+		},
+		{
+			question: 'What does `((n) => n * 2)(4)` give?',
+			options: ['8', 'undefined', '4'],
+			answer: 0,
+			explanation: 'An arrow function without braces returns its expression: 4 * 2.',
+		},
+	]}
+/>
+
+<MarkComplete />

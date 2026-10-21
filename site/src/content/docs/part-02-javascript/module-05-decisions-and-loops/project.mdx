@@ -1,0 +1,111 @@
+---
+title: "Mini-project: number guessing game"
+description: "Build a game where the computer picks a number and you guess it, with hints, input checks and a try counter."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Build a game that uses everything from Module 5: decisions, comparisons, a loop, and debugging.
+
+## The game
+
+The computer picks a secret whole number from 1 to 100. You type guesses. After each one it says **Higher!** or **Lower!**, until you get it. Then it says how many tries it took.
+
+```
+Your guess (1-100): 50
+Higher!
+Your guess (1-100): 75
+Lower!
+Your guess (1-100): 62
+Got it in 3 tries!
+```
+
+## Starter code
+
+Reading what someone types uses a feature from Module 8, so here it is ready-made. Create `guess.mjs` (note: `.mjs`, not `.js`, which lets the file use `await`) with:
+
+```js
+import * as readline from "node:readline/promises";
+
+const terminal = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+});
+
+// Your code goes here. To ask a question and wait for the answer:
+//   const typed = await terminal.question("Your guess (1-100): ");
+// `typed` is always a string.
+
+terminal.close();
+```
+
+For the secret number, use:
+
+```js
+const secret = Math.floor(Math.random() * 100) + 1;
+```
+
+`Math.random()` gives a decimal from 0 up to (not including) 1. Times 100, rounded down, is 0 to 99. Plus 1 is 1 to 100.
+
+## Requirements
+
+1. Keep asking until the guess is right. (Which loop fits "until"?)
+2. Say **Higher!** or **Lower!** after a wrong guess.
+3. If what was typed is not a whole number from 1 to 100, say so, and do **not** count it as a try.
+4. When it is right, print the number of tries and end.
+
+<Exercise title="Check your work">
+Play a few games. Then test the edge cases on purpose: type `abc`, `0`, `101`, `5.5` and an empty line. None should crash the game or count as a try.
+
+<Fragment slot="hint">`Number.isInteger(Number(typed))` is true only for whole numbers. `while (true)` with a `break` when the guess is right is a neat way to loop "until".</Fragment>
+<Fragment slot="hint2">While testing, temporarily add `console.log("secret", secret);` so you know the answer. Remove it when you are done.</Fragment>
+<Fragment slot="solution">
+
+```js
+import * as readline from "node:readline/promises";
+
+const terminal = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+});
+
+const secret = Math.floor(Math.random() * 100) + 1;
+let tries = 0;
+
+while (true) {
+  const typed = await terminal.question("Your guess (1-100): ");
+  const guess = Number(typed);
+
+  if (!Number.isInteger(guess) || guess < 1 || guess > 100) {
+    console.log("Please type a whole number from 1 to 100.");
+    continue;
+  }
+
+  tries++;
+  if (guess < secret) {
+    console.log("Higher!");
+  } else if (guess > secret) {
+    console.log("Lower!");
+  } else {
+    console.log(`Got it in ${tries} tries!`);
+    break;
+  }
+}
+
+terminal.close();
+```
+
+The input check comes **before** `tries++`, and `continue` skips straight to the next question, so bad input is never counted. An empty line becomes `Number("")`, which is `0`, so the range check catches it.
+</Fragment>
+</Exercise>
+
+<Aside type="tip" title="Extra challenge">
+Can you always win in 7 tries or fewer? Think about which guess cuts the remaining range in half each time. Programmers call this **binary search**, and databases use the same idea to find rows quickly.
+</Aside>
+
+<MarkComplete />

@@ -1,0 +1,131 @@
+---
+title: "8.1 Callbacks"
+description: "Understand why some code has to wait, and run code later by passing a function to call when the wait is over."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can explain why programs must not stop and wait, and use a callback to run code when something finishes.
+
+## Why it matters
+
+When the PayDeck app asks the server for your balance, the answer takes a while: maybe 50 milliseconds, maybe 3 seconds on a bad connection. If the app simply stopped until the answer came, the whole screen would freeze: no scrolling, no tapping, no spinner. Instead, apps start the request, carry on, and run some code **later**, when the answer arrives. That is **asynchronous** code, and every app you build needs it.
+
+## The idea
+
+Think of ordering at a café that gives you a buzzer. You order, take the buzzer, sit down and read. When the coffee is ready, the buzzer goes off, and you collect it. You did not stand at the counter staring at the machine.
+
+In JavaScript, the buzzer is a **callback**: a function you hand over now, to be called later when the wait is over.
+
+You have already passed functions to other functions: `map((tx) => tx.description)`. A callback is the same idea, except the function is called **later**, not straight away.
+
+`setTimeout(callback, milliseconds)` is the simplest example: "call this function after this many milliseconds".
+
+## Worked example
+
+```js
+console.log("1. Ordering a coffee");
+
+setTimeout(() => {
+  console.log("3. Coffee is ready");
+}, 2000);
+
+console.log("2. Reading a book while waiting");
+```
+
+Output:
+
+```
+1. Ordering a coffee
+2. Reading a book while waiting
+3. Coffee is ready
+```
+
+The third line appears two seconds after the others. Notice the order: the code **below** `setTimeout` ran **before** the callback. `setTimeout` does not pause the program. It registers the callback and returns immediately, and Node calls the callback once two seconds have passed and nothing else is running.
+
+This is how JavaScript handles every kind of waiting (timers, files, network requests): start it, register what to do when it finishes, and move on. JavaScript only ever runs one piece of your code at a time; while it waits, it is free to handle other things, like taps on the screen.
+
+### Callbacks from Node
+
+Node's file functions have callback versions too:
+
+```js
+const fs = require("node:fs");
+
+fs.readFile("cards.json", "utf8", (error, text) => {
+  if (error) {
+    console.log("Could not read the file:", error.message);
+    return;
+  }
+  console.log("Read", text.length, "characters");
+});
+
+console.log("Asked for the file…");
+```
+
+`Asked for the file…` prints first. The callback receives either an `error` or the result; checking the error first is the convention.
+
+### The trouble with callbacks
+
+When one wait depends on another (read the settings, then fetch the account, then fetch its cards), callbacks nest inside callbacks, each indented further, with error checks at every level. Programmers call this **callback hell**. The next lesson shows the fix.
+
+## Try it
+
+<Exercise title="Try it: a countdown">
+Using only `setTimeout`, print `3`, `2`, `1` and `Paid!` one second apart, starting one second after the program runs.
+
+<Fragment slot="hint">You can call `setTimeout` several times in a row, with 1000, 2000, 3000 and 4000 milliseconds. They all start counting at once.</Fragment>
+<Fragment slot="solution">
+
+```js
+setTimeout(() => console.log("3"), 1000);
+setTimeout(() => console.log("2"), 2000);
+setTimeout(() => console.log("1"), 3000);
+setTimeout(() => console.log("Paid!"), 4000);
+```
+
+All four timers start immediately and each fires at its own time. Or with a loop: `for (let i = 3; i >= 1; i--) setTimeout(() => console.log(i), (4 - i) * 1000);`
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Using the result before it exists">
+```js
+let text;
+fs.readFile("cards.json", "utf8", (error, result) => { text = result; });
+console.log(text); // undefined
+```
+The `console.log` runs before the file has been read. Anything that needs the result must run inside the callback (or, from the next lessons, after `await`).
+</Aside>
+
+## Recap
+
+- Waiting must not freeze a program, so JavaScript starts the wait and carries on.
+- A **callback** is a function you pass now, to be called when the wait is over.
+- Code after `setTimeout` or `readFile` runs **before** their callbacks.
+- Many nested callbacks get hard to read: promises (next lesson) fix that.
+
+<Quiz
+	questions={[
+		{
+			question: 'What prints first? `setTimeout(() => console.log("A"), 0); console.log("B");`',
+			options: ['A', 'B'],
+			answer: 1,
+			explanation: 'Even with 0 milliseconds, the callback waits until the current code has finished running.',
+		},
+		{
+			question: 'Why does an app not just stop and wait for the server?',
+			options: ['It would use more battery', 'The screen would freeze until the answer came', 'Servers do not allow it'],
+			answer: 1,
+			explanation: 'While waiting, the app must keep responding to the person.',
+		},
+	]}
+/>
+
+<MarkComplete />

@@ -1,0 +1,150 @@
+---
+title: "7.3 map, filter and find"
+description: "Transform, select and search arrays in one line each, and add them up with reduce."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can use `map`, `filter`, `find` and `reduce` instead of writing loops by hand.
+
+## Why it matters
+
+Look at real React Native code, and you will see `map`, `filter` and `find` everywhere. The Cards screen takes the array of cards, keeps the ones that are not cancelled (`filter`), and turns each into a card drawing (`map`). The card settings screen finds the one card it is showing (`find`). They are shorter than loops, and they say what you mean.
+
+## The idea
+
+Each of these methods takes a **function** as its argument, usually an arrow function, and calls it once for each item.
+
+| Method | Question it answers | Returns |
+| --- | --- | --- |
+| `map(fn)` | "What is each item turned into?" | A new array of the same length |
+| `filter(fn)` | "Which items should I keep?" (`fn` returns true or false) | A new, possibly shorter, array |
+| `find(fn)` | "Which is the first item that matches?" | That one item, or `undefined` |
+| `some(fn)` | "Does any item match?" | `true` or `false` |
+| `reduce(fn, start)` | "What do they add up to?" | A single value |
+
+None of them change the original array.
+
+## Worked example
+
+```js
+const transactions = [
+  { id: "t1", description: "Top-up", amountCents: 2000, type: "TOP_UP" },
+  { id: "t2", description: "Corner Café", amountCents: -1250, type: "CARD_PAYMENT" },
+  { id: "t3", description: "Bookshop", amountCents: -7000, type: "CARD_PAYMENT" },
+];
+```
+
+**map: turn each item into something else**
+
+```js
+const names = transactions.map((tx) => tx.description);
+// ["Top-up", "Corner Café", "Bookshop"]
+```
+
+For each `tx`, the arrow function returns its description; `map` collects the results.
+
+**filter: keep some items**
+
+```js
+const payments = transactions.filter((tx) => tx.type === "CARD_PAYMENT");
+// the Corner Café and Bookshop objects
+console.log(payments.length); // 2
+```
+
+**find: get one item**
+
+```js
+const bookshop = transactions.find((tx) => tx.id === "t3");
+console.log(bookshop.amountCents); // -7000
+
+const rent = transactions.find((tx) => tx.description === "Rent");
+console.log(rent); // undefined: always check before using the result
+```
+
+**reduce: add up**
+
+```js
+const balanceChange = transactions.reduce((total, tx) => total + tx.amountCents, 0);
+console.log(balanceChange); // -6250
+```
+
+`reduce` keeps a running value, `total`, starting at `0`. For each item, the function returns the new running total. This is literally how PayDeck works out a balance from its ledger, except the server asks the database to do the sum.
+
+**Chaining**
+
+Because each returns an array, you can chain them:
+
+```js
+const spentCents = transactions
+  .filter((tx) => tx.amountCents < 0)
+  .map((tx) => -tx.amountCents)
+  .reduce((total, cents) => total + cents, 0);
+console.log(spentCents); // 8250
+```
+
+Read it top to bottom: keep money going out, turn each into a positive number of cents, add them up.
+
+## Try it
+
+<Exercise title="Try it: freeze in one line">
+Rewrite the `freeze(cards, id)` function from lesson 7.2 using `map`, in a single `return` statement.
+
+<Fragment slot="hint">`map` gives a new array with one result per card. For each card, return either a frozen copy or the card itself, using the `? :` operator.</Fragment>
+<Fragment slot="solution">
+
+```js
+function freeze(cards, id) {
+  return cards.map((card) => (card.id === id ? { ...card, status: "FROZEN" } : card));
+}
+```
+
+Same behaviour as the loop version, and the original array is still untouched. (The brackets around the `? :` are only for readability.)
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="map gives an array of undefined">
+The arrow function has curly braces but no `return`: `tx => { tx.description }`. Either drop the braces or add `return` (lesson 6.2).
+</Aside>
+
+<Aside type="caution" title="Using filter when you want one item">
+`filter` always returns an **array**, even with one match: `[{ ... }]`. If you want the item itself, use `find`.
+</Aside>
+
+## Recap
+
+- `map` transforms every item; `filter` keeps some; `find` gets the first match (or `undefined`); `some` asks if any match.
+- `reduce((total, item) => ..., start)` combines items into one value, such as a sum.
+- They never change the original array, and they chain neatly.
+
+<Quiz
+	questions={[
+		{
+			question: 'You want an array of every card’s nickname. Which method?',
+			options: ['filter', 'map', 'find'],
+			answer: 1,
+			explanation: 'map turns each card into its nickname.',
+		},
+		{
+			question: 'What does `[1, 2, 3].filter((n) => n > 5)` return?',
+			options: ['undefined', '[]', 'false'],
+			answer: 1,
+			explanation: 'filter always returns an array; here, an empty one.',
+		},
+		{
+			question: 'What does `[5, 10].reduce((t, n) => t + n, 100)` return?',
+			options: ['15', '115', '100'],
+			answer: 1,
+			explanation: 'It starts at 100, then adds 5 and 10.',
+		},
+	]}
+/>
+
+<MarkComplete />
