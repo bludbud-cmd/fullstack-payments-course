@@ -25,6 +25,7 @@ import org.springframework.stereotype.Component;
  * account: move money   yes      -         -       -
  * account: issue card   yes      -         -       -
  * card: view            yes     yes        yes     yes
+ * card: pay with it     yes     yes         -       -
  * card: freeze          yes     yes        yes     yes
  * card: unfreeze        yes      -         yes     yes
  * card: change settings yes      -         -       -
@@ -61,6 +62,7 @@ public class AccessPolicy {
         boolean owner = relationship == Relationship.OWNER;
         return switch (action) {
             case VIEW, FREEZE -> relationship != Relationship.NONE || staff;
+            case PAY -> relationship != Relationship.NONE;
             case UNFREEZE -> owner || staff;
             case CHANGE_SETTINGS -> owner;
             case CANCEL -> owner || role == Role.ADMIN;

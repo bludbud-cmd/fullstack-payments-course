@@ -31,3 +31,15 @@ paydeck:
     admin-emails: ${PAYDECK_ADMIN_EMAILS:}
     # Where "Sign in with Google" may send people back to: the app's own link.
     app-redirect-uris: ${PAYDECK_APP_REDIRECT_URIS:paydeck://auth}
+
+  stripe:
+    # Test-mode keys from https://dashboard.stripe.com/test/apikeys. Leave empty to switch card top-ups off.
+    secret-key: ${STRIPE_SECRET_KEY:}
+    webhook-secret: ${STRIPE_WEBHOOK_SECRET:}
+    public-base-url: ${PAYDECK_PUBLIC_BASE_URL:http://localhost:8080}
+    app-return-url: ${PAYDECK_APP_TOP_UP_RETURN_URL:paydeck://top-up}
+  push:
+    # A Firebase service account key file. Leave empty to only log notifications.
+    firebase-service-account-file: ${FIREBASE_SERVICE_ACCOUNT_FILE:}
+  # The simulated "add pretend money" top-up from Part 6. Turn off when Stripe is live.
+  simulated-top-ups: ${PAYDECK_SIMULATED_TOP_UPS:true}

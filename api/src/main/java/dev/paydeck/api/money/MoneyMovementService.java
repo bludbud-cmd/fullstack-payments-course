@@ -12,12 +12,15 @@ import dev.paydeck.api.account.Account;
 import dev.paydeck.api.account.AccountKind;
 import dev.paydeck.api.account.AccountRepository;
 import dev.paydeck.api.common.BusinessRuleException;
+import dev.paydeck.api.common.MoneyFormat;
 import dev.paydeck.api.common.IdempotencyConflictException;
 import dev.paydeck.api.common.NotFoundException;
 import dev.paydeck.api.ledger.LedgerService;
 import dev.paydeck.api.ledger.LedgerTransaction;
 import dev.paydeck.api.ledger.Posting;
 import dev.paydeck.api.ledger.TransactionType;
+import dev.paydeck.api.live.AccountEvent;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -32,10 +35,12 @@ public class MoneyMovementService {
 
     private final AccountRepository accounts;
     private final LedgerService ledger;
+    private final ApplicationEventPublisher events;
 
-    public MoneyMovementService(AccountRepository accounts, LedgerService ledger) {
+    public MoneyMovementService(AccountRepository accounts, LedgerService ledger, ApplicationEventPublisher events) {
         this.accounts = accounts;
         this.ledger = ledger;
+        this.events = events;
     }
 
     @Transactional
@@ -52,6 +57,8 @@ public class MoneyMovementService {
                 .orElseThrow(() -> new IllegalStateException("No system account for " + account.getCurrency()));
         LedgerTransaction transaction = ledger.record(TransactionType.TOP_UP, description, idempotencyKey, fingerprint,
                 List.of(new Posting(outsideWorld.getId(), -amountCents), new Posting(account.getId(), amountCents)));
+        events.publishEvent(AccountEvent.of(accountId, AccountEvent.Kind.MONEY_IN, "Money added",
+                MoneyFormat.format(amountCents, account.getCurrency()) + " added: " + description));
         return new MovementResult(transaction, false);
     }
 
@@ -86,6 +93,11 @@ public class MoneyMovementService {
 
         LedgerTransaction transaction = ledger.record(TransactionType.TRANSFER, description, idempotencyKey,
                 fingerprint, List.of(new Posting(from.getId(), -amountCents), new Posting(to.getId(), amountCents)));
+        String amount = MoneyFormat.format(amountCents, from.getCurrency());
+        events.publishEvent(AccountEvent.of(from.getId(), AccountEvent.Kind.MONEY_OUT, "Money sent",
+                amount + " sent to " + to.getOwnerName() + ": " + description));
+        events.publishEvent(AccountEvent.of(to.getId(), AccountEvent.Kind.MONEY_IN, "Money received",
+                amount + " from " + from.getOwnerName() + ": " + description));
         return new MovementResult(transaction, false);
     }
 
@@ -106,7 +118,7 @@ public class MoneyMovementService {
     }
 
     /** A short summary of the request, used to spot a key being reused for a different request. */
-    static String fingerprint(Object... parts) {
+    public static String fingerprint(Object... parts) {
         StringBuilder text = new StringBuilder();
         for (Object part : parts) {
             text.append(part).append('\u001f');
