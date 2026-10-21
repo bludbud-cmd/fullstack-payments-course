@@ -1,0 +1,17 @@
+# Extra settings for the deployed API, on top of application.yml.
+# Turn them on with the environment variable SPRING_PROFILES_ACTIVE=production.
+# ProductionSettingsCheck refuses to start if a required setting is missing.
+server:
+  # The host's load balancer handles HTTPS and passes on the original address
+  # in X-Forwarded-* headers, so redirects (Google, Stripe) use https:// too.
+  forward-headers-strategy: framework
+  # Finish requests already in progress before stopping for a new release.
+  shutdown: graceful
+
+paydeck:
+  # Real money only: top-ups come through Stripe. Set to true for a demo server.
+  simulated-top-ups: ${PAYDECK_SIMULATED_TOP_UPS:false}
+
+logging:
+  level:
+    root: INFO

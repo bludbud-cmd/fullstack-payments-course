@@ -1,6 +1,6 @@
 # PayDeck API
 
-The backend for PayDeck, built in Part 6 of the course, secured in Part 8, and connected to Stripe, WebSockets and push notifications in Part 9. It is a Spring Boot 4 app written in Java 25, with a PostgreSQL database.
+The backend for PayDeck, built in Part 6 of the course, secured in Part 8, connected to Stripe, WebSockets and push notifications in Part 9, and packaged for deployment in Part 10. It is a Spring Boot 4 app written in Java 25, with a PostgreSQL database.
 
 ## What it does so far
 
@@ -115,7 +115,8 @@ curl -s -X POST localhost:8080/api/accounts \
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Stripe test-mode keys. Leave unset to switch card top-ups off | Unset |
 | `PAYDECK_PUBLIC_BASE_URL` | Where browsers can reach this API, for Stripe's return link | `http://localhost:8080` |
 | `PAYDECK_APP_TOP_UP_RETURN_URL` | The app link people go back to after paying | `paydeck://top-up` |
-| `PAYDECK_SIMULATED_TOP_UPS` | Allow the pretend top-up from Part 6 | `true` |
+| `PAYDECK_SIMULATED_TOP_UPS` | Allow the pretend top-up from Part 6 | `true` (`false` in production) |
+| `SPRING_PROFILES_ACTIVE` | `production` turns on the deployed settings in `application-production.yml`; the Docker image sets it | Unset |
 | `FIREBASE_SERVICE_ACCOUNT_FILE` | A Firebase service account key, to send real push notifications | Unset (log only) |
 
 ## Test it
@@ -125,3 +126,46 @@ curl -s -X POST localhost:8080/api/accounts \
 ```
 
 The tests start their own PostgreSQL in Docker with Testcontainers, so Docker must be running. They include a test that fires 20 payments at one account at the same moment and checks it is never overspent.
+
+## Deploy it
+
+Part 10 (Module 36) puts PayDeck on the internet. The API ships as a container image, so any host that runs containers next to a PostgreSQL database will do.
+
+### The container image
+
+```sh
+docker build -t paydeck-api .
+```
+
+The `Dockerfile` compiles the API with the JDK, then copies just the jar onto a smaller Java runtime that runs as an ordinary user, not root. The image switches on the `production` profile. At start-up, `ProductionSettingsCheck` stops the API with a clear message if `JWT_SECRET`, `DATABASE_URL` or `PAYDECK_PUBLIC_BASE_URL` is missing or still has a development value.
+
+CI builds the image on every pull request. Pushing a tag such as `api-v1.0.0` runs `.github/workflows/release-api.yml`, which runs the tests and then publishes `ghcr.io/<owner>/paydeck-api:1.0.0` to GitHub's container registry.
+
+### Option 1: one small server
+
+On any Linux server with Docker (a $5 to $6 a month virtual machine is plenty):
+
+```sh
+git clone https://github.com/<you>/fullstack-payments-course && cd fullstack-payments-course/api
+cp .env.example .env        # then fill it in
+docker compose -f compose.production.yaml up -d --build
+```
+
+This runs the API and PostgreSQL together, keeping the data in a Docker volume. The API only listens on `127.0.0.1:8080`, so put a web server with HTTPS in front of it. [Caddy](https://caddyserver.com) gets a certificate automatically, and its whole configuration is two lines:
+
+```
+api.example.com {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+### Option 2: a hosting platform
+
+Platforms such as Render, Railway and Fly.io can build the `Dockerfile` (or pull the image from ghcr.io) and give you a managed PostgreSQL and HTTPS. Set the same variables as in `.env.example`, plus `DATABASE_URL`, `DATABASE_USERNAME` and `DATABASE_PASSWORD` for their database. Platforms often show the database address as `postgres://user:password@host:5432/name`. Spring needs it split up: `DATABASE_URL=jdbc:postgresql://host:5432/name`, with the user and password in their own variables. Point the platform's health check at `/actuator/health`.
+
+### After the first deploy
+
+- **Stripe:** in the Stripe dashboard, add a webhook endpoint `https://<your API>/api/stripe/webhook` for `checkout.session.completed`, `checkout.session.async_payment_succeeded` and `checkout.session.expired`, and put its signing secret in `STRIPE_WEBHOOK_SECRET`.
+- **Google sign-in:** add `https://<your API>/login/oauth2/code/google` to the OAuth client's redirect URIs.
+- **The app:** point `app/src/config.ts` at `https://<your API>`. WebSockets then use `wss://` automatically.
+- **Database migrations** run by themselves: Flyway applies any new `db/migration` files when the new version starts.
