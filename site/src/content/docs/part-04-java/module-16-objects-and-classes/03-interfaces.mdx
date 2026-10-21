@@ -1,0 +1,246 @@
+---
+title: "16.3 Interfaces"
+description: "Describe what a group of classes can do with an interface, write several implementations, and use them interchangeably."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can define an interface, write classes that implement it, and write code that works with any of them.
+
+## Why it matters
+
+PayDeck can take money in more than one way: a pretend top-up while you develop, or a real card payment through Stripe in Part 9. The rest of the API should not care which. An **interface** says "anything that can do X", and code written against the interface works with every class that does X. Spring Boot, the framework in Part 6, is built on this idea.
+
+## The idea
+
+You met interfaces in TypeScript as descriptions of an object's shape. In Java, an interface lists **methods** that a class promises to have:
+
+```java
+interface FeePolicy {
+    long feeFor(long amountCents);
+
+    String describe();
+}
+```
+
+The methods have no body, just a name, parameters and a return type. A class **implements** the interface by providing a body for every one of them:
+
+```java
+class FlatFee implements FeePolicy {
+    @Override
+    public long feeFor(long amountCents) { ... }
+
+    @Override
+    public String describe() { ... }
+}
+```
+
+- `implements FeePolicy` is the promise. If a method is missing, the class does not compile.
+- Interface methods are always `public` (visible to all code), so the implementations must say `public` too.
+- `@Override` asks the compiler to check that this really matches a method of the interface, which catches typos in names.
+
+Then a variable, parameter or array can have the **interface** as its type, and hold any implementation:
+
+```java
+FeePolicy policy = new FlatFee(30);
+policy.feeFor(5000);       // runs FlatFee's version
+policy = new PercentageFee(1.5);
+policy.feeFor(5000);       // now runs PercentageFee's version
+```
+
+The same call does different things depending on the actual object. This is called **polymorphism** ("many shapes").
+
+## Worked example
+
+Make a new folder, `~/Projects/course/java/fees`, with these five files.
+
+`FeePolicy.java`:
+
+```java
+/** Anything that can work out the fee for a payment. */
+interface FeePolicy {
+    long feeFor(long amountCents);
+
+    String describe();
+}
+```
+
+`NoFee.java`:
+
+```java
+class NoFee implements FeePolicy {
+    @Override
+    public long feeFor(long amountCents) {
+        return 0;
+    }
+
+    @Override
+    public String describe() {
+        return "No fee";
+    }
+}
+```
+
+`FlatFee.java`:
+
+```java
+class FlatFee implements FeePolicy {
+    private final long feeCents;
+
+    FlatFee(long feeCents) {
+        this.feeCents = feeCents;
+    }
+
+    @Override
+    public long feeFor(long amountCents) {
+        return feeCents;
+    }
+
+    @Override
+    public String describe() {
+        return "Flat fee of " + feeCents + " cents";
+    }
+}
+```
+
+`PercentageFee.java`:
+
+```java
+class PercentageFee implements FeePolicy {
+    private final double percent;
+
+    PercentageFee(double percent) {
+        this.percent = percent;
+    }
+
+    @Override
+    public long feeFor(long amountCents) {
+        return Math.round(amountCents * percent / 100);
+    }
+
+    @Override
+    public String describe() {
+        return percent + "% of the amount";
+    }
+}
+```
+
+`Main.java`:
+
+```java
+void main() {
+    FeePolicy[] policies = { new NoFee(), new FlatFee(30), new PercentageFee(1.5) };
+    for (FeePolicy policy : policies) {
+        IO.println(policy.describe() + ": " + policy.feeFor(5000) + " cents on $50");
+    }
+
+    FeePolicy[] offers = { new FlatFee(30), new PercentageFee(1.5) };
+    IO.println("Cheapest on $10:  " + cheapest(offers, 1_000).describe());
+    IO.println("Cheapest on $100: " + cheapest(offers, 10_000).describe());
+}
+
+FeePolicy cheapest(FeePolicy[] policies, long amountCents) {
+    FeePolicy best = policies[0];
+    for (FeePolicy policy : policies) {
+        if (policy.feeFor(amountCents) < best.feeFor(amountCents)) {
+            best = policy;
+        }
+    }
+    return best;
+}
+```
+
+```sh
+java Main.java
+```
+
+```
+No fee: 0 cents on $50
+Flat fee of 30 cents: 30 cents on $50
+1.5% of the amount: 75 cents on $50
+Cheapest on $10:  1.5% of the amount
+Cheapest on $100: Flat fee of 30 cents
+```
+
+`cheapest` has never heard of `FlatFee` or `PercentageFee`. It only knows `FeePolicy`, so it works with any fee policy anyone writes later, without changing a line.
+
+`/** ... */` above the interface is a Javadoc comment, describing what it is for. Interfaces are where such comments matter most, because they describe a promise many classes keep.
+
+<Aside type="note" title="How PayDeck uses this">
+The PayDeck API's real code has interfaces such as `PaymentProvider`: one implementation talks to Stripe, another pretends, for tests and for running without a Stripe account. You will see the pattern again in Part 9.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a capped fee">
+Write `CappedPercentageFee implements FeePolicy`: a percentage, but never more than a maximum number of cents. With 2% capped at 200 cents, $50 costs 100 cents and $500 costs 200 cents. Add it to `offers` and see which is cheapest on $100 and on $1,000.
+
+<Fragment slot="hint">The constructor takes two values. `Math.min(a, b)` returns the smaller.</Fragment>
+<Fragment slot="solution">
+
+```java
+class CappedPercentageFee implements FeePolicy {
+    private final double percent;
+    private final long capCents;
+
+    CappedPercentageFee(double percent, long capCents) {
+        this.percent = percent;
+        this.capCents = capCents;
+    }
+
+    @Override
+    public long feeFor(long amountCents) {
+        return Math.min(Math.round(amountCents * percent / 100), capCents);
+    }
+
+    @Override
+    public String describe() {
+        return percent + "%, at most " + capCents + " cents";
+    }
+}
+```
+
+With `offers` holding all three, $100 is cheapest with the flat fee (30 cents), and $1,000 too (the capped fee would be 200 cents). Change the flat fee to 300 and the capped one wins at $1,000.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="is not abstract and does not override abstract method">
+The class says `implements FeePolicy` but is missing one of its methods. The message names the missing one.
+</Aside>
+
+<Aside type="caution" title="cannot implement feeFor(long) in FeePolicy">
+The next line of the message says "attempting to assign weaker access privileges; was public": the implementation method is missing `public`. Interface methods are public, so implementations must be too.
+</Aside>
+
+## Recap
+
+- An interface lists methods; a class that `implements` it must provide them all, as `public`.
+- Variables and parameters can use the interface as their type and hold any implementation.
+- Calling a method runs the version belonging to the actual object: polymorphism.
+- Code written against an interface keeps working when new implementations are added.
+
+<Quiz
+	questions={[
+		{
+			question: 'A variable has type FeePolicy and holds a FlatFee. Whose feeFor runs?',
+			options: ["FeePolicy's", "FlatFee's", 'Neither: it is an error'],
+			answer: 1,
+			explanation: 'The interface only says the method exists; the object provides it.',
+		},
+		{
+			question: 'What does @Override do?',
+			options: ['Makes the method faster', 'Asks the compiler to check that the method really replaces one from the interface or class above', 'Makes the method private'],
+			answer: 1,
+			explanation: 'A typo in the method name becomes a compile error instead of a silent bug.',
+		},
+	]}
+/>
+
+<MarkComplete />

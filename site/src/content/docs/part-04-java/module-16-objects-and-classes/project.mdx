@@ -1,0 +1,355 @@
+---
+title: "Mini-project: bank account simulator"
+description: "Model accounts, transactions and statuses with a class, a record and enums, then drive them from a small command-line bank."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside, FileTree } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+This project puts the whole module together: a **class** for something that changes (an account), a **record** for something that does not (a line on a statement), and **enums** for fixed choices (the kind of transaction, and whether the account is open or frozen). It is a small, honest model of what the PayDeck API's accounts and transfers do in Module 24.
+
+## What it does
+
+You type commands; the bank answers.
+
+```
+Accounts: asha, ben. Commands: deposit NAME CENTS, withdraw NAME CENTS,
+transfer FROM TO CENTS, freeze NAME, unfreeze NAME, statement NAME, quit
+> deposit asha 5000
+New balance: $50.00
+> transfer asha ben 1250
+asha: $37.50, ben: $12.50
+> withdraw ben 2000
+Sorry: ben does not have enough money
+> withdraw ben 250
+New balance: $10.00
+> freeze asha
+Frozen.
+> deposit asha 100
+Sorry: asha's account is frozen
+> transfer ben asha 100
+Sorry: asha's account is frozen
+> unfreeze asha
+Open again.
+> deposit asha abc
+Sorry: For input string: "abc"
+> deposit bob 10
+Sorry: No account called bob
+> withdraw asha
+Sorry: Not enough words. Type the command as shown above.
+> statement asha
+Statement for asha (OPEN)
+  DEPOSIT      +$50.00  balance $50.00
+  TRANSFER_OUT -$12.50  balance $37.50
+Balance: $37.50
+> statement ben
+Statement for ben (OPEN)
+  TRANSFER_IN  +$12.50  balance $12.50
+  WITHDRAWAL   -$2.50  balance $10.00
+Balance: $10.00
+> quit
+```
+
+Notice what does **not** happen: a mistake never crashes the program, and a refused transfer never moves any money.
+
+## The files
+
+<FileTree>
+- bank/
+  - Bank.java the command loop (given below)
+  - Account.java you write this
+  - Transaction.java you write this
+  - TransactionType.java you write this
+  - AccountStatus.java you write this
+</FileTree>
+
+## Two new tools
+
+The program needs two things from Module 17. Here is just enough to use them; Module 17 explains them properly.
+
+**A list that grows.** `List<Transaction>` is a list of transactions. You create an empty one with `new ArrayList<>()`, add to it with `.add(...)`, and loop over it with for-each. It needs two `import` lines at the very top of the file:
+
+```java
+import java.util.ArrayList;
+import java.util.List;
+
+class Account {
+    private final List<Transaction> history = new ArrayList<>();
+
+    List<Transaction> history() {
+        return List.copyOf(history);   // a read-only copy, so no one else can add to it
+    }
+}
+```
+
+**Catching an exception.** `try { ... } catch (...) { ... }` runs the code in `try`, and if it throws one of the listed exceptions, runs the `catch` block instead of crashing. `Bank.java` uses this so that a refused command just prints "Sorry: " and the message from your exception.
+
+## Starter code
+
+Make a folder `~/Projects/course/java/bank` and put this `Bank.java` in it, unchanged. It reads commands and calls your `Account` methods. Read it through; everything except `try`/`catch` is from this Part.
+
+```java
+Account asha = new Account("asha");
+Account ben = new Account("ben");
+
+void main() {
+    IO.println("Accounts: asha, ben. Commands: deposit NAME CENTS, withdraw NAME CENTS,");
+    IO.println("transfer FROM TO CENTS, freeze NAME, unfreeze NAME, statement NAME, quit");
+
+    while (true) {
+        String line = IO.readln("> ");
+        if (line == null || line.equals("quit")) {
+            break;
+        }
+        try {
+            run(line.trim().split(" +"));
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            IO.println("Sorry: " + e.getMessage());
+        }
+    }
+}
+
+void run(String[] words) {
+    int needed = switch (words[0]) {
+        case "transfer" -> 4;
+        case "deposit", "withdraw" -> 3;
+        case "freeze", "unfreeze", "statement" -> 2;
+        default -> 1;
+    };
+    if (words.length < needed) {
+        throw new IllegalArgumentException("Not enough words. Type the command as shown above.");
+    }
+
+    switch (words[0]) {
+        case "deposit" -> {
+            Account account = find(words[1]);
+            account.deposit(cents(words[2]));
+            IO.println("New balance: " + money(account.balanceCents()));
+        }
+        case "withdraw" -> {
+            Account account = find(words[1]);
+            account.withdraw(cents(words[2]));
+            IO.println("New balance: " + money(account.balanceCents()));
+        }
+        case "transfer" -> {
+            Account from = find(words[1]);
+            Account to = find(words[2]);
+            from.transferTo(to, cents(words[3]));
+            IO.println(from.owner() + ": " + money(from.balanceCents()) + ", " + to.owner() + ": " + money(to.balanceCents()));
+        }
+        case "freeze" -> {
+            find(words[1]).freeze();
+            IO.println("Frozen.");
+        }
+        case "unfreeze" -> {
+            find(words[1]).unfreeze();
+            IO.println("Open again.");
+        }
+        case "statement" -> printStatement(find(words[1]));
+        default -> IO.println("Unknown command: " + words[0]);
+    }
+}
+
+Account find(String name) {
+    if (name.equals("asha")) {
+        return asha;
+    } else if (name.equals("ben")) {
+        return ben;
+    }
+    throw new IllegalArgumentException("No account called " + name);
+}
+
+long cents(String text) {
+    return Long.parseLong(text);
+}
+
+void printStatement(Account account) {
+    IO.println("Statement for " + account.owner() + " (" + account.status() + ")");
+    for (Transaction t : account.history()) {
+        String sign = switch (t.type()) {
+            case DEPOSIT, TRANSFER_IN -> "+";
+            case WITHDRAWAL, TRANSFER_OUT -> "-";
+        };
+        IO.println("  %-12s %s%s  balance %s".formatted(t.type(), sign, money(t.amountCents()), money(t.balanceAfterCents())));
+    }
+    IO.println("Balance: " + money(account.balanceCents()));
+}
+
+String money(long cents) {
+    return "$%d.%02d".formatted(cents / 100, cents % 100);
+}
+```
+
+A few things you have not seen written this way:
+
+- `asha` and `ben` are declared outside any method, so every method in the file can use them.
+- `line.trim().split(" +")` cuts the line into words wherever there are one or more spaces, giving a `String[]`.
+- `case "deposit", "withdraw" -> 3` handles two values with one case. The statement uses the same trick with enum values.
+- `case "deposit" -> { ... }` runs several statements for one case. This `switch` does things rather than produce a value, so it needs no `;` at the end.
+- In a format string, `%s` is replaced by any value as text, and `%-12s` pads it to 12 characters, which lines the statement up in columns.
+- `IO.readln` returns `null` when there is no more input (for example if you press Ctrl+D), so the loop stops cleanly.
+- `catch (IllegalArgumentException | IllegalStateException e)` catches either kind. Typing letters for an amount makes `Long.parseLong` throw `NumberFormatException`, which is a kind of `IllegalArgumentException`, so that is caught too.
+
+## Requirements
+
+1. `TransactionType` is an enum: `DEPOSIT`, `WITHDRAWAL`, `TRANSFER_IN`, `TRANSFER_OUT`.
+2. `AccountStatus` is an enum: `OPEN`, `FROZEN`.
+3. `Transaction` is a record with a `TransactionType type`, a `long amountCents` (always positive) and a `long balanceAfterCents`.
+4. `Account` is a class with:
+   - a constructor `Account(String owner)` that refuses a blank owner; every account starts open with a balance of 0;
+   - `owner()`, `balanceCents()`, `status()` and `history()`;
+   - `deposit(long)`, `withdraw(long)`, `transferTo(Account other, long)`, `freeze()` and `unfreeze()`.
+5. The rules, each refused with an exception and the message from the example above:
+   - amounts must be more than 0 (`IllegalArgumentException`);
+   - a frozen account cannot deposit, withdraw, send or receive (`IllegalStateException`);
+   - you cannot take out more than the balance (`IllegalStateException`);
+   - you cannot transfer to the same account (`IllegalArgumentException`).
+6. Every successful deposit, withdrawal and transfer adds a `Transaction` to the right history. A transfer adds one to **each** account.
+7. Nothing outside `Account` can change a balance or a history directly.
+
+<Exercise title="Build it">
+Write the four files, run `java Bank.java` from the `bank` folder, and type the commands from the example. Your output should match it line for line.
+
+<Fragment slot="hint">Start with the two enums and the record: they are each a few lines. Then write `Account` one method at a time, running the program after each one. Until a method exists, `Bank.java` will not compile, so you can begin with empty methods such as `void freeze() {}` and fill them in.</Fragment>
+<Fragment slot="hint2">Withdrawing and sending a transfer both "take money out": the same checks, then a subtraction, then a history entry. A private helper, `private void takeOut(long amountCents, TransactionType type)`, saves writing it twice. For a transfer, check that the **other** account is open before taking any money out, so a refused transfer changes nothing.</Fragment>
+<Fragment slot="solution">
+
+`TransactionType.java`:
+
+```java
+enum TransactionType {
+    DEPOSIT,
+    WITHDRAWAL,
+    TRANSFER_IN,
+    TRANSFER_OUT
+}
+```
+
+`AccountStatus.java`:
+
+```java
+enum AccountStatus {
+    OPEN,
+    FROZEN
+}
+```
+
+`Transaction.java`:
+
+```java
+/** One line on a statement. Amounts are positive; the type says which way the money went. */
+record Transaction(TransactionType type, long amountCents, long balanceAfterCents) {}
+```
+
+`Account.java`:
+
+```java
+import java.util.ArrayList;
+import java.util.List;
+
+class Account {
+    private final String owner;
+    private long balanceCents;
+    private AccountStatus status = AccountStatus.OPEN;
+    private final List<Transaction> history = new ArrayList<>();
+
+    Account(String owner) {
+        if (owner.isBlank()) {
+            throw new IllegalArgumentException("An account needs an owner");
+        }
+        this.owner = owner;
+    }
+
+    String owner() {
+        return owner;
+    }
+
+    long balanceCents() {
+        return balanceCents;
+    }
+
+    AccountStatus status() {
+        return status;
+    }
+
+    List<Transaction> history() {
+        return List.copyOf(history);
+    }
+
+    void deposit(long amountCents) {
+        requirePositive(amountCents);
+        requireOpen();
+        balanceCents += amountCents;
+        history.add(new Transaction(TransactionType.DEPOSIT, amountCents, balanceCents));
+    }
+
+    void withdraw(long amountCents) {
+        takeOut(amountCents, TransactionType.WITHDRAWAL);
+    }
+
+    void transferTo(Account other, long amountCents) {
+        if (other == this) {
+            throw new IllegalArgumentException("Cannot transfer to the same account");
+        }
+        other.requireOpen();
+        takeOut(amountCents, TransactionType.TRANSFER_OUT);
+        other.balanceCents += amountCents;
+        other.history.add(new Transaction(TransactionType.TRANSFER_IN, amountCents, other.balanceCents));
+    }
+
+    void freeze() {
+        status = AccountStatus.FROZEN;
+    }
+
+    void unfreeze() {
+        status = AccountStatus.OPEN;
+    }
+
+    private void takeOut(long amountCents, TransactionType type) {
+        requirePositive(amountCents);
+        requireOpen();
+        if (amountCents > balanceCents) {
+            throw new IllegalStateException(owner + " does not have enough money");
+        }
+        balanceCents -= amountCents;
+        history.add(new Transaction(type, amountCents, balanceCents));
+    }
+
+    private void requirePositive(long amountCents) {
+        if (amountCents <= 0) {
+            throw new IllegalArgumentException("The amount must be more than 0");
+        }
+    }
+
+    private void requireOpen() {
+        if (status == AccountStatus.FROZEN) {
+            throw new IllegalStateException(owner + "'s account is frozen");
+        }
+    }
+}
+```
+
+How it meets the requirements:
+
+- **Private methods** (`takeOut`, `requirePositive`, `requireOpen`) are helpers only `Account` can call. Each rule is written once.
+- **Checks come first, changes come last.** Every method throws before it touches a balance, so a refused command leaves everything as it was. That is why the frozen transfer from Ben left his $10.00 alone.
+- `transferTo` reaches into `other.balanceCents` and `other.history`. That is allowed: `private` means "only code in the `Account` class", and `transferTo` is in that class.
+- `other == this` uses `==` on purpose: the question is "is it the very same account object?".
+- `history()` returns `List.copyOf(history)`, so code outside can read the statement but not add fake lines to it.
+- `status` starts as `AccountStatus.OPEN` right where it is declared; a field can have a starting value without a constructor.
+</Fragment>
+</Exercise>
+
+<Aside type="note" title="Where this goes next">
+In Module 24 the PayDeck API follows the same rules, with one big difference: the balance and the history live in a PostgreSQL database instead of in memory, so they survive a restart, and the "checks first, changes last" idea becomes a database **transaction** that either happens completely or not at all.
+</Aside>
+
+<Aside type="tip" title="Typing commands in IntelliJ">
+Run `Bank.java` with the ▶ next to `void main()` and type the commands into the **Run** panel. Stop it with `quit`.
+</Aside>
+
+<MarkComplete />

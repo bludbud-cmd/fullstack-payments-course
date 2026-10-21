@@ -1,0 +1,190 @@
+---
+title: "16.5 Enums"
+description: "List every possible value of something, such as a card's status, with an enum, and let the compiler check that a switch handles them all."
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can declare an enum, give it methods, switch over it without a `default`, and turn text into an enum value.
+
+## Why it matters
+
+A PayDeck card is `ACTIVE`, `FROZEN` or `CANCELLED`. Nothing else. In lesson 15.4 we stored the status as a `String`, so a typo such as `"FORZEN"` compiled happily and quietly fell into the `default` case. In TypeScript you fixed this with a union type, `'ACTIVE' | 'FROZEN' | 'CANCELLED'` (lesson 9.3). Java's version is the **enum**, and it goes further: when you add a new status, the compiler lists every place in your code that needs to handle it.
+
+## The idea
+
+```java
+enum CardStatus {
+    ACTIVE,
+    FROZEN,
+    CANCELLED
+}
+```
+
+An **enum** (short for "enumeration") is a type with a fixed list of values. `CardStatus.FROZEN` is one of them; there can never be a fourth unless you add it here. Constant names are written in capitals by convention.
+
+- Compare enum values with `==`. Each value exists exactly once, so `==` is safe here, unlike strings.
+- `CardStatus.values()` gives all the values, in order, to loop over.
+- `CardStatus.valueOf("FROZEN")` turns text into the enum value, and fails loudly for text that is not one of them. That is how text from a web request becomes a status.
+
+Enums can have methods. Put a semicolon after the last value, then write them as in a class:
+
+```java
+enum CardStatus {
+    ACTIVE,
+    FROZEN,
+    CANCELLED;
+
+    boolean canPay() {
+        return this == ACTIVE;
+    }
+}
+```
+
+### Switching over an enum
+
+```java
+String label(CardStatus status) {
+    return switch (status) {
+        case ACTIVE -> "Ready to use";
+        case FROZEN -> "Frozen";
+        case CANCELLED -> "Cancelled";
+    };
+}
+```
+
+There is no `default`. Java knows every possible value, sees that all three are handled, and accepts it. If a value is missing, the code does not compile. This is called an **exhaustive** switch, and it is one of the best reasons to use enums.
+
+## Worked example
+
+In a new folder `~/Projects/course/java/status`, create `CardStatus.java` with the enum and its `canPay` method from above. Then `Main.java`:
+
+```java
+void main() {
+    CardStatus status = CardStatus.FROZEN;
+
+    IO.println(status);
+    IO.println(status.canPay());
+    IO.println(status == CardStatus.FROZEN);
+    IO.println(label(status));
+
+    for (CardStatus s : CardStatus.values()) {
+        IO.println(s + " -> " + label(s) + ", can pay: " + s.canPay());
+    }
+
+    CardStatus fromText = CardStatus.valueOf("CANCELLED");
+    IO.println(fromText.canPay());
+    CardStatus.valueOf("PAUSED");
+}
+
+String label(CardStatus status) {
+    return switch (status) {
+        case ACTIVE -> "Ready to use";
+        case FROZEN -> "Frozen";
+        case CANCELLED -> "Cancelled";
+    };
+}
+```
+
+```
+FROZEN
+false
+true
+Frozen
+ACTIVE -> Ready to use, can pay: true
+FROZEN -> Frozen, can pay: false
+CANCELLED -> Cancelled, can pay: false
+false
+Exception in thread "main" java.lang.IllegalArgumentException: No enum constant CardStatus.PAUSED
+	at java.base/java.lang.Enum.valueOf(Enum.java:293)
+	at CardStatus.valueOf(CardStatus.java:1)
+	at Main.main(Main.java:15)
+```
+
+- Printing an enum value prints its name.
+- `valueOf("PAUSED")` refuses: "PAUSED" is not a card status. In Part 6, the API turns this into a polite "400 Bad Request" answer.
+
+Now see the compiler protect you. Try to store text in a `CardStatus` by adding this line just after the line that creates `status`:
+
+```java
+CardStatus wrong = "FROZEN";
+```
+
+```
+Main.java:3: error: incompatible types: String cannot be converted to CardStatus
+```
+
+Remove that line before you go on.
+
+## Try it
+
+<Exercise title="Try it: a new status">
+Cards expire. Add an `EXPIRED` value to `CardStatus` and run `Main.java` **before** changing anything else. Read the error, then fix it so that `label` returns "Expired, order a new card".
+
+<Fragment slot="hint">The error points at `label`. Each value needs its own `case`.</Fragment>
+<Fragment slot="solution">
+
+After adding `EXPIRED`, nothing runs:
+
+```
+Main.java:19: error: the switch expression does not cover all possible input values
+    return switch (status) {
+           ^
+```
+
+Add the case:
+
+```java
+case EXPIRED -> "Expired, order a new card";
+```
+
+The loop now prints four lines, and `EXPIRED` cannot pay, because `canPay` only says yes to `ACTIVE`. In a big program, this error is a to-do list: every switch that needs to learn about the new status is pointed out for you. A `default` case would have hidden them all.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="No enum constant CardStatus.frozen">
+`valueOf` is case-sensitive. `"frozen"` is not `FROZEN`. If the text might be in lower case, use `CardStatus.valueOf(text.toUpperCase())`.
+</Aside>
+
+<Aside type="caution" title="Adding a default to silence the compiler">
+A `default` makes the "does not cover all possible input values" error go away, but it also stops Java from warning you the next time a value is added. With enums, list every case.
+</Aside>
+
+## Recap
+
+- An enum is a type with a fixed set of values: `enum CardStatus { ACTIVE, FROZEN, CANCELLED }`.
+- Compare values with `==`; loop over them with `values()`; parse text with `valueOf`.
+- Enums can have methods, after a `;` following the last value.
+- A `switch` over an enum with every case listed needs no `default`, and the compiler tells you when a new value is not handled.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why is CardStatus better than a String for a card\'s status?',
+			options: ['It uses less memory', 'Only the listed values are possible, and the compiler checks every use', 'Strings cannot be compared'],
+			answer: 1,
+			explanation: 'Typos and unknown statuses become compile errors.',
+		},
+		{
+			question: 'What does CardStatus.valueOf("PAUSED") do when PAUSED is not a value?',
+			options: ['Returns null', 'Returns ACTIVE', 'Throws IllegalArgumentException'],
+			answer: 2,
+			explanation: 'It fails loudly: "No enum constant CardStatus.PAUSED".',
+		},
+		{
+			question: 'You add a value to an enum. What happens to a switch over it that has no default?',
+			options: ['It silently ignores the new value', 'It stops compiling until you add a case', 'It throws at runtime'],
+			answer: 1,
+			explanation: 'Exhaustive switches turn a new value into a compile error that points at the switch.',
+		},
+	]}
+/>
+
+<MarkComplete />

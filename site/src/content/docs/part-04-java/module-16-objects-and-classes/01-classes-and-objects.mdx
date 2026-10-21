@@ -1,0 +1,178 @@
+---
+title: "16.1 Classes and objects"
+description: "Group data and behaviour into a class, create objects from it with new, and split a program across several files."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can write a class with fields and methods, create objects from it, and run a program made of several files.
+
+## Why it matters
+
+In TypeScript you described a card with an interface and wrote functions that took cards. Java puts the data **and** the code that works on it together, in a **class**. Almost everything in the PayDeck API is a class: an account, a card, the service that moves money, the controller that answers web requests.
+
+## The idea
+
+A **class** is a blueprint. An **object** is one thing built from it.
+
+```java
+class Card {
+    String nickname;     // fields: the data every card has
+    String last4;
+    boolean frozen;
+
+    String describe() {  // methods: what a card can do
+        return nickname + " ending " + last4 + (frozen ? " (frozen)" : "");
+    }
+
+    void freeze() {
+        frozen = true;
+    }
+}
+```
+
+- **Fields** are variables that belong to each object. Every card has its own `nickname`.
+- **Methods** inside the class can use the fields directly: in `freeze`, `frozen` means "this card's `frozen`".
+- `new Card()` creates an object. Each new object starts with default field values: `null` for objects such as `String`, `0` for numbers, `false` for booleans.
+
+You call a method on a particular object with a dot: `travel.freeze()` freezes **that** card, and no other.
+
+### One class per file
+
+From now on, each class goes in its own file, named after the class: `Card` lives in `Card.java`. Your program's `main` goes in a compact source file such as `Main.java`. When you run `java Main.java`, Java finds and compiles the other `.java` files in the same folder as it needs them.
+
+## Worked example
+
+Make a folder for this module:
+
+```sh
+mkdir -p ~/Projects/course/java/cards && cd ~/Projects/course/java/cards
+```
+
+`Card.java`:
+
+```java
+class Card {
+    String nickname;
+    String last4;
+    boolean frozen;
+
+    String describe() {
+        return nickname + " ending " + last4 + (frozen ? " (frozen)" : "");
+    }
+
+    void freeze() {
+        frozen = true;
+    }
+}
+```
+
+`Main.java`:
+
+```java
+void main() {
+    Card everyday = new Card();
+    everyday.nickname = "Everyday";
+    everyday.last4 = "4242";
+
+    Card travel = new Card();
+    travel.nickname = "Travel";
+    travel.last4 = "1881";
+    travel.freeze();
+
+    IO.println(everyday.describe());
+    IO.println(travel.describe());
+    IO.println(everyday.frozen);
+    IO.println(everyday);
+}
+```
+
+```sh
+java Main.java
+```
+
+```
+Everyday ending 4242
+Travel ending 1881 (frozen)
+false
+Card@20d3d15a
+```
+
+Two objects, one class. Freezing `travel` did not touch `everyday`. The `? :` ternary works exactly as in JavaScript.
+
+The last line prints the object itself. Without instructions, Java prints the class name and a code that identifies the object in memory (yours will differ). The next lesson teaches objects to describe themselves.
+
+<Aside type="tip" title="In IntelliJ">
+Open the `cards` folder in IntelliJ. Right-click the folder → **New → Java Class** creates a file with the class already started. Run `Main.java` with the ▶ next to `void main()`.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a spending limit">
+Add a `long limitCents` field to `Card` and a method `boolean allows(long amountCents)` that returns `true` only if the card is not frozen and the amount is not over the limit. Give `everyday` a limit of 5000 and check 3000, 6000, and 3000 again after freezing it.
+
+<Fragment slot="hint">`allows` can be one line: `return !frozen && amountCents <= limitCents;`.</Fragment>
+<Fragment slot="solution">
+
+```java
+// in Card.java
+long limitCents;
+
+boolean allows(long amountCents) {
+    return !frozen && amountCents <= limitCents;
+}
+```
+
+```java
+// in main
+everyday.limitCents = 5000;
+IO.println(everyday.allows(3000));   // true
+IO.println(everyday.allows(6000));   // false
+everyday.freeze();
+IO.println(everyday.allows(3000));   // false
+```
+
+The rule about frozen cards and limits now lives **with** the card, in one place, instead of being repeated wherever a payment is checked.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="NullPointerException">
+You called a method on a field that was never set, for example `card.nickname.length()` when `nickname` is still `null`. The next lesson's constructors make sure fields are set from the start.
+</Aside>
+
+<Aside type="caution" title="cannot find symbol: class Card">
+`Card.java` is not in the same folder as `Main.java`, or the file name does not match the class name exactly, including capitals.
+</Aside>
+
+## Recap
+
+- A class groups fields (data) and methods (behaviour); objects are made from it with `new`.
+- `object.method()` runs a method on that object; methods can use the object's fields directly.
+- One class per file, named after the class; `java Main.java` finds the others.
+- Unset fields start as `null`, `0` or `false`.
+
+<Quiz
+	questions={[
+		{
+			question: 'You create two Card objects and freeze one. What happens to the other?',
+			options: ['It is frozen too', 'Nothing: each object has its own fields'],
+			answer: 1,
+			explanation: 'Fields belong to each object separately.',
+		},
+		{
+			question: 'What is the starting value of a String field you never set?',
+			options: ['""', 'null', '"undefined"'],
+			answer: 1,
+			explanation: 'Object fields start as null, which is why calling methods on them can fail.',
+		},
+	]}
+/>
+
+<MarkComplete />
