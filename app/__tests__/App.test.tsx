@@ -422,14 +422,17 @@ describe('notification settings', () => {
 
     await act(async () => fireEvent(declines, 'valueChange', false));
 
+    // The switch follows once the API has saved the change.
+    await waitFor(() =>
+      expect(screen.getByLabelText('Declined card payments')).toHaveProp(
+        'value',
+        false,
+      ),
+    );
     expect(api.notificationSettingsFor(asha.id)).toEqual({
       payments: true,
       declines: false,
     });
-    expect(screen.getByLabelText('Declined card payments')).toHaveProp(
-      'value',
-      false,
-    );
   });
 });
 
