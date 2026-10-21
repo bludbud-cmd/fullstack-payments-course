@@ -1,0 +1,168 @@
+---
+title: "15.2 Simple source files with a plain void main()"
+description: "Read and write a Java 25 program from top to bottom: main, statements, methods, printing, reading input, and how it compares with JavaScript."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can write a one-file Java program with a `main` method and helper methods, print output, read what the person types, and spot what is the same as and different from JavaScript.
+
+## Why it matters
+
+You already know how to program. This lesson maps what you know onto Java's way of writing it, so the rest of the Part is about new ideas, not new punctuation.
+
+## The idea
+
+A Java 25 **compact source file** is a file of methods. One of them, `main`, is where the program starts:
+
+```java
+void main() {
+    String name = IO.readln("What is your name? ");
+    IO.println(greeting(name));
+}
+
+String greeting(String name) {
+    return "Hello, " + name + "!";
+}
+```
+
+Line by line:
+
+- `void main() { ... }` is a **method**: Java's word for a function. `void` is its return type, meaning "returns nothing". The body is in braces.
+- `String name = ...` declares a variable with its **type first**: `String name`, where TypeScript wrote `name: string`.
+- `IO.readln("...")` prints a prompt and waits for a line of input, then returns it. `IO.println(...)` prints a line. `IO` is built into Java 25 for exactly this.
+- `String greeting(String name)` declares another method: it returns a `String` and takes one `String` parameter. Methods can be in any order in the file.
+- Every **statement** ends with a semicolon `;`. In JavaScript they were optional; in Java they are required.
+
+Here is the same program in JavaScript, for comparison:
+
+```js
+const name = await terminal.question("What is your name? ");
+console.log(greeting(name));
+
+function greeting(name) {
+  return `Hello, ${name}!`;
+}
+```
+
+| JavaScript / TypeScript | Java |
+| --- | --- |
+| `const x = 5;` / `let x: number = 5;` | `int x = 5;` (or `var x = 5;`) |
+| `function f(a: number): string { ... }` | `String f(int a) { ... }` |
+| `console.log(...)` | `IO.println(...)` |
+| `` `Hello, ${name}` `` | `"Hello, " + name` or `"Hello, %s".formatted(name)` |
+| `// comment` and `/* comment */` | the same |
+| `===` | `==` for numbers and booleans, `.equals(...)` for strings (lesson 15.3) |
+
+Strings are always in **double quotes** in Java. Single quotes are for a single character, such as `'A'`.
+
+<Aside type="note" title="Compiled, then run">
+`java Greet.java` first compiles the whole file. If anything is wrong anywhere, nothing runs. That is stricter than JavaScript, which runs until it hits a problem, and it is exactly what you want for code that moves money.
+</Aside>
+
+## Worked example
+
+Create `Greet.java` in your `java` folder:
+
+```java
+void main() {
+    String name = IO.readln("What is your name? ");
+    int year = 2026;
+    int born = Integer.parseInt(IO.readln("What year were you born? "));
+
+    IO.println(greeting(name));
+    IO.println("You are about " + (year - born) + " years old.");
+}
+
+String greeting(String name) {
+    return "Hello, " + name + "!";
+}
+```
+
+```sh
+java Greet.java
+```
+
+```
+What is your name? Asha
+What year were you born? 1998
+Hello, Asha!
+You are about 28 years old.
+```
+
+- `IO.readln` always returns a `String`. `Integer.parseInt(...)` turns text such as `"1998"` into the number `1998`.
+- `"..." + (year - born) + "..."` joins text and a number. The parentheses make Java subtract first; without them it would join `"about 2026"` and then try to subtract, which is an error.
+
+Run it again and type `abc` for the year:
+
+```
+Exception in thread "main" java.lang.NumberFormatException: For input string: "abc"
+	at java.base/java.lang.NumberFormatException.forInputString(NumberFormatException.java:67)
+	...
+```
+
+An **exception** is Java's runtime error. The first line names it (`NumberFormatException`) and says why. Below it is the **stack trace**: the chain of method calls that led there, newest first. Module 17 shows how to catch exceptions and recover.
+
+## Try it
+
+<Exercise title="Try it: a fee calculator">
+Write `Fee.java` with a method `long feeFor(long amountCents)` that returns 1.5% of the amount, rounded to the nearest cent. In `main`, read an amount in cents and print "Fee: 75 cents" for 5000.
+
+<Fragment slot="hint">`Math.round(amountCents * 0.015)` rounds to the nearest whole number and gives back a `long`, Java's type for large whole numbers (next lesson).</Fragment>
+<Fragment slot="solution">
+
+```java
+void main() {
+    long amount = Long.parseLong(IO.readln("Amount in cents: "));
+    IO.println("Fee: " + feeFor(amount) + " cents");
+}
+
+long feeFor(long amountCents) {
+    return Math.round(amountCents * 0.015);
+}
+```
+
+`Long.parseLong` is the `long` version of `Integer.parseInt`. For 5000 it prints `Fee: 75 cents`.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="unclosed character literal">
+You used single quotes for a string. `'hello'` is not a string in Java: single quotes hold exactly one character. Write `"hello"`.
+</Aside>
+
+<Aside type="caution" title="missing return statement">
+A method that declares a return type, such as `String greeting(...)`, must `return` a value on every path. Use `void` if it returns nothing.
+</Aside>
+
+## Recap
+
+- A compact source file is a set of methods; `void main()` runs first.
+- Types come before names: `String name`, `int year`, `String greeting(String name)`.
+- Every statement ends with `;`; strings use double quotes.
+- `IO.println` prints, `IO.readln` reads a line; `Integer.parseInt` converts text to a number.
+
+<Quiz
+	questions={[
+		{
+			question: 'How do you write a method that takes an int and returns a boolean?',
+			options: ['function isBig(n: int): boolean', 'boolean isBig(int n) { ... }', 'isBig(int n) -> boolean'],
+			answer: 1,
+			explanation: 'Return type first, then the name, then typed parameters.',
+		},
+		{
+			question: 'What type does IO.readln return?',
+			options: ['int', 'String', 'It depends on what was typed'],
+			answer: 1,
+			explanation: 'Input is always text; convert it with Integer.parseInt or similar.',
+		},
+	]}
+/>
+
+<MarkComplete />

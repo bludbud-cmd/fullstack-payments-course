@@ -1,0 +1,187 @@
+---
+title: "15.3 Types"
+description: "Java's basic types: whole numbers, decimals, booleans, characters and strings, plus var, integer division, casting and comparing strings."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can choose the right Java type for a value, predict what arithmetic does with it, convert between types, and compare strings correctly.
+
+## Why it matters
+
+JavaScript has one kind of number. Java has several, and the differences matter for money: `7 / 2` is `3` in Java, not `3.5`, and an `int` can only count up to about 2.1 billion. Knowing the types prevents some of the most expensive bugs a payments server can have.
+
+## The idea
+
+Every variable has a fixed type, decided when you write the code, and the compiler checks every use. The common types:
+
+| Type | Holds | Example |
+| --- | --- | --- |
+| `int` | Whole numbers up to about ±2.1 billion | `int cards = 3;` |
+| `long` | Whole numbers up to about ±9.2 quintillion | `long balanceCents = 12_550L;` |
+| `double` | Decimals, with the same rounding issues as JavaScript | `double rate = 0.015;` |
+| `boolean` | `true` or `false` | `boolean frozen = false;` |
+| `char` | One character, in single quotes | `char initial = 'A';` |
+| `String` | Text, in double quotes | `String nickname = "Everyday";` |
+
+The first five are **primitive** types (lowercase names). `String` is an **object** type (capitalised), which means it has methods: `nickname.length()`, `nickname.toUpperCase()`, `nickname.contains("day")`.
+
+Underscores in numbers are just for reading: `12_550` is `12550`. The `L` on the end of a big `long` literal tells Java it is a `long`.
+
+**`var`** lets Java work out the type from the value, like TypeScript's inference: `var count = 10;` makes `count` an `int`. It is still fixed: you cannot later put a string in it.
+
+### Arithmetic surprises
+
+```java
+IO.println(7 / 2);       // 3     : int divided by int is an int; the remainder is dropped
+IO.println(7 / 2.0);     // 3.5   : if either side is a double, the result is a double
+IO.println(7 % 2);       // 1     : the remainder, as in JavaScript
+IO.println((int) 3.99);  // 3     : a cast cuts off the decimals; it does not round
+IO.println(Integer.MAX_VALUE + 1);   // -2147483648 : overflow wraps around!
+IO.println(0.1 + 0.2);   // 0.30000000000000004
+```
+
+The overflow line is the scary one: an `int` that goes past its maximum silently wraps round to a large negative number. Money in cents should be a `long`, which will not overflow for any real amount. (The PayDeck API goes one step further, in Module 24.)
+
+A **cast**, `(int) value`, converts between number types when information could be lost. Java makes you write it, so that the loss is on purpose.
+
+### Comparing strings
+
+```java
+String a = "card";
+String b = new String("card");
+IO.println(a == b);        // false!
+IO.println(a.equals(b));   // true
+```
+
+For objects such as `String`, `==` asks "is this the **same object** in memory?", not "do they contain the same text?". Two strings with the same letters can be different objects. **Always compare strings with `.equals`.** For primitives (`int`, `boolean`, ...) `==` compares values, as you would expect.
+
+## Worked example
+
+Create `Types.java`:
+
+```java
+void main() {
+    int cards = 3;
+    long balanceCents = 12_550L;
+    boolean frozen = false;
+    String nickname = "Everyday";
+
+    IO.println(nickname + " has " + cards + " cards, frozen: " + frozen);
+    IO.println("Balance: " + balanceCents / 100 + "." + balanceCents % 100);
+    IO.println("Name length: " + nickname.length());
+    IO.println("Shouting: " + nickname.toUpperCase());
+    IO.println("Average per card: " + balanceCents / cards);
+    IO.println("Exact average: " + (double) balanceCents / cards);
+}
+```
+
+```
+Everyday has 3 cards, frozen: false
+Balance: 125.50
+Name length: 8
+Shouting: EVERYDAY
+Average per card: 4183
+Exact average: 4183.333333333333
+```
+
+`balanceCents / cards` drops the remainder, because both are whole numbers. Casting one side to `double` first gives the decimal answer.
+
+Now see the compiler protect you. Add this line just before the last `IO.println`, and run again:
+
+```java
+int count = "three";
+```
+
+```
+Types.java:12: error: incompatible types: String cannot be converted to int
+    int count = "three";
+                ^
+```
+
+Nothing runs until it is fixed, as with `npx tsc` in Module 9, but here it is not optional.
+
+<Aside type="caution" title="A bug hiding in the worked example">
+`balanceCents % 100` prints `50` for 12550, which looks right. Try `12_505L`: it prints `125.5` instead of `125.05`, because `5` has no leading zero. The next lesson's exercise fixes it with `formatted`.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: predict, then run">
+Write down what you think each line prints, then run them:
+
+```java
+IO.println(10 / 4);
+IO.println(10 / 4.0);
+IO.println(10 % 4);
+IO.println((long) 2.7);
+IO.println("5" + 3);
+IO.println(5 + 3 + "5");
+IO.println("Groceries".equals("groceries"));
+IO.println("Groceries".equalsIgnoreCase("groceries"));
+```
+
+<Fragment slot="hint">`+` with a string on either side joins text. Java works left to right.</Fragment>
+<Fragment slot="solution">
+
+```
+2
+2.5
+2
+2
+53
+85
+false
+true
+```
+
+`5 + 3 + "5"` is `8 + "5"`, which is `"85"`: the numbers are added before the string appears. `equals` cares about upper and lower case; `equalsIgnoreCase` does not.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="possible lossy conversion from double to int">
+You tried to put a decimal into an `int`, for example `int fee = amount * 0.015;`. Decide how to handle the decimals: `Math.round(...)` (which gives a `long`), or a cast if you really mean to cut them off.
+</Aside>
+
+<Aside type="caution" title="Comparing strings with ==">
+`if (status == "FROZEN")` may work in a quick test and fail in a real program. Use `"FROZEN".equals(status)`.
+</Aside>
+
+## Recap
+
+- `int` and `long` for whole numbers (use `long` for money in cents), `double` for decimals, `boolean`, `char`, `String`.
+- Integer division drops the remainder; `int` overflows silently.
+- Casts convert number types on purpose: `(double) x`, `(int) y`.
+- Compare strings with `.equals`, never `==`.
+
+<Quiz
+	questions={[
+		{
+			question: 'What does `9 / 2` print in Java?',
+			options: ['4.5', '4', '5'],
+			answer: 1,
+			explanation: 'Both are ints, so the result is an int and the .5 is dropped.',
+		},
+		{
+			question: 'Which type should hold an account balance in cents?',
+			options: ['int', 'double', 'long'],
+			answer: 2,
+			explanation: 'Whole cents, and long has room for any realistic amount.',
+		},
+		{
+			question: 'How do you check whether a String named status says "FROZEN"?',
+			options: ['status == "FROZEN"', '"FROZEN".equals(status)', 'status === "FROZEN"'],
+			answer: 1,
+			explanation: '== compares objects, not their text.',
+		},
+	]}
+/>
+
+<MarkComplete />

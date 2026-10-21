@@ -1,0 +1,188 @@
+---
+title: "15.4 Control flow"
+description: "if and else, switch expressions, for and while loops, and methods with return values, in Java."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can write decisions and loops in Java, use a `switch` expression to choose a value, and split work into methods.
+
+## Why it matters
+
+The API makes decisions all day: is there enough money, is the card frozen, is the amount over the limit? Java's control flow looks very like JavaScript's, with one powerful addition, the `switch` expression, which PayDeck uses to turn a status into a message.
+
+## The idea
+
+**if / else** is the same as JavaScript, but the condition must be a real `boolean`. There is no "truthy": `if (count)` is an error; write `if (count > 0)`.
+
+```java
+if (priceCents <= balanceCents) {
+    IO.println("Approved");
+} else if (balanceCents == 0) {
+    IO.println("Declined: empty wallet");
+} else {
+    IO.println("Declined: not enough money");
+}
+```
+
+`&&`, `||` and `!` work as in JavaScript. `==` and `!=` compare numbers and booleans; there is no `===`.
+
+A **switch expression** picks a value from several cases:
+
+```java
+String label = switch (status) {
+    case "ACTIVE" -> "Ready to use";
+    case "FROZEN" -> "Frozen";
+    case "CANCELLED" -> "Cancelled";
+    default -> "Unknown";
+};
+```
+
+Each `case` has an arrow `->` and a value. `default` covers everything else. Note the semicolon after the closing brace: the whole `switch` is one expression, assigned to `label`. (In Module 16, with enums, Java can check that every case is covered, and `default` is no longer needed.)
+
+**Loops:**
+
+```java
+for (int i = 1; i <= 3; i++) {          // counting loop, as in JavaScript
+    IO.println("Payment " + i);
+}
+
+int[] amounts = {350, 1200, 4275};      // an array of ints
+for (int amount : amounts) {            // "for each amount in amounts", like for...of
+    total += amount;
+}
+
+while (tries < 3) {                     // repeat while the condition is true
+    tries++;
+}
+```
+
+`int[]` is an **array**: a fixed-size list of one type. Module 17 introduces `List`, which can grow; you will use it far more.
+
+**Methods** are declared at the top level of the file, with a return type and typed parameters, and can be called from `main` or from each other.
+
+## Worked example
+
+`Checkout.java` decides whether a payment is approved:
+
+```java
+void main() {
+    long balanceCents = 2500;
+    long[] prices = {1200, 900, 800};
+    String status = "ACTIVE";
+
+    for (long price : prices) {
+        String decision = decide(status, balanceCents, price);
+        IO.println(money(price) + ": " + decision);
+        if (decision.equals("Approved")) {
+            balanceCents -= price;
+        }
+    }
+    IO.println("Left: " + money(balanceCents));
+}
+
+String decide(String status, long balanceCents, long priceCents) {
+    if (!status.equals("ACTIVE")) {
+        return "Declined: card is " + status.toLowerCase();
+    }
+    if (priceCents > balanceCents) {
+        return "Declined: not enough money";
+    }
+    return "Approved";
+}
+
+String money(long cents) {
+    return "$%d.%02d".formatted(cents / 100, cents % 100);
+}
+```
+
+```
+$12.00: Approved
+$9.00: Approved
+$8.00: Declined: not enough money
+Left: $4.00
+```
+
+- `decide` returns early as soon as it knows the answer, which keeps the "happy path" (approved) at the bottom without nested `if`s.
+- `balanceCents -= price` is short for `balanceCents = balanceCents - price`.
+- `"$%d.%02d".formatted(...)` fills in a **format string**: each `%d` is replaced by a whole number, and `%02d` means "at least 2 digits, padded with zeros", so 5 cents shows as `05`. This fixes the bug from the last lesson.
+
+Change `status` to `"FROZEN"` and run again: every payment says "Declined: card is frozen". This is the same logic the PayDeck API runs when a merchant tries to charge a card (Module 32), written with real types and a database.
+
+## Try it
+
+<Exercise title="Try it: a status message">
+Write a method `String explain(String status)` using a `switch` expression that returns "You can use this card" for `ACTIVE`, "Unfreeze the card to use it" for `FROZEN`, "This card can no longer be used" for `CANCELLED`, and "Unknown status: X" otherwise. Call it for all three statuses and for `"PAUSED"` in a loop over a `String[]`.
+
+<Fragment slot="hint">In the `default` case you can use the value itself: `default -> "Unknown status: " + status;`.</Fragment>
+<Fragment slot="solution">
+
+```java
+void main() {
+    String[] statuses = {"ACTIVE", "FROZEN", "CANCELLED", "PAUSED"};
+    for (String status : statuses) {
+        IO.println(status + ": " + explain(status));
+    }
+}
+
+String explain(String status) {
+    return switch (status) {
+        case "ACTIVE" -> "You can use this card";
+        case "FROZEN" -> "Unfreeze the card to use it";
+        case "CANCELLED" -> "This card can no longer be used";
+        default -> "Unknown status: " + status;
+    };
+}
+```
+
+```
+ACTIVE: You can use this card
+FROZEN: Unfreeze the card to use it
+CANCELLED: This card can no longer be used
+PAUSED: Unknown status: PAUSED
+```
+
+`return switch (...) { ... };` returns the value of the switch directly.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="incompatible types: int cannot be converted to boolean">
+Java has no truthy values. `if (count)` must be `if (count > 0)`; `while (items)` must say what you are checking.
+</Aside>
+
+<Aside type="caution" title="the switch expression does not cover all possible input values">
+A `switch` that produces a value needs a case for everything. With strings, add a `default` case.
+</Aside>
+
+## Recap
+
+- `if`, `else if`, `else`, `&&`, `||`, `!` work as in JavaScript, but conditions must be booleans.
+- `switch` expressions with `case X -> value` choose a value; `default` covers the rest.
+- `for`, for-each (`for (int x : array)`), and `while` loops.
+- Methods with return types split the work; returning early keeps them readable.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which loop is Java\'s version of JavaScript\'s for...of?',
+			options: ['for (int i = 0; i < n; i++)', 'for (long price : prices)', 'while (price in prices)'],
+			answer: 1,
+			explanation: 'The for-each loop visits every item in order.',
+		},
+		{
+			question: 'What does "%02d".formatted(5) produce?',
+			options: ['5', '05', '5.00'],
+			answer: 1,
+			explanation: 'At least two digits, padded with a leading zero.',
+		},
+	]}
+/>
+
+<MarkComplete />
