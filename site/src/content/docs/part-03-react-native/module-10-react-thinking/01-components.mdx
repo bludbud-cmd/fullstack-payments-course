@@ -1,0 +1,159 @@
+---
+title: "10.1 Components"
+description: "Meet React, write your first component, and run it in the browser with Expo Snack, with nothing to install."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can write a component, use it inside another component, and see it on screen.
+
+## Why it matters
+
+Every screen in the PayDeck app is built from **components**: a card, a button, a row in the activity list, a whole screen. You write each piece once and use it as many times as you like. Learning to see a screen as a tree of small components is the main skill of this Part.
+
+## The idea
+
+**React** is a JavaScript library for building user interfaces. **React Native** is React for phone and desktop apps: instead of web pages, it draws real Android and macOS controls.
+
+A **component** is a function that returns what should appear on screen:
+
+```tsx
+function Greeting() {
+  return <Text>Hello from PayDeck!</Text>;
+}
+```
+
+That `<Text>...</Text>` is not a string and not HTML. It is **JSX**, a way of writing user interface inside TypeScript, and the next lesson is all about it. For now, read it as "a piece of text".
+
+Two rules:
+
+1. A component's name starts with a **capital letter**: `Greeting`, not `greeting`. That is how React tells your components apart from its own building blocks.
+2. You use a component by writing its name like a tag: `<Greeting />`. The `/>` closes a tag that has nothing inside it.
+
+React Native gives you a few basic components to build with. You meet more in Module 11; these two are enough to start:
+
+| Component | What it is |
+| --- | --- |
+| `View` | A box that holds other components, for layout (like a `div` on a web page) |
+| `Text` | Any text on screen. In React Native, every bit of text must be inside a `Text` |
+
+## Worked example
+
+You set up Android Studio and Xcode in Module 11. Until then, use **Expo Snack**, a website that runs React Native code in your browser.
+
+1. Open [snack.expo.dev](https://snack.expo.dev). You do not need an account.
+2. On the left is a list of files, with `App.js` open in the middle. On the right is a preview of the app.
+3. Above the preview, choose **Web**, so the app runs right in the page.
+4. Rename `App.js` to `App.tsx` so you can use TypeScript: right-click it in the file list (or use the menu next to its name) and choose **Rename**.
+5. Delete everything in `App.tsx` and paste this:
+
+```tsx
+import { Text, View } from 'react-native';
+
+function Greeting() {
+  return <Text>Hello from PayDeck!</Text>;
+}
+
+export default function App() {
+  return (
+    <View style={{ padding: 40 }}>
+      <Greeting />
+      <Greeting />
+    </View>
+  );
+}
+```
+
+The preview shows "Hello from PayDeck!" twice. Line by line:
+
+- `import { Text, View } from 'react-native';` loads the two building blocks from the React Native library, the same way you loaded `node:fs` in Module 7.
+- `Greeting` is your component. It returns one `Text`.
+- `App` is the **root** component: the one React Native draws first. `export default` marks it as the main thing this file provides, so Snack (and later your real app) knows where to start.
+- `App` returns a `View` with two `Greeting`s inside it. The `style={{ padding: 40 }}` adds some space around the edges; styling is Module 12.
+
+The parentheses around the JSX after `return` let you spread it over several lines.
+
+<Aside type="tip" title="The tree">
+Components inside components make a **tree**: `App` contains a `View`, which contains two `Greeting`s, which each contain a `Text`. When you look at any app from now on, try to see the tree: which boxes contain which?
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a header and a footer">
+Add two components to your Snack: `Header`, which shows "PayDeck", and `Footer`, which shows "Made by" and your name. Show the header first, then one greeting, then the footer.
+
+<Fragment slot="hint">Write each component as a function that returns a `Text`, then add `<Header />` and `<Footer />` inside the `View` in `App`.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+import { Text, View } from 'react-native';
+
+function Header() {
+  return <Text>PayDeck</Text>;
+}
+
+function Greeting() {
+  return <Text>Hello from PayDeck!</Text>;
+}
+
+function Footer() {
+  return <Text>Made by Asha</Text>;
+}
+
+export default function App() {
+  return (
+    <View style={{ padding: 40 }}>
+      <Header />
+      <Greeting />
+      <Footer />
+    </View>
+  );
+}
+```
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title={`Text strings must be rendered within a <Text> component`}>
+React Native shows this error if you put words straight inside a `View`, like `<View>Hello</View>`. Wrap them: `<View><Text>Hello</Text></View>`.
+</Aside>
+
+<Aside type="caution" title="A lowercase component name">
+`function greeting()` used as `<greeting />` does not work: React thinks lowercase names are built-in tags. Start component names with a capital letter.
+</Aside>
+
+<Aside type="caution" title="Forgetting the import">
+`Text is not defined` or `Can't find variable: Text` means the `import { Text, View } from 'react-native';` line is missing or misspelled.
+</Aside>
+
+## Recap
+
+- A component is a function, named with a capital letter, that returns what to show.
+- Use a component like a tag: `<Greeting />`.
+- `View` is a box; `Text` holds every piece of text.
+- `App` is the root of the tree. Expo Snack runs React Native in the browser until you set up your Mac in Module 11.
+
+<Quiz
+	questions={[
+		{
+			question: 'What is a React component?',
+			options: ['A file of styles', 'A function that returns what should appear on screen', 'A kind of database'],
+			answer: 1,
+			explanation: 'Components are functions that return JSX.',
+		},
+		{
+			question: 'Which of these shows text correctly in React Native?',
+			options: ['<View>Balance</View>', '<Text>Balance</Text>', '"Balance"'],
+			answer: 1,
+			explanation: 'All text must be inside a Text component.',
+		},
+	]}
+/>
+
+<MarkComplete />

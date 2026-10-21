@@ -1,0 +1,125 @@
+---
+title: "Mini-project: counter and like button"
+description: "Build a counter and a reusable like button, then use them in a small feed, to practise components, props and state together."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Put the whole module together in one Snack: components that take props, keep their own state, and are used more than once.
+
+## What it does
+
+```
+Cups of coffee today:
+[ − ]  2  [ + ]
+
+Asha
+Just paid for lunch with my new PayDeck card!
+[ ♡ Like ]  0 likes
+
+Ben
+Froze my card after losing it. Found it in my coat.
+[ ♥ Liked ]  42 likes
+```
+
+## Requirements
+
+1. A `Counter` component with **−** and **+** buttons around a number that starts at 0. It can never go below 0: disable the **−** button at 0 (React Native's `Button` takes a `disabled` prop).
+2. A `LikeButton` component with a prop `initialLikes`. Pressing it switches between "♡ Like" and "♥ Liked", and the count goes up by one when liked and back down when unliked. Show "1 like" but "0 likes" and "2 likes".
+3. A `Post` component with props `author`, `text` and `likes`, which shows the author, the text and a `LikeButton`.
+4. `App` shows the counter, then one `Post` per item in an array of posts. Each post's like button works on its own.
+
+<Exercise title="Check your work">
+Press **−** at 0 (nothing happens), **+** a few times, then like and unlike each post. Liking one post must not change the other.
+
+<Fragment slot="hint">For the like button, you only need **one** piece of state: whether it is liked. The number shown can be worked out from that and `initialLikes`.</Fragment>
+<Fragment slot="hint2">To put buttons and text side by side, give their `View` the style `{ flexDirection: 'row', alignItems: 'center', gap: 12 }`. Module 12 explains it.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+import { useState } from 'react';
+import { Button, Text, View } from 'react-native';
+
+function Counter() {
+  const [count, setCount] = useState(0);
+
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+      <Button title="−" onPress={() => setCount(count - 1)} disabled={count === 0} />
+      <Text>{count}</Text>
+      <Button title="+" onPress={() => setCount(count + 1)} />
+    </View>
+  );
+}
+
+type LikeButtonProps = {
+  initialLikes: number;
+};
+
+function LikeButton({ initialLikes }: LikeButtonProps) {
+  const [liked, setLiked] = useState(false);
+  const likes = liked ? initialLikes + 1 : initialLikes;
+
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+      <Button title={liked ? '♥ Liked' : '♡ Like'} onPress={() => setLiked(!liked)} />
+      <Text>
+        {likes} {likes === 1 ? 'like' : 'likes'}
+      </Text>
+    </View>
+  );
+}
+
+type PostProps = {
+  author: string;
+  text: string;
+  likes: number;
+};
+
+function Post({ author, text, likes }: PostProps) {
+  return (
+    <View style={{ marginBottom: 24 }}>
+      <Text style={{ fontWeight: 'bold' }}>{author}</Text>
+      <Text>{text}</Text>
+      <LikeButton initialLikes={likes} />
+    </View>
+  );
+}
+
+const posts = [
+  { id: 'p1', author: 'Asha', text: 'Just paid for lunch with my new PayDeck card!', likes: 0 },
+  { id: 'p2', author: 'Ben', text: 'Froze my card after losing it. Found it in my coat.', likes: 41 },
+];
+
+export default function App() {
+  return (
+    <View style={{ padding: 40 }}>
+      <Text>Cups of coffee today:</Text>
+      <Counter />
+      <View style={{ height: 24 }} />
+      {posts.map((post) => (
+        <Post key={post.id} author={post.author} text={post.text} likes={post.likes} />
+      ))}
+    </View>
+  );
+}
+```
+
+Things to notice:
+
+- `LikeButton` keeps only `liked` in state and **calculates** `likes`. If it kept the count in state too, the two could get out of step.
+- Each `Post` draws its own `LikeButton`, and each copy has its own state, so the posts do not affect each other.
+- `<View style={{ height: 24 }} />` is an empty box used as a gap.
+</Fragment>
+</Exercise>
+
+<Aside type="tip" title="Save your Snack">
+Snack can save your work to a link (you need an Expo account to keep it). You do not need it again: from Module 11 on, everything runs in a real project on your Mac.
+</Aside>
+
+<MarkComplete />

@@ -1,0 +1,182 @@
+---
+title: "10.3 Props"
+description: "Pass data into a component with props, type them with TypeScript, and give them default values."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can pass data into a component with props, describe the props with a type, and make some of them optional.
+
+## Why it matters
+
+A `Greeting` that always says the same thing is not much use. PayDeck draws many cards, each with its own nickname, last four digits and status, using **one** card component. Props are how each copy gets its own data, the same way parameters let one function work on different values.
+
+## The idea
+
+**Props** (short for properties) are the inputs to a component. You pass them like attributes on a tag:
+
+```tsx
+<CardRow nickname="Everyday" last4="4242" />
+```
+
+The component receives them as one object. You usually **destructure** it in the parameter list, picking out each prop by name (Module 7 showed destructuring for arrays; it works for objects too):
+
+```tsx
+type CardProps = {
+  nickname: string;
+  last4: string;
+  frozen?: boolean;
+};
+
+function CardRow({ nickname, last4, frozen = false }: CardProps) {
+  return (
+    <Text>
+      {nickname} •••• {last4} {frozen ? '(frozen)' : ''}
+    </Text>
+  );
+}
+```
+
+- `type CardProps = { ... }` describes the props, exactly like the interfaces in Module 9. (`type` and `interface` both work here; React code often uses `type`.)
+- `frozen?: boolean` makes `frozen` optional, and `frozen = false` gives it a **default value** for when it is left out.
+- Strings can be passed in quotes: `nickname="Everyday"`. Anything else goes in braces: `limitCents={50000}`, `frozen={true}`. Writing just `frozen` is short for `frozen={true}`.
+
+Props only flow **one way**: from the parent into the child. A component must never change its own props. If something needs to change, that is **state**, the next lesson.
+
+## Worked example
+
+```tsx
+import { Text, View } from 'react-native';
+
+type CardProps = {
+  nickname: string;
+  last4: string;
+  frozen?: boolean;
+};
+
+function CardRow({ nickname, last4, frozen = false }: CardProps) {
+  return (
+    <Text>
+      {nickname} •••• {last4} {frozen ? '(frozen)' : ''}
+    </Text>
+  );
+}
+
+export default function App() {
+  return (
+    <View style={{ padding: 40 }}>
+      <CardRow nickname="Everyday" last4="4242" />
+      <CardRow nickname="Travel" last4="1881" frozen />
+    </View>
+  );
+}
+```
+
+```
+Everyday •••• 4242
+Travel •••• 1881 (frozen)
+```
+
+Now see TypeScript help. Change the first row to `<CardRow nickname="Everyday" />`. Snack underlines it, and hovering shows that `last4` is missing. Try `<CardRow nickname="Everyday" last4={4242} />`: a number is not a string. These are the same errors as Module 9, now on a screen.
+
+<Aside type="tip" title="The real thing">
+Open `app/src/components/PaymentCardView.tsx` in the course repository (you cloned it in Module 3). It takes one prop, `card`, and draws a whole bank card from it. You will build your own version in Module 12.
+</Aside>
+
+### Combining props and lists
+
+Props and `map` work together. With an array of card objects, draw one `CardRow` per card:
+
+```tsx
+const cards = [
+  { id: 'c1', nickname: 'Everyday', last4: '4242', frozen: false },
+  { id: 'c2', nickname: 'Travel', last4: '1881', frozen: true },
+];
+
+{cards.map((card) => (
+  <CardRow key={card.id} nickname={card.nickname} last4={card.last4} frozen={card.frozen} />
+))}
+```
+
+`key` is special: React uses it and does not pass it to your component.
+
+## Try it
+
+<Exercise title="Try it: a transaction row">
+Write a `TransactionRow` component with props `label` (string), `cents` (number) and an optional `pending` (boolean, default `false`). It shows "Coffee −$3.50" for negative amounts and "Top-up +$100.00" for positive ones, followed by "(pending)" when pending. Draw three rows in `App`.
+
+<Fragment slot="hint">`Math.abs(cents)` gives the amount without its sign; choose the sign with `cents < 0 ? '−' : '+'`.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+import { Text, View } from 'react-native';
+
+type TransactionRowProps = {
+  label: string;
+  cents: number;
+  pending?: boolean;
+};
+
+function TransactionRow({ label, cents, pending = false }: TransactionRowProps) {
+  const sign = cents < 0 ? '−' : '+';
+  const amount = (Math.abs(cents) / 100).toFixed(2);
+  return (
+    <Text>
+      {label} {sign}${amount} {pending && '(pending)'}
+    </Text>
+  );
+}
+
+export default function App() {
+  return (
+    <View style={{ padding: 40 }}>
+      <TransactionRow label="Top-up" cents={10000} />
+      <TransactionRow label="Coffee" cents={-350} />
+      <TransactionRow label="Cinema" cents={-950} pending />
+    </View>
+  );
+}
+```
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Quotes around a number">
+`cents="350"` passes the string `"350"`. Numbers, booleans, arrays and objects go in braces: `cents={350}`.
+</Aside>
+
+<Aside type="caution" title="Forgetting the braces in the parameter">
+`function CardRow(nickname, last4)` is wrong: a component receives **one** object of props. Write `function CardRow({ nickname, last4 }: CardProps)`.
+</Aside>
+
+## Recap
+
+- Props pass data from a parent into a child: `<CardRow nickname="Travel" />`.
+- Describe props with a `type`; mark optional ones with `?` and give them defaults.
+- Strings in quotes, everything else in braces.
+- Props flow one way and are read-only inside the component.
+
+<Quiz
+	questions={[
+		{
+			question: 'How do you pass the number 50000 as a prop called limitCents?',
+			options: ['limitCents="50000"', 'limitCents={50000}', 'limitCents=50000'],
+			answer: 1,
+			explanation: 'Anything that is not a plain string goes inside braces.',
+		},
+		{
+			question: 'Can a component change its own props?',
+			options: ['Yes, any time', 'No: props come from the parent and are read-only'],
+			answer: 1,
+			explanation: 'Values that change belong in state.',
+		},
+	]}
+/>
+
+<MarkComplete />

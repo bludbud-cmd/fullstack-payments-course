@@ -1,0 +1,180 @@
+---
+title: "10.5 Hooks: useState and useEffect"
+description: "Run code after a component appears or changes, clean up after it, and learn the rules every hook follows."
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can use `useEffect` to start and stop work such as timers and data loading, control when it runs, and follow the rules of hooks.
+
+## Why it matters
+
+Some work does not fit "take data, return JSX". Loading your balance from the server when a screen opens, ticking a clock every second, listening for live payments: these are **side effects**, things a component does to the world outside it. In PayDeck, the live payment feed (Module 33) is started and stopped by an effect.
+
+## The idea
+
+Functions whose names start with `use` are **hooks**. They let a component plug into React's features. You have used one, `useState`. The second one you need is `useEffect`:
+
+```tsx
+useEffect(() => {
+  // runs after React has drawn the component
+  return () => {
+    // optional: runs to clean up
+  };
+}, [dependencies]);
+```
+
+- The first argument is a function that React calls **after** the component appears on screen.
+- It can return a **cleanup** function. React calls it before running the effect again, and when the component disappears.
+- The second argument is the **dependency array**: the values the effect uses. React runs the effect again only when one of them changes.
+  - `[]` means "only once, when the component first appears".
+  - `[count]` means "when it appears, and whenever `count` changes".
+
+### The rules of hooks
+
+1. Call hooks only at the **top level** of a component: not inside an `if`, a loop, or a nested function.
+2. Call hooks only from components (or from your own hooks, whose names also start with `use`).
+
+React tells hooks apart by the order they are called in, so that order must be the same on every render.
+
+## Worked example
+
+### A ticking clock
+
+```tsx
+import { useEffect, useState } from 'react';
+import { Text, View } from 'react-native';
+
+function Clock() {
+  const [now, setNow] = useState(new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  return <Text>{now.toLocaleTimeString()}</Text>;
+}
+
+export default function App() {
+  return (
+    <View style={{ padding: 40 }}>
+      <Clock />
+    </View>
+  );
+}
+```
+
+- `setInterval(fn, 1000)` (built into JavaScript) calls `fn` every 1000 milliseconds and returns an ID for the timer.
+- The effect starts the timer once (`[]`). Each tick calls `setNow`, which re-renders the clock.
+- The cleanup, `clearInterval(timer)`, stops the timer when `Clock` disappears. Without it, the timer would keep running for ever, trying to update a component that is gone. That is called a **leak**.
+
+### Reacting to a change
+
+```tsx
+function Counter() {
+  const [count, setCount] = useState(0);
+
+  useEffect(() => {
+    console.log(`count is now ${count}`);
+  }, [count]);
+
+  return <Button title={`Count: ${count}`} onPress={() => setCount(count + 1)} />;
+}
+```
+
+Open Snack's log panel (at the bottom of the page) and tap the button: each change logs one line, starting with `count is now 0` when the component appears.
+
+<Aside type="note" title="Loading data">
+The most common effect is loading data when a screen opens: call `fetch` in an effect with `[]`, then `setState` with the result, like the weather lookup in Module 8. You will write it this way once, in Module 14, and then use a library that does it better (TanStack Query, Module 26).
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a countdown">
+Build a component that counts down from 10 to 0, one number per second, and then shows "Lift off!" and stops.
+
+<Fragment slot="hint">Keep `seconds` in state. In an effect that depends on `[seconds]`, use `setTimeout` (runs once after a delay) to set `seconds - 1`, unless `seconds` is already 0. Clean up with `clearTimeout`.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+import { useEffect, useState } from 'react';
+import { Text, View } from 'react-native';
+
+function Countdown() {
+  const [seconds, setSeconds] = useState(10);
+
+  useEffect(() => {
+    if (seconds === 0) {
+      return;
+    }
+    const timer = setTimeout(() => setSeconds(seconds - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [seconds]);
+
+  return <Text>{seconds > 0 ? seconds : 'Lift off!'}</Text>;
+}
+
+export default function App() {
+  return (
+    <View style={{ padding: 40 }}>
+      <Countdown />
+    </View>
+  );
+}
+```
+
+Each change to `seconds` runs the effect again, which schedules the next tick. At 0 the effect returns early, so nothing more is scheduled. The `if` is **inside** the effect, which is allowed; putting the whole `useEffect` inside an `if` would break the rules of hooks.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Forgetting the dependency array">
+With no second argument at all, the effect runs after **every** render. If it also sets state, that causes another render, and another: an endless loop.
+</Aside>
+
+<Aside type="caution" title="Missing a dependency">
+If the effect uses a value, list it in the array. Otherwise the effect keeps seeing the value from the render it was created in, which is called a **stale** value. In Module 11 your editor's linter will warn you about missing dependencies.
+</Aside>
+
+<Aside type="caution" title="Effects that run twice">
+In development, some setups deliberately start, clean up and restart every effect once, to check your cleanup works. If you see an effect's log twice when a screen opens, that is why. Good cleanup makes it harmless.
+</Aside>
+
+## Recap
+
+- Hooks are functions starting with `use`; call them at the top level of a component.
+- `useEffect(fn, deps)` runs `fn` after rendering, and again when a dependency changes.
+- Return a cleanup function to stop timers, connections and listeners.
+- `[]` means "once, when the component appears".
+
+<Quiz
+	questions={[
+		{
+			question: 'When does `useEffect(() => {...}, [])` run?',
+			options: ['After every render', 'Once, after the component first appears', 'Never'],
+			answer: 1,
+			explanation: 'An empty dependency array means there is nothing to watch for changes.',
+		},
+		{
+			question: 'What is the cleanup function for?',
+			options: ['Clearing the screen', 'Stopping work the effect started, such as a timer', 'Deleting state'],
+			answer: 1,
+			explanation: 'React calls it before re-running the effect and when the component disappears.',
+		},
+		{
+			question: 'Which of these breaks the rules of hooks?',
+			options: ['Calling useState at the top of a component', 'Calling useEffect inside an if', 'Using an if inside an effect'],
+			answer: 1,
+			explanation: 'Hooks must be called in the same order on every render, so they cannot be inside conditions.',
+		},
+	]}
+/>
+
+<MarkComplete />

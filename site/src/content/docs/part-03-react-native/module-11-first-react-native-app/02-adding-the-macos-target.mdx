@@ -1,0 +1,156 @@
+---
+title: "11.2 Adding the macOS target"
+description: "Install Xcode and CocoaPods, add macOS to your app with react-native-macos, and run the same code as a Mac app."
+sidebar:
+  order: 2
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson the `HelloMe` app from lesson 11.1 also runs as a real Mac app, from the same code.
+
+## Why it matters
+
+PayDeck runs on Android phones **and** on the Mac. The Mac version is not a web page in a window: it is a native Mac app, with a menu bar and a resizable window. One codebase, two platforms, is the main promise of React Native.
+
+## The idea
+
+React Native itself, from Meta, supports Android and iPhone. **react-native-macos**, from Microsoft, adds the Mac. It is used in Microsoft's own apps, such as Office. You add it to a project with one command, which creates a `macos` folder next to `android`.
+
+Mac apps are built with Apple's **Xcode**. Xcode needs extra libraries for React Native, which it gets through **CocoaPods**, a package manager for Apple projects. (Think of it as npm for the native Mac side.) The libraries it installs are called **pods**.
+
+## Worked example
+
+### 1. Install Xcode
+
+<Steps>
+
+1. Open the **App Store**, search for **Xcode**, and click **Get**. It is a large download (over 10 GB), so this takes a while.
+2. Open Xcode once. Agree to the licence, and when it asks which platforms you want, **macOS** is all you need. Let it finish installing its components, then quit it.
+3. In Terminal, point the command line tools at the Xcode you just installed:
+
+   ```sh
+   sudo xcode-select --switch /Applications/Xcode.app
+   xcodebuild -version
+   ```
+
+   The second line prints `Xcode` and a version number.
+
+</Steps>
+
+### 2. Install CocoaPods
+
+```sh
+brew install cocoapods
+pod --version
+```
+
+### 3. Add macOS to HelloMe
+
+In your `HelloMe` folder:
+
+```sh
+npx react-native-macos-init --version 0.83.0
+```
+
+It installs `react-native-macos` and creates the Mac project:
+
+```
+Installing react-native-macos@0.83.0…
+react-native-macos@0.83.0 successfully installed!
+new macos/Podfile
+new macos/HelloMe-macOS/AppDelegate.swift
+...
+new macos/HelloMe.xcodeproj/project.pbxproj
+```
+
+`--version 0.83.0` picks the react-native-macos release that matches React Native 0.83.
+
+### 4. Install the pods and run
+
+```sh
+cd macos
+pod install
+cd ..
+npx react-native run-macos
+```
+
+`pod install` reads `macos/Podfile` and downloads the pods; it also creates `macos/HelloMe.xcworkspace`, the file Xcode opens from now on. `run-macos` builds the app with Xcode and starts it. The first build takes a few minutes. Then a window titled **HelloMe** opens, showing "Hello from my own app!": the same `App.tsx` as on Android.
+
+Make running it easier by adding an npm script:
+
+```sh
+npm pkg set scripts.macos="react-native run-macos"
+```
+
+From now on, `npm run macos` and `npm run android` both work.
+
+<Aside type="tip" title="Both at once">
+Start the emulator, then run `npm run android` and `npm run macos`. Both apps connect to the same Metro. Save `App.tsx` and watch both update together.
+</Aside>
+
+### 5. Open it in Xcode (optional)
+
+```sh
+open macos/HelloMe.xcworkspace
+```
+
+Xcode shows the native project. Press **▶** (Run) at the top left to build and run from Xcode instead of the terminal. You will rarely need this, but when a Mac build fails, Xcode shows the most detailed errors.
+
+<Aside type="note" title="No Apple account needed">
+Running apps on your own Mac is free. A paid Apple Developer membership is only needed to send Mac push notifications or to give your app to other people, and those are bonus lessons (Modules 34 and 36).
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: resize the window">
+With the Mac app running, drag the window's corner to make it very wide, then very narrow. What happens to the text? Then change the text in `App.tsx` and save, and check both the Mac app and the emulator.
+
+<Fragment slot="hint">Your `View` has `flex: 1`, `justifyContent: 'center'` and `alignItems: 'center'`.</Fragment>
+<Fragment slot="solution">
+The text stays in the middle of the window, whatever its size, because the `View` fills the window (`flex: 1`) and centres its contents. On a phone the screen size is fixed; on a Mac people resize windows all the time, which is why Module 12 teaches layouts that adapt.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="xcode-select: error: tool 'xcodebuild' requires Xcode">
+The command line tools still point at the small developer tools from Module 3. Run `sudo xcode-select --switch /Applications/Xcode.app`.
+</Aside>
+
+<Aside type="caution" title="Unable to find a specification / pod install fails">
+Run `pod repo update` and then `pod install` again. If it still fails, delete `macos/Pods` and `macos/Podfile.lock` and retry.
+</Aside>
+
+<Aside type="caution" title="Opening the .xcodeproj instead of the .xcworkspace">
+After `pod install`, always open `HelloMe.xcworkspace`. The `.xcodeproj` does not know about the pods, so the build fails with missing-module errors.
+</Aside>
+
+## Recap
+
+- Xcode builds Mac apps; CocoaPods installs the native libraries Xcode needs.
+- `npx react-native-macos-init --version 0.83.0` adds a `macos` folder to a React Native project.
+- `pod install` in `macos`, then `npx react-native run-macos` (or `npm run macos`).
+- The same `App.tsx` runs on Android and on the Mac.
+
+<Quiz
+	questions={[
+		{
+			question: 'Who makes react-native-macos?',
+			options: ['Apple', 'Microsoft', 'Google'],
+			answer: 1,
+			explanation: 'Microsoft maintains it and uses it in its own Mac apps.',
+		},
+		{
+			question: 'What does `pod install` do?',
+			options: ['Installs the native libraries the Mac project needs', 'Installs npm packages', 'Builds the Android app'],
+			answer: 0,
+			explanation: 'CocoaPods is the package manager for the native Apple side.',
+		},
+	]}
+/>
+
+<MarkComplete />

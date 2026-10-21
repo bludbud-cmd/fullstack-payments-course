@@ -1,0 +1,196 @@
+---
+title: "11.1 Android Studio and the emulator"
+description: "Install the Android tools on your Mac, start an Android phone emulator, and run your first React Native app on it."
+sidebar:
+  order: 1
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you have Android Studio and an Android emulator on your Mac, and a new React Native app running on it.
+
+## Why it matters
+
+Snack was a playground. Real apps are projects on your computer, built by real tools, and that is how PayDeck is made. This lesson installs the Android half; the next one adds the Mac half. It is the longest setup in the course, and you only do it once.
+
+<Aside type="caution" title="Before you start">
+You need about 30 GB of free disk space, a good internet connection and an hour or two. Most of the time is waiting for downloads. Close other apps, plug in your Mac, and do not worry if a step takes a while.
+</Aside>
+
+## The idea
+
+A React Native app has three parts:
+
+- **Your TypeScript code** (`App.tsx` and friends).
+- **A native project** for each platform: an `android` folder that Android's build tools turn into an Android app, and later a `macos` folder that Xcode turns into a Mac app. These hold a small native "shell" that starts React Native.
+- **Metro**, a program that runs on your Mac while you work. It bundles your TypeScript into one JavaScript file and sends it to the app. When you save a file, Metro sends the change and the app updates in a second.
+
+The **emulator** is a pretend Android phone running in a window on your Mac. It behaves like a real phone, so you can build the whole course without owning one.
+
+## Worked example
+
+### 1. Install Homebrew and Watchman
+
+**Homebrew** is a package manager for macOS: one command to install developer tools. Go to [brew.sh](https://brew.sh), copy the install command from the front page, paste it into Terminal and press Return. It asks for your Mac password (nothing appears as you type; that is normal).
+
+When it finishes, it prints **Next steps** with two or three commands to run. Run them, then check:
+
+```sh
+brew --version
+```
+
+Now install **Watchman**, which Metro uses to notice when you save files, and **Java 17**, which Android's build tools need:
+
+```sh
+brew install watchman
+brew install --cask zulu@17
+```
+
+<Aside type="note" title="Why Java, in a JavaScript course?">
+Android's build tools (a program called **Gradle**) are written in Java. You will install a newer Java for your own Java code in Part 4; Android keeps using this one.
+</Aside>
+
+### 2. Install Android Studio
+
+<Steps>
+
+1. Download Android Studio from [developer.android.com/studio](https://developer.android.com/studio). Pick the Mac version that matches your chip (Apple chip or Intel).
+2. Open the downloaded file and drag Android Studio into Applications. Start it.
+3. The **Setup Wizard** opens. Choose **Standard**, accept the licences (select each one on the left and click **Accept**), and let it download. This takes a while.
+4. On the welcome screen, open **More Actions → SDK Manager**.
+   - On the **SDK Platforms** tab, tick **Show Package Details** at the bottom right. Under **Android 16.0 ("Baklava")**, tick **Android SDK Platform 36** and the **Google APIs** system image for your Mac: **ARM 64 v8a** for an Apple chip, **Intel x86_64 Atom** for an Intel Mac.
+   - On the **SDK Tools** tab, tick **Show Package Details**, and under **Android SDK Build-Tools** tick **36.0.0**.
+   - Click **Apply** and wait for the downloads.
+
+</Steps>
+
+The **SDK** (software development kit) is the set of libraries and tools for building apps for one version of Android. React Native 0.83 builds against Android 16, which is API level 36.
+
+### 3. Tell your terminal where things are
+
+The build tools find Java and the Android SDK through **environment variables**: named settings that every program started from your terminal can read. Open your shell's settings file in VS Code:
+
+```sh
+code ~/.zshrc
+```
+
+Add these lines at the end, and save:
+
+```sh
+export JAVA_HOME=/Library/Java/JavaVirtualMachines/zulu-17.jdk/Contents/Home
+export ANDROID_HOME=$HOME/Library/Android/sdk
+export PATH=$PATH:$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools
+```
+
+`~/.zshrc` runs every time a terminal window opens, so **close your terminal and open a new one**. Check:
+
+```sh
+echo $ANDROID_HOME
+adb --version
+```
+
+The first prints a path ending in `Library/Android/sdk`; the second prints `Android Debug Bridge version ...`. **adb** is the tool your Mac uses to talk to Android devices.
+
+### 4. Create an emulator
+
+In Android Studio's welcome screen, open **More Actions → Virtual Device Manager**, and click **+** (Create Virtual Device):
+
+1. Choose a phone, such as **Pixel 9**, and click **Next**.
+2. Choose the **API 36** system image you downloaded, then **Next** and **Finish**.
+3. Press the **▶** button next to it. A phone appears in a window and starts up.
+
+### 5. Create and run an app
+
+In a new terminal:
+
+```sh
+cd ~/Projects/course
+npx @react-native-community/cli@20 init HelloMe --version 0.83.10 --install-pods false
+```
+
+This downloads the React Native project template and creates a `HelloMe` folder with everything inside. It finishes with "Run instructions for Android". (`--install-pods false` skips a step for iPhone apps, which this course does not build. You can ignore the `ios` folder it creates.)
+
+<Aside type="note" title="Why that exact version?">
+The Mac part of React Native comes from Microsoft, and it follows a few months behind the newest React Native. `0.83.10` is a version both support, and it is the version PayDeck uses, so everything in the course matches what you see.
+</Aside>
+
+With the emulator running:
+
+```sh
+cd HelloMe
+npm run android
+```
+
+The first build takes several minutes, because Gradle downloads its own tools. A second Terminal window opens: that is **Metro**. Then the emulator shows the React Native welcome screen. Your app is running.
+
+### 6. Change something
+
+Open the project with `code .`, open `App.tsx`, delete everything in it and paste:
+
+```tsx
+import { Text, View } from 'react-native';
+
+export default function App() {
+  return (
+    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+      <Text>Hello from my own app!</Text>
+    </View>
+  );
+}
+```
+
+Save. Within a second or two, the emulator shows your text. This is **Fast Refresh**: Metro noticed the change and sent it to the app without rebuilding.
+
+## Try it
+
+<Exercise title="Try it: break it and fix it">
+Make a mistake on purpose: delete the `</View>` line and save. Look at the red error screen in the emulator and at the Metro window. Then put the line back and save.
+
+<Fragment slot="hint">The red screen names the file and line, just like the error messages in Module 2. It goes away by itself when you save a fix.</Fragment>
+<Fragment slot="solution">
+The red screen (called a **RedBox**) shows a syntax error in `App.tsx`, pointing at the line where the `View` should have closed. Saving the fixed file makes it disappear. Errors in your TypeScript never need a full rebuild; only changes in the `android` folder or new native libraries do.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="SDK location not found / ANDROID_HOME not set">
+The terminal you ran the build in started before you edited `~/.zshrc`. Open a new terminal window and run `echo $ANDROID_HOME` to check.
+</Aside>
+
+<Aside type="caution" title="No connected devices / No emulators found">
+Start the emulator from Android Studio's Virtual Device Manager first, wait until you see the phone's home screen, then run `npm run android` again. `adb devices` lists what your Mac can see.
+</Aside>
+
+<Aside type="caution" title="Unsupported class file major version">
+Gradle is running with the wrong Java. Check `echo $JAVA_HOME` ends in `zulu-17.jdk/Contents/Home`, and that you opened a new terminal after editing `~/.zshrc`.
+</Aside>
+
+## Recap
+
+- Homebrew installs developer tools; Watchman and Java 17 are needed for React Native on Android.
+- Android Studio provides the Android SDK and the emulator; `ANDROID_HOME` and `JAVA_HOME` tell the build where they are.
+- `npx @react-native-community/cli@20 init HelloMe --version 0.83.10 --install-pods false` creates a project; `npm run android` builds it and starts Metro.
+- Fast Refresh updates the app when you save; native changes need a rebuild.
+
+<Quiz
+	questions={[
+		{
+			question: 'What does Metro do?',
+			options: ['Draws the emulator', 'Bundles your TypeScript and sends it to the running app', 'Installs Android Studio'],
+			answer: 1,
+			explanation: 'Metro runs on your Mac while you work and keeps the app up to date with your code.',
+		},
+		{
+			question: 'You edited ~/.zshrc but the build still cannot find the Android SDK. What is the first thing to try?',
+			options: ['Reinstall Android Studio', 'Open a new terminal window', 'Restart the emulator'],
+			answer: 1,
+			explanation: '~/.zshrc is only read when a terminal starts.',
+		},
+	]}
+/>
+
+<MarkComplete />

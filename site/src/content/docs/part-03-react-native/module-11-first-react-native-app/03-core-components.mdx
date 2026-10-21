@@ -1,0 +1,169 @@
+---
+title: "11.3 Core components"
+description: "Tour the building blocks React Native gives you: text, images, scrolling, text input, switches, buttons and spinners."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can use React Native's core components to build a simple screen, and check which platform your code is running on.
+
+## Why it matters
+
+Every PayDeck screen is built from about ten building blocks. The amount field on the top-up screen is a `TextInput`; the notification settings are `Switch`es; the card list scrolls. Knowing what each block does, and which props it takes, lets you build almost anything.
+
+## The idea
+
+React Native turns each **core component** into the platform's own control: a `Switch` is a real Android switch on Android and a real Mac switch on the Mac.
+
+| Component | What it is | Props you will use most |
+| --- | --- | --- |
+| `View` | A box for layout | `style` |
+| `Text` | Text | `style`, `numberOfLines` |
+| `Image` | A picture from your project or the internet | `source`, `style` (it needs a width and height), `accessibilityLabel` |
+| `ScrollView` | A box that scrolls when its content is too long | `contentContainerStyle` |
+| `TextInput` | A box to type into | `value`, `onChangeText`, `placeholder`, `keyboardType` |
+| `Switch` | An on/off switch | `value`, `onValueChange` |
+| `Pressable` | Makes anything respond to taps and clicks | `onPress`, `accessibilityRole` |
+| `Button` | A simple ready-made button | `title`, `onPress`, `disabled` |
+| `ActivityIndicator` | A spinning "loading" wheel | `size` |
+
+Two patterns repeat:
+
+- **Controlled inputs.** `TextInput` and `Switch` do not keep their own value. You keep it in state, pass it in as `value`, and update it in `onChangeText` or `onValueChange`. The screen always shows exactly what your state says.
+- **`Platform.OS`** tells you where the code runs: `'android'` or `'macos'`. Use it sparingly, for the few places where the platforms really differ.
+
+## Worked example
+
+Replace `App.tsx` in `HelloMe`:
+
+```tsx
+import { useState } from 'react';
+import {
+  ActivityIndicator,
+  Image,
+  Platform,
+  Pressable,
+  ScrollView,
+  Switch,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
+
+export default function App() {
+  const [name, setName] = useState('');
+  const [notify, setNotify] = useState(true);
+  const [taps, setTaps] = useState(0);
+
+  return (
+    <ScrollView contentContainerStyle={{ padding: 24, gap: 16 }}>
+      <Text>Running on {Platform.OS}</Text>
+      <Image
+        source={{ uri: 'https://reactnative.dev/img/tiny_logo.png' }}
+        style={{ width: 64, height: 64 }}
+        accessibilityLabel="React Native logo"
+      />
+      <TextInput
+        value={name}
+        onChangeText={setName}
+        placeholder="Your name"
+        style={{ borderWidth: 1, padding: 8 }}
+      />
+      <Text>Hello, {name || 'stranger'}!</Text>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+        <Switch value={notify} onValueChange={setNotify} />
+        <Text>Notifications {notify ? 'on' : 'off'}</Text>
+      </View>
+      <Pressable onPress={() => setTaps(taps + 1)} accessibilityRole="button">
+        <Text>Tapped {taps} times</Text>
+      </Pressable>
+      <ActivityIndicator />
+    </ScrollView>
+  );
+}
+```
+
+Run it on both platforms and try each part:
+
+- The first line says `Running on android` in the emulator and `Running on macos` in the Mac app.
+- Type in the box: the greeting changes with every letter. `onChangeText={setName}` passes each new text straight to the state setter. `name || 'stranger'` shows "stranger" while the name is empty.
+- Flip the switch; tap the "Tapped" text.
+- The spinner spins for ever, since nothing turns it off. In Module 26 you will show it only while data loads.
+
+<Aside type="note" title="Images from the internet need a size">
+An image from a web address (`source={{ uri: ... }}`) shows nothing until you give it a `width` and `height`, because React Native cannot know its size before it downloads. Images in your project use `require`, which you will use in the mini-project.
+</Aside>
+
+<Aside type="tip" title="Accessibility from the start">
+`accessibilityLabel` is what a screen reader (TalkBack on Android, VoiceOver on the Mac) says for an image. `accessibilityRole="button"` tells it a `Pressable` is a button. Module 12 covers accessibility properly; get the habit now.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a money field">
+Add a `TextInput` for an amount, with `keyboardType="decimal-pad"` and placeholder "0.00". Below it, show "You typed X cents", where X is the amount × 100, or "Not a number" if `Number(text)` is `NaN`.
+
+<Fragment slot="hint">Keep the text in state. Work out `Number(amount)` while rendering, and check it with `Number.isNaN(...)`.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+const [amount, setAmount] = useState('');
+const value = Number(amount);
+
+// inside the JSX:
+<TextInput
+  value={amount}
+  onChangeText={setAmount}
+  keyboardType="decimal-pad"
+  placeholder="0.00"
+  style={{ borderWidth: 1, padding: 8 }}
+/>
+<Text>
+  {Number.isNaN(value) ? 'Not a number' : `You typed ${Math.round(value * 100)} cents`}
+</Text>
+```
+
+`keyboardType="decimal-pad"` shows a number keyboard on Android; on the Mac you have a full keyboard anyway, which is why the check matters. `Math.round` avoids results such as `1.1 * 100 = 110.00000000000001`. Module 13 does money input properly.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="A TextInput you cannot type in">
+If `value` is set but `onChangeText` does not update that state, every key press is undone straight away. A controlled input needs both.
+</Aside>
+
+<Aside type="caution" title="Long content that does not scroll">
+A `View` never scrolls. If your screen is longer than the window, use a `ScrollView` as the outer component (or a `FlatList` for long lists, Module 13).
+</Aside>
+
+## Recap
+
+- Core components become real native controls on each platform.
+- `TextInput` and `Switch` are **controlled**: value from state, changes through a callback.
+- `Pressable` makes anything tappable; `ScrollView` makes content scroll.
+- `Platform.OS` is `'android'` or `'macos'`.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which component would you use for a long screen of settings that must scroll?',
+			options: ['View', 'ScrollView', 'Text'],
+			answer: 1,
+			explanation: 'Only scrolling components scroll; a View just clips its content.',
+		},
+		{
+			question: 'What does `Platform.OS` return in the Mac app?',
+			options: ["'ios'", "'mac'", "'macos'"],
+			answer: 2,
+			explanation: "react-native-macos reports 'macos'.",
+		},
+	]}
+/>
+
+<MarkComplete />

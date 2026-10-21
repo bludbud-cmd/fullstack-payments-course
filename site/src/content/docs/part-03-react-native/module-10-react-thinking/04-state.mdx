@@ -1,0 +1,169 @@
+---
+title: "10.4 State"
+description: "Make a component remember values that change, react to taps, and redraw itself with useState."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can give a component state with `useState`, change it when a button is pressed, and explain why the screen updates.
+
+## Why it matters
+
+Apps respond to people. Tap **Freeze** and the card turns grey; type an amount and the **Add** button shows it. Each of those is **state**: a value a component remembers, which changes over time. When state changes, React draws the component again with the new value.
+
+## The idea
+
+You might try an ordinary variable:
+
+```tsx
+let count = 0;
+// ...
+<Button title="Tap me" onPress={() => { count = count + 1; }} />
+```
+
+The variable changes, but the screen does not, because React has no idea anything happened. Instead, ask React to remember the value for you with `useState`:
+
+```tsx
+const [count, setCount] = useState(0);
+```
+
+- `useState(0)` creates a piece of state that starts at `0`.
+- It gives back two things, which you destructure: the current value (`count`) and a function to change it (`setCount`).
+- Calling `setCount(5)` stores 5 **and** tells React to call your component function again. This time `useState` returns 5, so the new JSX shows 5.
+
+That second call of the function is called a **re-render**. Your component function runs many times during the life of the app; state is what survives between runs.
+
+To respond to a tap, React Native's `Button` takes an `onPress` prop: a function to call when it is pressed.
+
+## Worked example
+
+```tsx
+import { useState } from 'react';
+import { Button, Text, View } from 'react-native';
+
+export default function App() {
+  const [count, setCount] = useState(0);
+
+  return (
+    <View style={{ padding: 40 }}>
+      <Text>You tapped {count} times</Text>
+      <Button title="Tap me" onPress={() => setCount(count + 1)} />
+      <Button title="Reset" onPress={() => setCount(0)} />
+    </View>
+  );
+}
+```
+
+`useState` comes from `'react'`, not `'react-native'`, because state works the same in every kind of React app.
+
+Tap twice: "You tapped 2 times". What happened on the first tap:
+
+1. You pressed the button, so React Native called `() => setCount(count + 1)`, with `count` being 0.
+2. `setCount(1)` stored 1 and asked React to re-render.
+3. React called `App()` again. This time `useState(0)` returned 1 (the starting value is only used the very first time).
+4. The new JSX says "You tapped 1 times", and React updated the text on screen.
+
+### State for a yes-or-no
+
+```tsx
+function FreezeToggle() {
+  const [frozen, setFrozen] = useState(false);
+
+  return (
+    <View>
+      <Text>Card is {frozen ? 'frozen' : 'active'}</Text>
+      <Button
+        title={frozen ? 'Unfreeze' : 'Freeze'}
+        onPress={() => setFrozen(!frozen)}
+      />
+    </View>
+  );
+}
+```
+
+`!frozen` flips true to false and back. One piece of state drives both the text and the button's title, so they can never disagree.
+
+<Aside type="note" title="Each copy has its own state">
+Draw `<FreezeToggle />` three times and each one remembers its own `frozen`. State belongs to one copy of a component, like local variables belong to one call of a function.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a tip picker">
+Make a component that shows a bill of $40.00 and three buttons, "10%", "15%" and "20%". Pressing one shows "Tip: $6.00" (for 15%) and "Total: $46.00". Before any button is pressed, show "Pick a tip".
+
+<Fragment slot="hint">Keep the chosen percentage in state, starting at `null`: `useState<number | null>(null)`. The `<number | null>` tells TypeScript what the state can hold, because it cannot guess from `null` alone.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+import { useState } from 'react';
+import { Button, Text, View } from 'react-native';
+
+const BILL_CENTS = 4000;
+
+export default function App() {
+  const [percent, setPercent] = useState<number | null>(null);
+
+  return (
+    <View style={{ padding: 40 }}>
+      <Text>Bill: ${(BILL_CENTS / 100).toFixed(2)}</Text>
+      <Button title="10%" onPress={() => setPercent(10)} />
+      <Button title="15%" onPress={() => setPercent(15)} />
+      <Button title="20%" onPress={() => setPercent(20)} />
+      {percent === null ? (
+        <Text>Pick a tip</Text>
+      ) : (
+        <View>
+          <Text>Tip: ${((BILL_CENTS * percent) / 10000).toFixed(2)}</Text>
+          <Text>Total: ${((BILL_CENTS * (100 + percent)) / 10000).toFixed(2)}</Text>
+        </View>
+      )}
+    </View>
+  );
+}
+```
+
+Only the percentage is state. The tip and total are **worked out** from it on every render, so they are always right. Keep state as small as possible and calculate the rest.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Changing state directly">
+`count = count + 1` or `cards.push(newCard)` changes the value without telling React, so the screen does not update. Always call the setter, and for arrays and objects make a **new** one: `setCards([...cards, newCard])`.
+</Aside>
+
+<Aside type="caution" title="onPress={setCount(count + 1)}">
+Without `() =>`, this **calls** `setCount` while drawing the screen, which re-renders, which calls it again: React stops with "Too many re-renders". `onPress` needs a function to call later: `onPress={() => setCount(count + 1)}`.
+</Aside>
+
+## Recap
+
+- State is a value a component remembers between renders: `const [value, setValue] = useState(start)`.
+- Calling the setter stores the new value and re-renders the component.
+- Event props like `onPress` take a function to call later.
+- Never change state directly; keep state small and calculate everything else from it.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why does the screen not update when you change an ordinary `let` variable?',
+			options: ['React does not know it changed, so it does not re-render', 'Variables cannot change', 'Buttons do not work in Snack'],
+			answer: 0,
+			explanation: 'Only calling a state setter tells React to draw the component again.',
+		},
+		{
+			question: 'A component has `const [frozen, setFrozen] = useState(false)`. What happens on the second render?',
+			options: ['frozen is reset to false', 'frozen is whatever was last passed to setFrozen'],
+			answer: 1,
+			explanation: 'The starting value is only used on the first render.',
+		},
+	]}
+/>
+
+<MarkComplete />
