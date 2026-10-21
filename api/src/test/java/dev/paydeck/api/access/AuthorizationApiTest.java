@@ -63,6 +63,8 @@ class AuthorizationApiTest extends ApiTestSupport {
 
         mvc.perform(get("/api/me").with(as(ben)))
                 .andExpect(jsonPath("$.heldCards[0].id").value(card))
+                .andExpect(jsonPath("$.heldCards[0].currency").value("USD"))
+                .andExpect(jsonPath("$.heldCards[0].cardholderId").value(ben.id().toString()))
                 .andExpect(jsonPath("$.accounts", hasSize(0)));
         mvc.perform(get("/api/cards/{id}", card).with(as(ben))).andExpect(status().isOk());
         mvc.perform(get("/api/accounts/{id}", ashas).with(as(ben))).andExpect(status().isNotFound());

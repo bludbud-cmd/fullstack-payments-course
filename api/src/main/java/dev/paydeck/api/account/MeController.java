@@ -45,7 +45,8 @@ public class MeController {
                 .map(account -> AccountResponse.of(account, ledger.balanceOf(account.getId())))
                 .toList();
         List<CardResponse> held = cards.findByCardholderUserIdOrderByCreatedAt(current.id()).stream()
-                .map(CardResponse::of)
+                .map(card -> CardResponse.of(card,
+                        accounts.findById(card.getAccountId()).orElseThrow().getCurrency()))
                 .toList();
         return new MeResponse(user, owned, held);
     }

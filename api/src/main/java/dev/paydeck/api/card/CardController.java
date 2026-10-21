@@ -6,12 +6,15 @@ import java.util.List;
 import java.util.UUID;
 
 import dev.paydeck.api.access.AccessPolicy;
+import dev.paydeck.api.account.Account;
+import dev.paydeck.api.account.AccountRepository;
 import dev.paydeck.api.access.AccountAction;
 import dev.paydeck.api.access.CardAction;
 import dev.paydeck.api.auth.CurrentUser;
 import dev.paydeck.api.auth.User;
 import dev.paydeck.api.auth.UserRepository;
 import dev.paydeck.api.common.BusinessRuleException;
+import dev.paydeck.api.money.SupportedCurrency;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
@@ -47,23 +50,27 @@ public class CardController {
             Boolean removeSpendingLimit) {
     }
 
+    /** {@code currency} is the currency of the account the card spends from. */
     public record CardResponse(
-            UUID id, UUID accountId, String nickname, String last4, CardStatus status,
+            UUID id, UUID accountId, SupportedCurrency currency, String nickname, String last4, CardStatus status,
             Long spendingLimitCents, UUID cardholderId, Instant createdAt) {
 
-        public static CardResponse of(Card card) {
-            return new CardResponse(card.getId(), card.getAccountId(), card.getNickname(), card.getLast4(),
-                    card.getStatus(), card.getSpendingLimitCents(), card.getCardholderUserId(),
+        public static CardResponse of(Card card, SupportedCurrency currency) {
+            return new CardResponse(card.getId(), card.getAccountId(), currency, card.getNickname(),
+                    card.getLast4(), card.getStatus(), card.getSpendingLimitCents(), card.getCardholderUserId(),
                     card.getCreatedAt());
         }
     }
 
     private final CardRepository cards;
+    private final AccountRepository accounts;
     private final UserRepository users;
     private final AccessPolicy access;
 
-    public CardController(CardRepository cards, UserRepository users, AccessPolicy access) {
+    public CardController(CardRepository cards, AccountRepository accounts, UserRepository users,
+                          AccessPolicy access) {
         this.cards = cards;
+        this.accounts = accounts;
         this.users = users;
         this.access = access;
     }
@@ -72,7 +79,7 @@ public class CardController {
     @Transactional
     public ResponseEntity<CardResponse> issue(CurrentUser user, @PathVariable UUID accountId,
                                               @Valid @RequestBody IssueCardRequest request) {
-        access.account(user, accountId, AccountAction.ISSUE_CARD);
+        Account account = access.account(user, accountId, AccountAction.ISSUE_CARD);
         UUID cardholder = null;
         if (request.cardholderEmail() != null && !request.cardholderEmail().isBlank()) {
             UUID found = users.findByEmail(User.normalizeEmail(request.cardholderEmail()))
@@ -83,20 +90,22 @@ public class CardController {
         }
         Card card = cards.save(Card.issue(accountId, request.nickname().strip(), request.spendingLimitCents(),
                 cardholder));
-        return ResponseEntity.created(URI.create("/api/cards/" + card.getId())).body(CardResponse.of(card));
+        return ResponseEntity.created(URI.create("/api/cards/" + card.getId())).body(CardResponse.of(card, account.getCurrency()));
     }
 
     @GetMapping("/api/accounts/{accountId}/cards")
     @Transactional(readOnly = true)
     public List<CardResponse> list(CurrentUser user, @PathVariable UUID accountId) {
-        access.account(user, accountId, AccountAction.VIEW);
-        return cards.findByAccountIdOrderByCreatedAt(accountId).stream().map(CardResponse::of).toList();
+        Account account = access.account(user, accountId, AccountAction.VIEW);
+        return cards.findByAccountIdOrderByCreatedAt(accountId).stream()
+                .map(card -> CardResponse.of(card, account.getCurrency()))
+                .toList();
     }
 
     @GetMapping("/api/cards/{id}")
     @Transactional(readOnly = true)
     public CardResponse get(CurrentUser user, @PathVariable UUID id) {
-        return CardResponse.of(access.card(user, id, CardAction.VIEW));
+        return respond(access.card(user, id, CardAction.VIEW));
     }
 
     @PatchMapping("/api/cards/{id}")
@@ -112,7 +121,7 @@ public class CardController {
         } else if (request.spendingLimitCents() != null) {
             card.setSpendingLimit(request.spendingLimitCents());
         }
-        return CardResponse.of(card);
+        return respond(card);
     }
 
     @PostMapping("/api/cards/{id}/freeze")
@@ -120,7 +129,7 @@ public class CardController {
     public CardResponse freeze(CurrentUser user, @PathVariable UUID id) {
         Card card = access.card(user, id, CardAction.FREEZE);
         card.freeze();
-        return CardResponse.of(card);
+        return respond(card);
     }
 
     @PostMapping("/api/cards/{id}/unfreeze")
@@ -128,7 +137,7 @@ public class CardController {
     public CardResponse unfreeze(CurrentUser user, @PathVariable UUID id) {
         Card card = access.card(user, id, CardAction.UNFREEZE);
         card.unfreeze();
-        return CardResponse.of(card);
+        return respond(card);
     }
 
     @DeleteMapping("/api/cards/{id}")
@@ -136,5 +145,9 @@ public class CardController {
     public ResponseEntity<Void> cancel(CurrentUser user, @PathVariable UUID id) {
         access.card(user, id, CardAction.CANCEL).cancel();
         return ResponseEntity.noContent().build();
+    }
+
+    private CardResponse respond(Card card) {
+        return CardResponse.of(card, accounts.findById(card.getAccountId()).orElseThrow().getCurrency());
     }
 }
