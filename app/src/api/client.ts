@@ -20,10 +20,42 @@ type RequestOptions = {
   idempotencyKey?: string;
 };
 
+/**
+ * How the client gets an access token, and gets a new one when it expires.
+ * The sign-in code (src/auth/AuthContext.tsx) plugs itself in here.
+ */
+export type TokenSource = {
+  accessToken: () => string | null;
+  /** Swaps the refresh token for new tokens. Resolves false if the person must sign in again. */
+  refresh: () => Promise<boolean>;
+};
+
+let tokens: TokenSource | null = null;
+
+export function setTokenSource(source: TokenSource | null) {
+  tokens = source;
+}
+
 export async function request<T>(
   path: string,
   options: RequestOptions = {},
 ): Promise<T> {
+  const token = tokens?.accessToken() ?? null;
+  const response = await send(path, options, token);
+
+  // Access tokens last 15 minutes. When one has expired, get a new one and
+  // try once more, so the person never notices.
+  if (response.status === 401 && token && tokens && (await tokens.refresh())) {
+    return read<T>(await send(path, options, tokens.accessToken()));
+  }
+  return read<T>(response);
+}
+
+async function send(
+  path: string,
+  options: RequestOptions,
+  token: string | null,
+): Promise<Response> {
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (options.body !== undefined) {
     headers['Content-Type'] = 'application/json';
@@ -31,10 +63,11 @@ export async function request<T>(
   if (options.idempotencyKey) {
     headers['Idempotency-Key'] = options.idempotencyKey;
   }
-
-  let response: Response;
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
   try {
-    response = await fetch(API_BASE_URL + path, {
+    return await fetch(API_BASE_URL + path, {
       method: options.method ?? 'GET',
       headers,
       body:
@@ -47,7 +80,9 @@ export async function request<T>(
       'Could not reach PayDeck. Check that the API is running.',
     );
   }
+}
 
+async function read<T>(response: Response): Promise<T> {
   if (response.status === 204) {
     return undefined as T;
   }

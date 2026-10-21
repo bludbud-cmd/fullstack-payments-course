@@ -4,11 +4,9 @@ import { request } from './client';
 
 // One function per API endpoint. Screens never call fetch directly.
 
-export const openAccount = (ownerName: string, currency: Currency) =>
-  request<Account>('/api/accounts', {
-    method: 'POST',
-    body: { ownerName, currency },
-  });
+/** Opens an account for the signed-in person. */
+export const openAccount = (currency: Currency) =>
+  request<Account>('/api/accounts', { method: 'POST', body: { currency } });
 
 export const getAccount = (accountId: string) =>
   request<Account>(`/api/accounts/${accountId}`);
@@ -34,10 +32,11 @@ export const issueCard = (
   accountId: string,
   nickname: string,
   spendingLimitCents: number | null,
+  cardholderEmail: string | null,
 ) =>
   request<Card>(`/api/accounts/${accountId}/cards`, {
     method: 'POST',
-    body: { nickname, spendingLimitCents },
+    body: { nickname, spendingLimitCents, cardholderEmail },
   });
 
 export const updateCard = (

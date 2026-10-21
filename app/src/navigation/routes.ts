@@ -3,6 +3,7 @@ export type Route =
   | { name: 'home' }
   | { name: 'cards' }
   | { name: 'activity' }
+  | { name: 'profile' }
   | { name: 'card'; cardId: string }
   | { name: 'topUp' }
   | { name: 'issueCard' };
@@ -12,6 +13,7 @@ export const tabs = [
   { name: 'home', label: 'Wallet' },
   { name: 'cards', label: 'Cards' },
   { name: 'activity', label: 'Activity' },
+  { name: 'profile', label: 'You' },
 ] as const;
 
 export type TabName = (typeof tabs)[number]['name'];

@@ -1,4 +1,11 @@
-import { ApiError, newIdempotencyKey, request } from '../src/api/client';
+import {
+  ApiError,
+  newIdempotencyKey,
+  request,
+  setTokenSource,
+} from '../src/api/client';
+
+afterEach(() => setTokenSource(null));
 
 const respond = (status: number, body?: unknown) =>
   jest.fn(async () => ({
@@ -71,4 +78,36 @@ it('makes a fresh version 4 UUID each time', () => {
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
   );
   expect(newIdempotencyKey()).not.toBe(a);
+});
+
+it('sends the access token and retries once with a fresh one after a 401', async () => {
+  let token = 'old';
+  setTokenSource({
+    accessToken: () => token,
+    refresh: async () => {
+      token = 'new';
+      return true;
+    },
+  });
+  const fetchMock = jest
+    .fn()
+    .mockResolvedValueOnce({ status: 401, ok: false, json: async () => ({}) })
+    .mockResolvedValueOnce({
+      status: 200,
+      ok: true,
+      json: async () => ({ ok: 1 }),
+    });
+  globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+  await expect(request('/api/me')).resolves.toEqual({ ok: 1 });
+  expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer old');
+  expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer new');
+});
+
+it('gives up when the refresh fails', async () => {
+  setTokenSource({ accessToken: () => 'old', refresh: async () => false });
+  globalThis.fetch = respond(401, {
+    detail: 'Sign in to continue.',
+  }) as unknown as typeof fetch;
+  await expect(request('/api/me')).rejects.toThrow('Sign in to continue.');
 });

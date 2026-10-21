@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
 import { Alert, Text, View } from 'react-native';
 import {
-  useAccount,
   useCancelCard,
   useCards,
   useFreezeCard,
+  useMe,
   useUnfreezeCard,
   useUpdateCard,
 } from '../api/hooks';
@@ -22,34 +22,56 @@ import { limitError, nicknameError, parseLimit } from '../validation';
 
 export function CardDetailScreen({ cardId }: { cardId: string }) {
   const theme = useTheme();
-  const account = useAccount();
+  const me = useMe();
   const cards = useCards();
-  const card = cards.data?.find(c => c.id === cardId);
 
-  if (!account.data || !cards.data) {
+  if (!me.data || !cards.data) {
     return (
       <Screen title="Card" leading={<BackButton />}>
-        <QueryState queries={[account, cards]} />
+        <QueryState queries={[me, cards]} />
       </Screen>
     );
   }
-  if (!card) {
-    return (
-      <Screen title="Card not found" leading={<BackButton />}>
-        <Text style={{ color: theme.muted }}>This card no longer exists.</Text>
-      </Screen>
-    );
+  const own = cards.data.find(c => c.id === cardId);
+  const shared = me.data.heldCards.find(c => c.id === cardId);
+  if (own) {
+    return <CardSettings card={own} />;
   }
-  return <CardSettings card={card} currency={account.data.currency} />;
+  if (shared) {
+    return <SharedCard card={shared} />;
+  }
+  return (
+    <Screen title="Card not found" leading={<BackButton />}>
+      <Text style={{ color: theme.muted }}>This card no longer exists.</Text>
+    </Screen>
+  );
 }
 
-function CardSettings({
-  card,
-  currency,
-}: {
-  card: Card;
-  currency: 'USD' | 'EUR' | 'GBP' | 'INR';
-}) {
+/** A card someone else gave you: you can freeze it if it is lost, and that is all. */
+function SharedCard({ card }: { card: Card }) {
+  const theme = useTheme();
+  const freeze = useFreezeCard();
+  return (
+    <Screen title={card.nickname} leading={<BackButton />}>
+      <PaymentCardView card={card} />
+      <Text style={{ color: theme.muted }}>
+        This card was shared with you. If you lose it, freeze it straight away.
+        Only the account owner can unfreeze, change or cancel it.
+      </Text>
+      {card.status === 'ACTIVE' && (
+        <Button
+          title="Freeze card"
+          variant="secondary"
+          onPress={() => freeze.mutate(card.id)}
+        />
+      )}
+      <ErrorText error={freeze.error} />
+    </Screen>
+  );
+}
+
+/** A card on your own account: everything can be changed. */
+function CardSettings({ card }: { card: Card }) {
   const { goBack } = useNavigation();
   const update = useUpdateCard();
   const freeze = useFreezeCard();
@@ -99,7 +121,7 @@ function CardSettings({
 
   return (
     <Screen title={card.nickname} leading={<BackButton />}>
-      <PaymentCardView card={card} currency={currency} />
+      <PaymentCardView card={card} />
 
       {card.status === 'ACTIVE' && (
         <Button

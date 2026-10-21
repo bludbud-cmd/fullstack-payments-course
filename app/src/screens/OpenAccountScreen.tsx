@@ -1,40 +1,34 @@
+import { useQueryClient } from '@tanstack/react-query';
 import React, { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
+import { keys, useMe } from '../api/hooks';
 import { openAccount } from '../api/paydeck';
+import { useAuth } from '../auth/AuthContext';
 import { Button } from '../components/Button';
 import { ErrorText } from '../components/ErrorText';
-import { Field } from '../components/Field';
 import { Screen } from '../components/Screen';
 import type { Currency } from '../money';
 import { spacing, useTheme } from '../theme';
 
 const CURRENCIES: Currency[] = ['USD', 'EUR', 'GBP', 'INR'];
 
-/** Shown on first launch: opens a PayDeck account for this device. */
-export function WelcomeScreen({
-  onOpened,
-}: {
-  onOpened: (accountId: string) => void;
-}) {
+/** Shown once, right after signing up: pick a currency and open a wallet. */
+export function OpenAccountScreen() {
   const theme = useTheme();
-  const [name, setName] = useState('');
+  const queryClient = useQueryClient();
+  const { signOut } = useAuth();
+  const me = useMe();
   const [currency, setCurrency] = useState<Currency>('USD');
-  const [submitted, setSubmitted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
-  const nameError = name.trim() === '' ? 'Tell us your name' : null;
-
   const open = async () => {
-    setSubmitted(true);
-    if (nameError) {
-      return;
-    }
     setBusy(true);
     setError(null);
     try {
-      const account = await openAccount(name.trim(), currency);
-      onOpened(account.id);
+      await openAccount(currency);
+      // /api/me now lists the account, so the app moves on to the wallet.
+      await queryClient.invalidateQueries({ queryKey: keys.me });
     } catch (e) {
       setError(e as Error);
       setBusy(false);
@@ -43,18 +37,10 @@ export function WelcomeScreen({
 
   return (
     <View style={[styles.root, { backgroundColor: theme.background }]}>
-      <Screen title="Welcome to PayDeck">
+      <Screen title={`Welcome, ${me.data?.user.displayName ?? ''}`}>
         <Text style={{ color: theme.muted }}>
-          Open your account to get started.
+          Pick the currency for your wallet. You cannot change it later.
         </Text>
-        <Field
-          label="Your name"
-          value={name}
-          onChangeText={setName}
-          maxLength={100}
-          error={submitted ? nameError : null}
-        />
-        <Text style={[styles.label, { color: theme.text }]}>Currency</Text>
         <View style={styles.row}>
           {CURRENCIES.map(code => (
             <View key={code} style={styles.choice}>
@@ -68,10 +54,11 @@ export function WelcomeScreen({
         </View>
         <ErrorText error={error} />
         <Button
-          title={busy ? 'Opening…' : 'Open my account'}
+          title={busy ? 'Opening…' : 'Open my wallet'}
           onPress={open}
           disabled={busy}
         />
+        <Button title="Sign out" variant="secondary" onPress={signOut} />
       </Screen>
     </View>
   );
@@ -79,7 +66,6 @@ export function WelcomeScreen({
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
-  label: { fontSize: 14, fontWeight: '600' },
   row: { flexDirection: 'row', gap: spacing.s },
   choice: { flex: 1 },
 });
