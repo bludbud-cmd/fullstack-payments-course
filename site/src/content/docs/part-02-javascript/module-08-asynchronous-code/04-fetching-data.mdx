@@ -1,0 +1,152 @@
+---
+title: "8.4 Fetching data from a public API"
+description: "Call a real web API with fetch, check the response, read its JSON, and handle every way it can fail."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can request data from a real API with `fetch`, and handle its success and failures properly.
+
+## Why it matters
+
+This is the moment everything from Module 1 becomes real: a request goes over the internet to a server's API, and JSON comes back. The PayDeck app does exactly this, dozens of times, with its own API. The code in this lesson is very close to the app's `src/api/client.ts`.
+
+## The idea
+
+`fetch(url)` sends an HTTP request and returns a promise for a **response**. Working with it takes two `await`s:
+
+```js
+const response = await fetch(url);   // 1. wait for the response to start arriving
+const data = await response.json();  // 2. wait for the body, and parse it as JSON
+```
+
+The response object tells you how it went:
+
+- `response.status` is the status code from Module 1: `200`, `404`, `500`…
+- `response.ok` is `true` for any `2xx` status.
+
+There are two different ways a request can fail, and you must handle both:
+
+| Failure | Example | What fetch does |
+| --- | --- | --- |
+| **No response at all** | No internet, wrong address, server down | The promise **rejects**: `await fetch(...)` throws |
+| **An error response** | `404 Not Found`, `500` | The promise **fulfils** with `response.ok` false. It does **not** throw |
+
+That second row surprises everyone once. You have to check `response.ok` yourself.
+
+## Worked example: a GitHub profile
+
+GitHub has a public API you can call without signing in. Create `github.mjs`:
+
+```js
+async function fetchUser(username) {
+  let response;
+  try {
+    response = await fetch(`https://api.github.com/users/${username}`);
+  } catch {
+    throw new Error("Could not reach GitHub. Check your internet connection.");
+  }
+
+  if (response.status === 404) {
+    throw new Error(`There is no GitHub user called ${username}.`);
+  }
+  if (!response.ok) {
+    throw new Error(`GitHub answered ${response.status}. Try again later.`);
+  }
+  return await response.json();
+}
+
+try {
+  const user = await fetchUser("octocat");
+  console.log(`${user.name} (@${user.login})`);
+  console.log(`Public repositories: ${user.public_repos}`);
+  console.log(`Joined: ${new Date(user.created_at).getFullYear()}`);
+} catch (error) {
+  console.log(error.message);
+}
+```
+
+Run `node github.mjs`:
+
+```
+The Octocat (@octocat)
+Public repositories: 8
+Joined: 2011
+```
+
+(The numbers may have changed since this was written.) Line by line:
+
+- The `try` around `fetch` turns "no response at all" into a clear message. `throw new Error(...)` creates an error yourself, which the caller's `catch` receives.
+- Then the response is checked: a `404` gets its own message, and any other non-`2xx` gets a general one.
+- Only a good response is parsed with `.json()`. The result is an ordinary object with properties like `name`, `login` and `public_repos`.
+- `new Date(user.created_at)` turns the date string from the JSON into a `Date`, and `.getFullYear()` reads the year.
+
+Now try `fetchUser("this-user-should-not-exist-123456")`, and turn off your Wi-Fi and try again. Each failure gets a message a person can act on.
+
+<Aside type="tip" title="See the raw JSON">
+Open [api.github.com/users/octocat](https://api.github.com/users/octocat) in your browser. That is exactly the JSON your program received. Looking at the raw response is the first step whenever API code misbehaves.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: newest repositories">
+`https://api.github.com/users/octocat/repos?sort=updated` returns an **array** of repository objects. Print the names of the three most recently updated, one per line.
+
+<Fragment slot="hint">After checking `response.ok`, `await response.json()` gives an array. `.slice(0, 3)` keeps the first three, and each object has a `name`.</Fragment>
+<Fragment slot="solution">
+
+```js
+const response = await fetch("https://api.github.com/users/octocat/repos?sort=updated");
+if (!response.ok) {
+  throw new Error(`GitHub answered ${response.status}`);
+}
+const repos = await response.json();
+for (const repo of repos.slice(0, 3)) {
+  console.log(repo.name);
+}
+```
+
+The part after `?` in the address is the **query string**: extra options for the request, here asking for the newest first.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="It says success, but data is an error message">
+You skipped the `response.ok` check, so you parsed an error response as if it were data. Always check `ok` before `.json()`.
+</Aside>
+
+<Aside type="caution" title="403 rate limit exceeded">
+GitHub allows about 60 requests an hour without signing in. Wait a while. Real apps show a friendly message for this case instead of crashing.
+</Aside>
+
+## Recap
+
+- `await fetch(url)` gives a response; `await response.json()` gives the parsed data.
+- Network failures make `fetch` throw; error statuses do **not**, so check `response.ok`.
+- Turn each failure into a message a person can act on.
+- Look at the raw JSON in a browser when something is off.
+
+<Quiz
+	questions={[
+		{
+			question: 'The server answers 404. What does `await fetch(url)` do?',
+			options: ['Throws an error', 'Gives a response with ok set to false', 'Returns undefined'],
+			answer: 1,
+			explanation: 'fetch only throws when there is no response at all. Error statuses must be checked with response.ok.',
+		},
+		{
+			question: 'Why are there two awaits: one for fetch, one for json()?',
+			options: ['One is a mistake', 'The response arrives first, and its body may still be downloading', 'json() calls the server again'],
+			answer: 1,
+			explanation: 'The status and headers arrive before the body; reading the body is a second wait.',
+		},
+	]}
+/>
+
+<MarkComplete />

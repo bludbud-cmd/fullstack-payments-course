@@ -1,0 +1,142 @@
+---
+title: "8.3 async and await"
+description: "Write asynchronous code that reads top to bottom with async and await, handle errors with try and catch, and run waits in parallel."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can write `async` functions that `await` promises, handle failures with `try`/`catch`, and wait for several things at once.
+
+## Why it matters
+
+`async` and `await` let you write code that waits as if it were ordinary top-to-bottom code. Almost all the networking code in the PayDeck app looks like this: `const cards = await listCards(accountId);`. It is the style you will use from here on.
+
+## The idea
+
+- Put `async` in front of a function to make it an **async function**. It always returns a promise.
+- Inside it, `await somePromise` pauses **that function** until the promise settles, then gives you its value. The rest of the program keeps running in the meantime; only this function waits.
+- If the promise is rejected, `await` **throws** the error, which you catch with `try`/`catch`, the same tool you use for any error.
+
+```js
+async function showBalance() {
+  try {
+    const cents = await fetchBalance("a1");
+    console.log("Balance:", cents);
+  } catch (error) {
+    console.log("Failed:", error.message);
+  }
+}
+```
+
+Compare it with the `then`/`catch` version from the last lesson: same behaviour, but it reads like normal code.
+
+`try { ... } catch (error) { ... }` works for any error, not just from promises: if anything in the `try` block throws, the rest of the block is skipped and the `catch` block runs.
+
+## Worked example
+
+Using `fetchBalance` and `wait` from the last lesson:
+
+```js
+async function main() {
+  console.log("Checking two accounts…");
+
+  try {
+    const first = await fetchBalance("a1");
+    console.log("a1:", first);
+
+    const second = await fetchBalance("nope");
+    console.log("never printed");
+  } catch (error) {
+    console.log("Stopped:", error.message);
+  }
+
+  // Both at once: start both, then wait for both.
+  const [x, y] = await Promise.all([fetchBalance("a1"), fetchBalance("a1")]);
+  console.log("Together:", x + y);
+}
+
+main();
+```
+
+```
+Checking two accounts…
+a1: 124350
+Stopped: Account not found
+Together: 248700
+```
+
+- The second `await` throws, so `never printed` never prints, and the `catch` runs.
+- `Promise.all([...])` takes an array of promises and gives one promise for the array of all their values. Both requests run **at the same time**, so it takes 0.5 seconds rather than 1. Use it when the waits do not depend on each other.
+
+### Where you can use await
+
+- Inside an `async` function.
+- At the top level of a `.mjs` file, as in the Module 5 guessing game. (That is why it had to be `.mjs`.)
+
+## Try it
+
+<Exercise title="Try it: retry once">
+Write `async function balanceWithRetry(accountId)` that calls `fetchBalance`, and if it fails, waits one second and tries **once** more. If the second try also fails, the error should reach the caller.
+
+<Fragment slot="hint">Put the first attempt in a `try`. In the `catch`, `await wait(1000)`, then `return await fetchBalance(accountId)` without a `try` around it, so its error is not caught here.</Fragment>
+<Fragment slot="solution">
+
+```js
+async function balanceWithRetry(accountId) {
+  try {
+    return await fetchBalance(accountId);
+  } catch {
+    await wait(1000);
+    return await fetchBalance(accountId);
+  }
+}
+
+balanceWithRetry("zz")
+  .then((cents) => console.log(cents))
+  .catch((error) => console.log("Gave up:", error.message));
+```
+
+After about 1.5 seconds it prints `Gave up: Account not found`. `catch` without `(error)` is allowed when you do not need the error. Retrying is useful for a dropped connection, but only for requests that are safe to send twice: PayDeck sends an **idempotency key** with every top-up so that a retry can never add the money twice. You will build that in Module 24.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="SyntaxError: await is only valid in async functions">
+Add `async` before the function that contains the `await`, or use a `.mjs` file for top-level `await`.
+</Aside>
+
+<Aside type="caution" title="A forgotten await">
+`const cents = fetchBalance("a1");` without `await` gives you the **promise**, not the number. If a value prints as `Promise { <pending> }`, look for a missing `await`.
+</Aside>
+
+## Recap
+
+- An `async` function returns a promise; inside it, `await` waits for a promise and gives its value.
+- A rejected promise makes `await` throw; handle it with `try`/`catch`.
+- `Promise.all` waits for several independent promises at once.
+- Use `await` inside `async` functions, or at the top of `.mjs` files.
+
+<Quiz
+	questions={[
+		{
+			question: 'What does an async function always return?',
+			options: ['undefined', 'A promise', 'The value of its last line'],
+			answer: 1,
+			explanation: 'Even `return 5` in an async function gives a promise that fulfils with 5.',
+		},
+		{
+			question: 'Two requests do not depend on each other. How do you make them faster?',
+			options: ['await one, then the other', 'Promise.all with both', 'Use setTimeout'],
+			answer: 1,
+			explanation: 'Promise.all runs them at the same time and waits for both.',
+		},
+	]}
+/>
+
+<MarkComplete />
