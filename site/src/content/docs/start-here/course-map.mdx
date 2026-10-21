@@ -1,0 +1,24 @@
+---
+title: Course map
+description: All 10 parts and 37 modules, in the order you take them.
+sidebar:
+  order: 4
+---
+
+import { parts } from '../../../data/curriculum.mjs';
+
+The course has two tracks that meet in the middle. First you build the app's screens with sample data (Parts 2 and 3). Then you learn Java and build the backend (Parts 4 to 6). In Part 7 you connect the two, and after that you add security, payments, live updates and push notifications.
+
+{parts.map((part) => (
+	<section>
+		<h2 id={part.dir}>Part {part.n}: {part.title}</h2>
+		<p>{part.summary}</p>
+		<ol start={part.modules[0].n}>
+			{part.modules.map((module) => (
+				<li>
+					<a href={`../../${part.dir}/${module.dir}/`}>{module.title}</a>. Mini-project: {module.project}.
+				</li>
+			))}
+		</ol>
+	</section>
+))}

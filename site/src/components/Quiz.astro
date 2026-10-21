@@ -1,0 +1,74 @@
+---
+// A checkpoint quiz. Every answer explains why it is right or wrong.
+//
+// <Quiz questions={[
+//   {
+//     question: 'Where does the database live?',
+//     options: ['On the phone', 'On the server'],
+//     answer: 1,
+//     explanation: 'The app asks the server, and the server talks to the database.',
+//   },
+// ]} />
+interface Question {
+	question: string;
+	options: string[];
+	answer: number;
+	explanation: string;
+}
+
+interface Props {
+	title?: string;
+	questions: Question[];
+}
+
+const { title = 'Checkpoint quiz', questions } = Astro.props;
+const quizId = `quiz-${Math.random().toString(36).slice(2, 8)}`;
+---
+
+<section class="quiz" data-quiz>
+	<h3>{title}</h3>
+	{
+		questions.map((q, i) => (
+			<fieldset data-answer={q.answer} data-explanation={q.explanation}>
+				<legend>
+					{i + 1}. {q.question}
+				</legend>
+				{q.options.map((option, j) => (
+					<label>
+						<input type="radio" name={`${quizId}-${i}`} value={j} /> {option}
+					</label>
+				))}
+				<p class="quiz__feedback" hidden aria-live="polite" />
+			</fieldset>
+		))
+	}
+	<button type="button" data-quiz-check>Check my answers</button>
+	<p data-quiz-score aria-live="polite"></p>
+</section>
+
+<script>
+	document.querySelectorAll<HTMLElement>('[data-quiz]').forEach((quiz) => {
+		const button = quiz.querySelector<HTMLButtonElement>('[data-quiz-check]');
+		const score = quiz.querySelector<HTMLElement>('[data-quiz-score]');
+		button?.addEventListener('click', () => {
+			let right = 0;
+			const sets = quiz.querySelectorAll<HTMLFieldSetElement>('fieldset');
+			sets.forEach((set) => {
+				const picked = set.querySelector<HTMLInputElement>('input:checked');
+				const feedback = set.querySelector<HTMLElement>('.quiz__feedback');
+				if (!feedback) return;
+				feedback.hidden = false;
+				if (!picked) {
+					feedback.dataset.correct = 'false';
+					feedback.textContent = 'Pick an answer first.';
+					return;
+				}
+				const correct = Number(picked.value) === Number(set.dataset.answer);
+				if (correct) right++;
+				feedback.dataset.correct = String(correct);
+				feedback.textContent = `${correct ? 'Correct.' : 'Not quite.'} ${set.dataset.explanation ?? ''}`;
+			});
+			if (score) score.textContent = `You got ${right} out of ${sets.length}.`;
+		});
+	});
+</script>

@@ -1,0 +1,48 @@
+---
+// A hands-on task. Hints and the solution stay hidden until the learner opens them.
+//
+// <Exercise title="Make it greet you">
+//   Change the program so it prints your name.
+//   <Fragment slot="hint">Look at the text inside the quotes.</Fragment>
+//   <Fragment slot="solution">```js
+//   console.log('Hello, Sam!');
+//   ```</Fragment>
+// </Exercise>
+interface Props {
+	title?: string;
+}
+
+const { title = 'Try it' } = Astro.props;
+const hasHint = Astro.slots.has('hint');
+const hasSecondHint = Astro.slots.has('hint2');
+const hasSolution = Astro.slots.has('solution');
+---
+
+<section class="exercise">
+	<p class="exercise__title">{title}</p>
+	<slot />
+	{
+		hasHint && (
+			<details>
+				<summary>Hint</summary>
+				<slot name="hint" />
+			</details>
+		)
+	}
+	{
+		hasSecondHint && (
+			<details>
+				<summary>Another hint</summary>
+				<slot name="hint2" />
+			</details>
+		)
+	}
+	{
+		hasSolution && (
+			<details>
+				<summary>Show the solution</summary>
+				<slot name="solution" />
+			</details>
+		)
+	}
+</section>

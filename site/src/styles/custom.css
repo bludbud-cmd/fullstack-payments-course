@@ -1,0 +1,92 @@
+/* Lessons the learner has marked as finished get a check mark in the sidebar. */
+nav.sidebar a.is-done::after {
+	content: '✓';
+	margin-inline-start: 0.4rem;
+	color: var(--sl-color-green);
+	font-weight: 600;
+}
+
+.complete-button {
+	display: inline-block;
+	margin-block: 2rem 0.5rem;
+	padding: 0.6rem 1.1rem;
+	border: 1px solid var(--sl-color-accent);
+	border-radius: 0.5rem;
+	background: transparent;
+	color: var(--sl-color-text);
+	font: inherit;
+	cursor: pointer;
+}
+.complete-button[aria-pressed='true'] {
+	background: var(--sl-color-accent-low);
+	border-color: var(--sl-color-green);
+}
+
+/* Exercises */
+.exercise {
+	border: 1px solid var(--sl-color-gray-5);
+	border-inline-start: 4px solid var(--sl-color-accent);
+	border-radius: 0.5rem;
+	padding: 1rem 1.25rem;
+	margin-block: 1.5rem;
+}
+.exercise > .exercise__title {
+	margin: 0 0 0.5rem;
+	font-weight: 600;
+	font-size: var(--sl-text-lg);
+}
+.exercise details {
+	margin-top: 0.75rem;
+	border-top: 1px dashed var(--sl-color-gray-5);
+	padding-top: 0.5rem;
+}
+.exercise summary {
+	cursor: pointer;
+	font-weight: 600;
+}
+
+/* Quizzes */
+.quiz {
+	border: 1px solid var(--sl-color-gray-5);
+	border-radius: 0.5rem;
+	padding: 1rem 1.25rem;
+	margin-block: 1.5rem;
+}
+.quiz fieldset {
+	border: 0;
+	padding: 0;
+	margin: 0 0 1.25rem;
+}
+.quiz legend {
+	font-weight: 600;
+	margin-bottom: 0.5rem;
+}
+.quiz label {
+	display: block;
+	padding: 0.35rem 0.5rem;
+	border-radius: 0.375rem;
+	cursor: pointer;
+}
+.quiz label:hover {
+	background: var(--sl-color-gray-6);
+}
+.quiz .quiz__feedback {
+	margin-top: 0.5rem;
+	padding: 0.5rem 0.75rem;
+	border-radius: 0.375rem;
+}
+.quiz .quiz__feedback[data-correct='true'] {
+	background: color-mix(in srgb, var(--sl-color-green) 15%, transparent);
+}
+.quiz .quiz__feedback[data-correct='false'] {
+	background: color-mix(in srgb, var(--sl-color-red) 15%, transparent);
+}
+.quiz button {
+	padding: 0.5rem 1rem;
+	border-radius: 0.5rem;
+	border: 1px solid var(--sl-color-accent);
+	background: var(--sl-color-accent);
+	color: var(--sl-color-black);
+	font: inherit;
+	cursor: pointer;
+}

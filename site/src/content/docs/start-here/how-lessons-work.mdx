@@ -1,0 +1,63 @@
+---
+title: How lessons work
+description: The shape every lesson follows, plus exercises, quizzes and progress tracking.
+sidebar:
+  order: 3
+---
+
+import Exercise from '../../../components/Exercise.astro';
+import Quiz from '../../../components/Quiz.astro';
+import MarkComplete from '../../../components/MarkComplete.astro';
+
+Every lesson follows the same shape, so you always know where you are.
+
+1. **Goal.** One sentence about what you will be able to do after the lesson.
+2. **Why it matters.** Where this shows up in a real app, usually in PayDeck.
+3. **The idea.** A plain-language explanation, often with an everyday comparison.
+4. **Worked example.** Real code, explained line by line. Type it yourself instead of copying it, because typing is how it sticks.
+5. **Try it.** An exercise for you to do.
+6. **Common mistakes.** The errors beginners usually hit, and what they mean.
+7. **Recap.** A few points to come back to later.
+
+## Exercises
+
+Exercises look like the one below. Try the task on your own first. If you get stuck, open one hint at a time. Only open the solution once you have had a real go.
+
+<Exercise title="Try it: find the button">
+Scroll to the bottom of this page and find the button that marks this lesson as finished.
+
+<Fragment slot="hint">It is the last thing on the page, below the quiz.</Fragment>
+<Fragment slot="solution">It says **Mark this lesson as finished**. Click it, and a check mark appears next to this page in the sidebar.</Fragment>
+</Exercise>
+
+## Quizzes
+
+Every module ends with a short quiz. Each answer explains why it is right or wrong, so a wrong answer still teaches you something. Here is a practice one.
+
+<Quiz
+	title="Practice quiz"
+	questions={[
+		{
+			question: 'You are stuck on an exercise. What should you do first?',
+			options: [
+				'Open the solution straight away',
+				'Re-read the task, then open one hint',
+				'Skip to the next module',
+			],
+			answer: 1,
+			explanation: 'Hints nudge you forward while you still do the thinking, and the thinking is how you learn.',
+		},
+		{
+			question: 'Where is your progress saved?',
+			options: ['On a server', 'In this browser on this computer'],
+			answer: 1,
+			explanation: 'Progress is stored only in your browser. Use the same browser to keep your check marks.',
+		},
+	]}
+/>
+
+## Tracking your progress
+
+At the end of each lesson, click **Mark this lesson as finished**. A check mark appears in the sidebar, and your [progress page](../../reference/your-progress/) lists everything you have finished.
+
+<MarkComplete />
