@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { Alert, Text, View } from 'react-native';
+import { Alert, StyleSheet, Text, View } from 'react-native';
 import {
   useCancelCard,
+  useCardPayments,
   useCards,
   useFreezeCard,
   useMe,
@@ -19,6 +20,7 @@ import { useNavigation } from '../navigation/NavigationContext';
 import type { Card } from '../types';
 import { spacing, useTheme } from '../theme';
 import { limitError, nicknameError, parseLimit } from '../validation';
+import { formatMoney } from '../money';
 
 export function CardDetailScreen({ cardId }: { cardId: string }) {
   const theme = useTheme();
@@ -58,6 +60,7 @@ function SharedCard({ card }: { card: Card }) {
         This card was shared with you. If you lose it, freeze it straight away.
         Only the account owner can unfreeze, change or cancel it.
       </Text>
+      <PayAndPayments card={card} />
       {card.status === 'ACTIVE' && (
         <Button
           title="Freeze card"
@@ -122,6 +125,7 @@ function CardSettings({ card }: { card: Card }) {
   return (
     <Screen title={card.nickname} leading={<BackButton />}>
       <PaymentCardView card={card} />
+      <PayAndPayments card={card} />
 
       {card.status === 'ACTIVE' && (
         <Button
@@ -174,3 +178,54 @@ function CardSettings({ card }: { card: Card }) {
     </Screen>
   );
 }
+
+/** A button to try the card at a pretend shop, and the card's last few payments. */
+function PayAndPayments({ card }: { card: Card }) {
+  const theme = useTheme();
+  const { navigate } = useNavigation();
+  const payments = useCardPayments(card.id);
+  const recent = payments.data?.slice(0, 5) ?? [];
+  return (
+    <View style={{ gap: spacing.s }}>
+      {card.status !== 'CANCELLED' && (
+        <Button
+          title="Pay a shop"
+          onPress={() => navigate({ name: 'pay', cardId: card.id })}
+        />
+      )}
+      {recent.length > 0 && (
+        <Text style={[styles.heading, { color: theme.text }]}>
+          Recent payments
+        </Text>
+      )}
+      {recent.map(payment => (
+        <View key={payment.id} style={styles.payment}>
+          <View style={styles.paymentText}>
+            <Text style={{ color: theme.text }}>{payment.merchant}</Text>
+            {payment.status === 'DECLINED' && (
+              <Text style={{ color: theme.negative }}>
+                Declined: {payment.declineMessage}
+              </Text>
+            )}
+            {payment.status === 'REFUNDED' && (
+              <Text style={{ color: theme.muted }}>Refunded</Text>
+            )}
+          </View>
+          <Text
+            style={{
+              color: payment.status === 'APPROVED' ? theme.text : theme.muted,
+            }}
+          >
+            {formatMoney(payment.amountCents, card.currency)}
+          </Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  heading: { fontSize: 17, fontWeight: '700', marginTop: spacing.s },
+  payment: { flexDirection: 'row', alignItems: 'center', gap: spacing.m },
+  paymentText: { flex: 1, gap: 2 },
+});

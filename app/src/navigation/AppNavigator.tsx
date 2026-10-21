@@ -15,6 +15,7 @@ import { CardDetailScreen } from '../screens/CardDetailScreen';
 import { CardsScreen } from '../screens/CardsScreen';
 import { HomeScreen } from '../screens/HomeScreen';
 import { IssueCardScreen } from '../screens/IssueCardScreen';
+import { PayScreen } from '../screens/PayScreen';
 import { ProfileScreen } from '../screens/ProfileScreen';
 import { TopUpScreen } from '../screens/TopUpScreen';
 import { spacing, useTheme } from '../theme';
@@ -45,6 +46,8 @@ function renderScreen(route: Route) {
       return <ProfileScreen />;
     case 'card':
       return <CardDetailScreen cardId={route.cardId} />;
+    case 'pay':
+      return <PayScreen cardId={route.cardId} />;
     case 'topUp':
       return <TopUpScreen />;
     case 'issueCard':

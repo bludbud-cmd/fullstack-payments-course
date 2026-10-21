@@ -1,5 +1,12 @@
 /* eslint-env jest */
-import type { Account, Activity, Card, User } from '../src/types';
+import type {
+  Account,
+  Activity,
+  Card,
+  CardPayment,
+  NotificationSettings,
+  User,
+} from '../src/types';
 
 type Call = {
   method: string;
@@ -22,6 +29,9 @@ export function installFakeApi() {
   const accessTokens = new Map<string, string>(); // token -> user ID
   const refreshTokens = new Map<string, string>();
   const loginCodes = new Map<string, string>();
+  const payments = new Map<string, CardPayment[]>(); // card ID -> newest first
+  const notifications = new Map<string, NotificationSettings>();
+  const devices = new Map<string, string>(); // push token -> user ID
   const calls: Call[] = [];
   let nextId = 1;
   const id = () =>
@@ -103,6 +113,44 @@ export function installFakeApi() {
     return card;
   }
 
+  /** The same rules as the real API, checked in the same order. */
+  function payWith(card: Card, amountCents: number, merchant: string) {
+    const account = accounts.get(card.accountId)!;
+    const [declineReason, declineMessage] =
+      card.status === 'FROZEN'
+        ? ['CARD_FROZEN', 'This card is frozen.']
+        : card.status === 'CANCELLED'
+        ? ['CARD_CANCELLED', 'This card has been cancelled.']
+        : card.spendingLimitCents != null &&
+          amountCents > card.spendingLimitCents
+        ? ['OVER_LIMIT', 'This is more than the card’s spending limit.']
+        : amountCents > account.balanceCents
+        ? ['INSUFFICIENT_FUNDS', 'There is not enough money in the wallet.']
+        : [null, null];
+    const payment: CardPayment = {
+      id: id(),
+      cardId: card.id,
+      merchant,
+      amountCents,
+      status: declineReason ? 'DECLINED' : 'APPROVED',
+      declineReason: declineReason as CardPayment['declineReason'],
+      declineMessage,
+      createdAt: now(),
+    };
+    if (!declineReason) {
+      account.balanceCents -= amountCents;
+      activity.get(account.id)!.unshift({
+        transactionId: id(),
+        type: 'CARD_PAYMENT',
+        description: merchant,
+        amountCents: -amountCents,
+        createdAt: now(),
+      });
+    }
+    payments.set(card.id, [payment, ...(payments.get(card.id) ?? [])]);
+    return payment;
+  }
+
   const accountView = ({
     ownerId: _owner,
     ...account
@@ -181,6 +229,23 @@ export function installFakeApi() {
         heldCards: [...cards.values()].filter(c => c.cardholderId === userId),
       });
     }
+    if (path === '/api/me/notifications') {
+      if (method === 'PUT') {
+        notifications.set(userId, body);
+      }
+      return reply(
+        200,
+        notifications.get(userId) ?? { payments: true, declines: true },
+      );
+    }
+    if (method === 'POST' && path === '/api/devices') {
+      devices.set(body.token, userId);
+      return reply(204);
+    }
+    if (method === 'POST' && path === '/api/devices/unregister') {
+      devices.delete(body.token);
+      return reply(204);
+    }
     if (method === 'POST' && path === '/api/accounts') {
       return reply(201, accountView(openAccount(userId, body.currency)));
     }
@@ -207,6 +272,12 @@ export function installFakeApi() {
         createdAt: now(),
       });
       return reply(201, { transactionId: id() });
+    }
+    if ((match = path.match(/^\/api\/accounts\/([^/]+)\/top-ups\/checkout$/))) {
+      return reply(201, {
+        checkoutId: 'cs_test_1',
+        url: 'https://checkout.stripe.com/c/pay/cs_test_1',
+      });
     }
     if ((match = path.match(/^\/api\/accounts\/([^/]+)\/cards$/))) {
       if (method === 'GET') {
@@ -241,6 +312,11 @@ export function installFakeApi() {
         return problem(404, 'Card not found');
       }
       const action = path.split('/')[4] ?? method;
+      if (action === 'payments') {
+        return method === 'GET'
+          ? reply(200, payments.get(card.id) ?? [])
+          : reply(201, payWith(card, body.amountCents, body.merchant));
+      }
       if (!isOwner && action !== 'freeze' && action !== 'GET') {
         return problem(
           403,
@@ -342,6 +418,22 @@ export function installFakeApi() {
     /** Every access token stops working, as if 15 minutes had passed. */
     expireAccessTokens() {
       accessTokens.clear();
+    },
+    /** Money arrives from somewhere else, such as a Stripe payment. */
+    seedTopUp(accountId: string, amountCents: number) {
+      accounts.get(accountId)!.balanceCents += amountCents;
+      activity.get(accountId)!.unshift({
+        transactionId: id(),
+        type: 'TOP_UP',
+        description: 'Card top-up',
+        amountCents,
+        createdAt: now(),
+      });
+    },
+    /** Push tokens the API would send notifications to, and whose they are. */
+    devices,
+    notificationSettingsFor(userId: string) {
+      return notifications.get(userId);
     },
     isRefreshTokenValid(token: string) {
       return refreshTokens.has(token);

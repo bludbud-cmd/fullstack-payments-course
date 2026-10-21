@@ -73,3 +73,6 @@ yarn-error.log
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+# Firebase settings for your own project (Module 34). Each learner makes their own.
+android/app/google-services.json

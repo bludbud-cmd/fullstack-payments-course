@@ -36,7 +36,7 @@ export type Card = {
   createdAt: string;
 };
 
-export type TransactionType = 'TOP_UP' | 'TRANSFER';
+export type TransactionType = 'TOP_UP' | 'TRANSFER' | 'CARD_PAYMENT' | 'REFUND';
 
 export type Activity = {
   transactionId: string;
@@ -44,4 +44,42 @@ export type Activity = {
   description: string;
   amountCents: number;
   createdAt: string;
+};
+
+export type DeclineReason =
+  | 'CARD_FROZEN'
+  | 'CARD_CANCELLED'
+  | 'OVER_LIMIT'
+  | 'INSUFFICIENT_FUNDS';
+
+/** One attempt to pay a shop with a card. */
+export type CardPayment = {
+  id: string;
+  cardId: string;
+  merchant: string;
+  amountCents: number;
+  status: 'APPROVED' | 'DECLINED' | 'REFUNDED';
+  declineReason: DeclineReason | null;
+  /** Why it was declined, in words for people. */
+  declineMessage: string | null;
+  createdAt: string;
+};
+
+export type NotificationSettings = { payments: boolean; declines: boolean };
+
+/** What the API sends over the WebSocket when something happens. */
+export type LiveMessage = {
+  accountId: string;
+  kind:
+    | 'MONEY_IN'
+    | 'MONEY_OUT'
+    | 'CARD_PAYMENT'
+    | 'CARD_DECLINED'
+    | 'REFUND'
+    | 'CARD_UPDATED';
+  title: string;
+  body: string;
+  cardId: string | null;
+  balanceCents: number;
+  at: string;
 };

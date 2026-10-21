@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAccountId } from '../state/AccountContext';
 import { getMe } from './auth';
 import * as api from './paydeck';
+import * as payments from './payments';
 
 // TanStack Query fetches data, caches it, and refetches it when it may have
 // changed. Each "key" names one piece of cached data.
@@ -104,3 +105,45 @@ export const useUpdateCard = () =>
 export const useFreezeCard = () => useCardMutation(api.freezeCard);
 export const useUnfreezeCard = () => useCardMutation(api.unfreezeCard);
 export const useCancelCard = () => useCardMutation(api.cancelCard);
+
+export function useCardPayments(cardId: string) {
+  return useQuery({
+    queryKey: ['cardPayments', cardId],
+    queryFn: () => payments.listCardPayments(cardId),
+  });
+}
+
+export function usePayWithCard(cardId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      amountCents: number;
+      merchant: string;
+      idempotencyKey: string;
+    }) =>
+      payments.payWithCard(
+        cardId,
+        input.amountCents,
+        input.merchant,
+        input.idempotencyKey,
+      ),
+    // Money may have left a wallet: refresh everything that shows it.
+    onSuccess: () => queryClient.invalidateQueries(),
+  });
+}
+
+export function useNotificationSettings() {
+  return useQuery({
+    queryKey: ['notificationSettings'],
+    queryFn: payments.getNotificationSettings,
+  });
+}
+
+export function useSetNotificationSettings() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: payments.setNotificationSettings,
+    onSuccess: saved =>
+      queryClient.setQueryData(['notificationSettings'], saved),
+  });
+}

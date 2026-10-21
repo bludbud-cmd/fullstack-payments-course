@@ -14,7 +14,7 @@ export class ApiError extends Error {
 }
 
 type RequestOptions = {
-  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   body?: unknown;
   /** Send the same key again when retrying, so money never moves twice. */
   idempotencyKey?: string;
@@ -35,6 +35,12 @@ let tokens: TokenSource | null = null;
 export function setTokenSource(source: TokenSource | null) {
   tokens = source;
 }
+
+/** The current access token, for the live-updates connection (src/live). */
+export const currentAccessToken = () => tokens?.accessToken() ?? null;
+
+/** Gets fresh tokens. Resolves false if the person must sign in again. */
+export const refreshTokens = () => tokens?.refresh() ?? Promise.resolve(false);
 
 export async function request<T>(
   path: string,

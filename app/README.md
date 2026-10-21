@@ -2,7 +2,7 @@
 
 The PayDeck app learners build in the course, written in React Native with TypeScript. One codebase runs on **Android** and on **macOS** (through Microsoft's [react-native-macos](https://github.com/microsoft/react-native-macos)).
 
-This is the app as it stands at the end of **Part 8**: people sign up or sign in (with a password or with Google), and every screen talks to the PayDeck API in [`../api`](../api) on their behalf.
+This is the app as it stands at the end of **Part 9**: people sign up or sign in (with a password or with Google), top up with a real (test mode) card through Stripe, pay pretend shops with their PayDeck cards, and see every change the moment it happens, with a live banner and, on Android, push notifications.
 
 ## Screens
 
@@ -11,12 +11,13 @@ This is the app as it stands at the end of **Part 8**: people sign up or sign in
 | Sign in | Sign in, create an account, or continue with Google | 28, 29 |
 | Open your wallet | Pick a currency, right after signing up | 26, 28 |
 | Wallet | Balance, number of active cards, recent activity | 10, 12, 26 |
-| Top up | Add money, with quick amounts and validation | 13 |
+| Top up | Pay by card on Stripe's page, or add pretend money while building | 13, 31 |
 | Cards | Your open cards, and cards other people shared with you | 12, 30 |
 | New card | Name a card, give it an optional spending limit, and optionally give it to someone | 13, 30 |
-| Card settings | Freeze, unfreeze, rename, change the limit, cancel (a shared card can only be frozen) | 13, 14, 30 |
+| Card settings | Freeze, unfreeze, rename, change the limit, cancel (a shared card can only be frozen), and recent payments | 13, 14, 30, 32 |
+| Pay a shop | A pretend card machine: approved, or declined with the reason | 32 |
 | Activity | Every transaction, newest first, in a fast scrolling list | 13 |
-| You | Who you are signed in as, and Sign out | 28 |
+| You | Who you are signed in as, notification switches, and Sign out | 28, 34 |
 
 On a phone the screens sit behind a tab bar. In a wide window, such as the Mac app, the tab bar becomes a sidebar.
 
@@ -29,11 +30,15 @@ src/
   api/client.ts              One fetch wrapper: tokens, JSON, error messages, idempotency keys
   api/auth.ts                Sign-up, sign-in, refresh, sign-out and "who am I"
   api/paydeck.ts             One function per wallet and card endpoint
+  api/payments.ts            Stripe top-ups, card payments, notification settings, devices
   api/hooks.ts               TanStack Query hooks the screens use to load and change data
   auth/AuthContext.tsx       Who is signed in; refreshes tokens; finishes Google sign-in
   auth/tokenStore.ts         Keeps the refresh token in the Keychain or Keystore
   auth/pkce.ts               The PKCE code verifier and challenge for Google sign-in
   state/AccountContext.tsx   Finds the signed-in person's account
+  live/stomp.ts              A small STOMP client on top of React Native's WebSocket
+  live/LiveUpdates.tsx       Listens for changes, refreshes the screens, shows the banner
+  push/push.ts               Android push notifications through Firebase
   money.ts                   Formatting and reading money amounts (always whole cents)
   validation.ts              Form checks, matching the API's rules
   types.ts                   The shapes of accounts, cards and activity, as the API sends them
@@ -50,6 +55,13 @@ Navigation is written by hand on purpose: it is short, it teaches how navigation
 - Every request carries `Authorization: Bearer <access token>`. When the API answers `401`, the client swaps the refresh token for a new pair and tries the request once more. If several requests fail at once they share one refresh, because each refresh token works only once.
 - On the next launch the app uses the saved refresh token to sign straight back in.
 - **Continue with Google** makes a random code verifier, opens the API's `/api/auth/google` link in the browser with its SHA-256 (the code challenge), and waits. After Google, the API opens `paydeck://auth?code=...`; the app trades that code plus the verifier for tokens. The `paydeck://` link is registered in `android/app/src/main/AndroidManifest.xml` and `macos/PayDeck-macOS/Info.plist`. Google sign-in only works once the API has a Google client configured (see the API README).
+
+## How payments and live updates work
+
+- **Top up by card.** The app asks the API for a Stripe Checkout page and opens it in the browser. After paying (in test mode, use the card `4242 4242 4242 4242`), Stripe sends the browser to the API, which hands over to the app with `paydeck://top-up?result=success`. The money itself only arrives when Stripe's signed webhook reaches the API, a few seconds later. "Add pretend money" stays available while you build, until the API turns `paydeck.simulated-top-ups` off.
+- **Pay a shop.** Real card payments come from a card network. PayDeck has none, so the Pay screen plays the shop's card machine and calls `POST /api/cards/{id}/payments`. The API checks the card's rules in order (frozen, cancelled, over the limit, not enough money) and answers approved or declined.
+- **Live updates.** While someone is signed in, the app keeps a WebSocket open to `ws://…/ws` and speaks STOMP over it (`src/live/stomp.ts` is short enough to read in one sitting). It signs in with the access token and subscribes to the account's topic and the person's own topic. Every message refreshes the data on screen and shows a banner for five seconds. If the connection drops, it reconnects, waiting a little longer each time.
+- **Push notifications (Android).** With Firebase set up, the app asks for permission (Android 13 and newer), sends its Firebase token to `POST /api/devices`, and removes it again on sign-out. The API then pushes "Money in" or "Card declined" even when the app is closed. Push needs your own Firebase project: create one at [console.firebase.google.com](https://console.firebase.google.com), add an Android app with the package name `com.paydeck`, and save its `google-services.json` in `android/app/` (it is in `.gitignore`, because every learner has their own). Without the file the app builds and runs normally, with push turned off. The Mac app relies on the live banner, because Apple push needs a paid Apple Developer account.
 
 Top-ups send an `Idempotency-Key` header. The key stays the same until the amount changes, so tapping "Add" again after a dropped connection can never add the money twice.
 
@@ -89,4 +101,4 @@ npm run typecheck
 npm test
 ```
 
-The tests replace `fetch` with a small in-memory copy of the API (`testing/fakeApi.ts`), so they run without a server.
+The tests replace `fetch` with a small in-memory copy of the API (`testing/fakeApi.ts`), and `WebSocket` and Firebase with fakes (`jest.setup.js`), so they run without a server or a phone.

@@ -12,6 +12,7 @@ import { Linking } from 'react-native';
 import * as authApi from '../api/auth';
 import { ApiError, setTokenSource } from '../api/client';
 import type { User } from '../types';
+import { stopPush } from '../push/push';
 import { codeChallenge, newCodeVerifier } from './pkce';
 import {
   clearRefreshToken,
@@ -156,6 +157,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         );
       },
       signOut: async () => {
+        // While still signed in: stop sending notifications to this phone.
+        await stopPush();
         const token = refreshToken.current;
         if (token) {
           // Tell the API to forget the refresh token too. If that fails, signing

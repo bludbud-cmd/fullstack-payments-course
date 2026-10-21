@@ -1,12 +1,28 @@
 import { QueryClient } from '@tanstack/react-query';
 import React from 'react';
 import { Linking } from 'react-native';
-import { act, render, screen, userEvent } from '@testing-library/react-native';
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  userEvent,
+  waitFor,
+} from '@testing-library/react-native';
 import App from '../App';
 import { codeChallenge } from '../src/auth/pkce';
 import { installFakeApi } from '../testing/fakeApi';
 
-declare const global: { fakeKeychain: Map<string, string> };
+type FakeSocket = {
+  url: string;
+  sent: string[];
+  closed: boolean;
+  receive: (text: string) => void;
+};
+declare const global: {
+  fakeKeychain: Map<string, string>;
+  fakeSockets: FakeSocket[];
+};
 const KEYCHAIN_SERVICE = 'dev.paydeck.refresh-token';
 
 let api: ReturnType<typeof installFakeApi>;
@@ -14,6 +30,7 @@ let queryClient: QueryClient;
 
 beforeEach(() => {
   global.fakeKeychain.clear();
+  global.fakeSockets.length = 0;
   jest.mocked(Linking.openURL).mockClear();
   jest.mocked(Linking.addEventListener).mockClear();
   api = installFakeApi();
@@ -190,7 +207,9 @@ describe('the wallet', () => {
     await startSignedIn();
     await user.press(screen.getByRole('button', { name: 'Top up' }));
     await user.type(screen.getByLabelText('Amount (USD)'), '25.50');
-    await user.press(screen.getByRole('button', { name: 'Add $25.50' }));
+    await user.press(
+      screen.getByRole('button', { name: 'Add $25.50 of pretend money' }),
+    );
 
     expect(await screen.findByText('$1,269.00')).toBeOnTheScreen();
     const topUp = api.calls.find(call => call.path.endsWith('/top-ups'))!;
@@ -204,7 +223,7 @@ describe('the wallet', () => {
     await startSignedIn();
     await user.press(screen.getByRole('button', { name: 'Top up' }));
     await user.type(screen.getByLabelText('Amount (USD)'), 'lots');
-    await user.press(screen.getByRole('button', { name: 'Add money' }));
+    await user.press(screen.getByRole('button', { name: 'Pay by card' }));
     expect(
       screen.getByText('Enter an amount like 25 or 25.50'),
     ).toBeOnTheScreen();
@@ -216,9 +235,10 @@ describe('the wallet', () => {
     api.failNext(`/api/accounts/${account.id}/top-ups`, 500, 'Try again later');
     await user.press(screen.getByRole('button', { name: 'Top up' }));
     await user.press(screen.getByRole('button', { name: '10' }));
-    await user.press(screen.getByRole('button', { name: 'Add $10.00' }));
+    const add = { name: 'Add $10.00 of pretend money' };
+    await user.press(screen.getByRole('button', add));
     await screen.findByText('Try again later');
-    await user.press(screen.getByRole('button', { name: 'Add $10.00' }));
+    await user.press(screen.getByRole('button', add));
     await screen.findByText('$1,253.50');
 
     const keys = api.calls
@@ -226,6 +246,30 @@ describe('the wallet', () => {
       .map(call => call.headers['Idempotency-Key']);
     expect(keys).toHaveLength(2);
     expect(keys[0]).toBe(keys[1]);
+  });
+
+  it('tops up by card through Stripe’s payment page', async () => {
+    const user = userEvent.setup();
+    const { account } = await startSignedIn();
+    await user.press(screen.getByRole('button', { name: 'Top up' }));
+    await user.press(screen.getByRole('button', { name: '25' }));
+    await user.press(
+      screen.getByRole('button', { name: 'Pay $25.00 by card' }),
+    );
+
+    const checkout = api.calls.find(call => call.path.endsWith('/checkout'))!;
+    expect(checkout.path).toBe(`/api/accounts/${account.id}/top-ups/checkout`);
+    expect(checkout.body).toEqual({ amountCents: 2500 });
+    expect(Linking.openURL).toHaveBeenCalledWith(
+      'https://checkout.stripe.com/c/pay/cs_test_1',
+    );
+    expect(
+      await screen.findByText(/Finish paying in your browser/),
+    ).toBeOnTheScreen();
+
+    // Stripe's page sends the person back to the app.
+    await openLink('paydeck://top-up?result=success');
+    expect(await screen.findByText('Thank you')).toBeOnTheScreen();
   });
 });
 
@@ -286,7 +330,123 @@ describe('cards', () => {
       await screen.findByLabelText('For Ben card ending 1000, Frozen'),
     ).toBeOnTheScreen();
   });
+
+  it('pays a shop with a card, and says why one was declined', async () => {
+    const user = userEvent.setup();
+    await startSignedIn('Asha', 5_000);
+    await user.press(screen.getByRole('tab', { name: 'Cards' }));
+    await user.press(
+      await screen.findByLabelText('Everyday card ending 1000, Active'),
+    );
+    await user.press(screen.getByRole('button', { name: 'Pay a shop' }));
+    await user.type(screen.getByLabelText('Amount (USD)'), '12');
+    await user.press(screen.getByRole('button', { name: 'Pay' }));
+    expect(await screen.findByText('Approved')).toBeOnTheScreen();
+
+    // $38 left: $40 is too much.
+    await user.press(screen.getByRole('button', { name: 'Pay again' }));
+    await user.type(screen.getByLabelText('Amount (USD)'), '40');
+    await user.press(screen.getByRole('button', { name: 'Pay' }));
+    expect(await screen.findByText('Declined')).toBeOnTheScreen();
+    expect(
+      screen.getByText('There is not enough money in the wallet.'),
+    ).toBeOnTheScreen();
+
+    // Back on the card, both attempts are listed, newest first.
+    await user.press(screen.getByRole('button', { name: 'Back' }));
+    expect(await screen.findByText('Recent payments')).toBeOnTheScreen();
+    expect(
+      screen.getByText('Declined: There is not enough money in the wallet.'),
+    ).toBeOnTheScreen();
+  });
 });
+
+describe('live updates', () => {
+  it('signs in to the WebSocket and listens to the right topics', async () => {
+    const { user, account } = await startSignedIn();
+    const socket = await connectedSocket();
+
+    expect(socket.url).toBe('ws://localhost:8080/ws');
+    expect(socket.sent[0]).toMatch(/^CONNECT\n/);
+    expect(socket.sent[0]).toMatch(/\nAuthorization:Bearer access-/);
+    expect(socket.sent[0].endsWith('\0')).toBe(true);
+    expect(socket.sent.slice(1)).toEqual([
+      `SUBSCRIBE\nid:sub-0\ndestination:/topic/accounts/${account.id}\n\n\0`,
+      `SUBSCRIBE\nid:sub-1\ndestination:/topic/users/${user.id}\n\n\0`,
+    ]);
+  });
+
+  it('shows what happened, and refreshes the balance', async () => {
+    const { account } = await startSignedIn();
+    const socket = await connectedSocket();
+
+    // Money arrives some other way, and the API tells the app.
+    api.seedTopUp(account.id, 10_000);
+    await act(async () =>
+      socket.receive(
+        stompMessage({
+          accountId: account.id,
+          kind: 'MONEY_IN',
+          title: 'Money in',
+          body: '$100.00 added to your wallet',
+          cardId: null,
+          balanceCents: 134_350,
+          at: '2026-10-21T12:00:00Z',
+        }),
+      ),
+    );
+
+    expect(await screen.findByText('Money in')).toBeOnTheScreen();
+    expect(screen.getByText('$100.00 added to your wallet')).toBeOnTheScreen();
+    expect(await screen.findByText('$1,343.50')).toBeOnTheScreen();
+  });
+
+  it('disconnects on sign-out', async () => {
+    const user = userEvent.setup();
+    await startSignedIn();
+    const socket = await connectedSocket();
+    await user.press(screen.getByRole('tab', { name: 'You' }));
+    await user.press(await screen.findByRole('button', { name: 'Sign out' }));
+    await screen.findByText('Sign in to PayDeck');
+    expect(socket.closed).toBe(true);
+  });
+});
+
+describe('notification settings', () => {
+  it('turns declined-payment notifications off', async () => {
+    const user = userEvent.setup();
+    const { user: asha } = await startSignedIn();
+    await user.press(screen.getByRole('tab', { name: 'You' }));
+    const declines = await screen.findByLabelText('Declined card payments');
+    expect(declines).toHaveProp('value', true);
+
+    await act(async () => fireEvent(declines, 'valueChange', false));
+
+    expect(api.notificationSettingsFor(asha.id)).toEqual({
+      payments: true,
+      declines: false,
+    });
+    expect(screen.getByLabelText('Declined card payments')).toHaveProp(
+      'value',
+      false,
+    );
+  });
+});
+
+/** Waits for the app's WebSocket, then plays the server saying "connected". */
+async function connectedSocket(): Promise<FakeSocket> {
+  await waitFor(() => expect(global.fakeSockets).toHaveLength(1));
+  const socket = global.fakeSockets[0];
+  await waitFor(() => expect(socket.sent).toHaveLength(1));
+  await act(async () => socket.receive('CONNECTED\nversion:1.2\n\n\0'));
+  return socket;
+}
+
+function stompMessage(body: object): string {
+  return `MESSAGE\ndestination:/topic/x\ncontent-type:application/json\n\n${JSON.stringify(
+    body,
+  )}\0`;
+}
 
 /** The verifier is random, so read back the one the app made, and check it matches. */
 function findVerifierFor(challenge: string): string {
