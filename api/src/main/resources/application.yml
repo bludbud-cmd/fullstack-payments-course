@@ -1,0 +1,23 @@
+spring:
+  application:
+    name: paydeck-api
+  datasource:
+    # Matches docker-compose.yml. Override with environment variables in production.
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/paydeck}
+    username: ${DATABASE_USERNAME:paydeck}
+    password: ${DATABASE_PASSWORD:paydeck}
+  jpa:
+    # Flyway owns the schema; Hibernate only checks that the entities match it.
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+
+springdoc:
+  swagger-ui:
+    path: /docs

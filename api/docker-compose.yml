@@ -1,0 +1,17 @@
+# Starts the PostgreSQL database PayDeck needs on your computer.
+#   docker compose up -d     start it in the background
+#   docker compose down      stop it (your data is kept)
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: paydeck
+      POSTGRES_USER: paydeck
+      POSTGRES_PASSWORD: paydeck
+    ports:
+      - "5432:5432"
+    volumes:
+      - paydeck-data:/var/lib/postgresql/data
+
+volumes:
+  paydeck-data:

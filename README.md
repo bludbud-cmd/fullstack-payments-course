@@ -7,9 +7,10 @@ A free, self-study course that takes complete beginners from never having writte
 | Folder | What it holds |
 | --- | --- |
 | `site/` | The course website, built with [Astro Starlight](https://starlight.astro.build/) |
-| `.github/workflows/` | Publishes the website to GitHub Pages on every push to `main` |
+| `api/` | The PayDeck backend: Java 25 and Spring Boot 4. See [api/README.md](api/README.md) |
+| `.github/workflows/` | Publishes the website to GitHub Pages and tests the API on every change |
 
-The PayDeck reference app (the Spring Boot API and the React Native client) will live alongside the website as it is built.
+The PayDeck React Native app will join them as it is built.
 
 ## Working on the website
 
