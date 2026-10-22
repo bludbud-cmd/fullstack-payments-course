@@ -1,0 +1,219 @@
+---
+title: "Mini-project: transfers that never lose or duplicate money"
+description: "Give every account a transaction history, update the try-it file for money, and prove under heavy, repeated, simultaneous traffic that PayDeck never loses or duplicates a cent."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+PayDeck can now top up and transfer money safely. A customer cannot see *what happened* to their money yet, though, and you have only tested the safety one problem at a time. In this project you add the history screen's endpoint, and then attack the API with everything at once: many transfers, both directions, every one of them sent twice, all at the same moment. Afterwards, the ledger must still be perfect.
+
+## The tasks
+
+1. **History.** Add `GET /api/accounts/{accountId}/transactions`. It returns the account's ledger lines, **newest first**, at most 100 of them. Each line has the transaction's `transactionId`, `type`, `description` and `createdAt`, and the `amountCents` **for this account**: positive for money in, negative for money out. An unknown account or a system account answers `404`.
+2. **Try-it file.** Add to `http/paydeck.http`: a top-up and a transfer, each with a fresh key; one transfer with a fixed key that you send twice, to see the replay; and the history of both accounts.
+3. **Stress test.** Write `scripts/stress.sh`, which takes two account IDs and sends 20 transfers of $1.00 from the first to the second and 20 from the second to the first, **each one twice with the same key**, all 80 requests at the same time. Make sure both accounts hold at least $20.00 first. Every answer must be `201` or `200`, and both balances must end where they started.
+4. **Audit.** Write three SQL checks and run them after the stress test: all entries add up to 0; every ledger transaction has at least two entries that add up to 0; there are exactly 40 stress transfers, with 40 different keys.
+5. Commit.
+
+<Exercise title="Build it">
+Do the five tasks.
+
+<Fragment slot="hint">For the history, write a record `AccountActivity` in the `ledger` package and let JPQL create it for you: `select new dev.paydeck.api.ledger.AccountActivity(t.id, ...) from LedgerEntry e join e.transaction t where ...`. To limit the number of rows, give the repository method a `Pageable` parameter and pass `PageRequest.of(0, 100)` (page 0, 100 rows).</Fragment>
+<Fragment slot="hint2">For the stress script, print one line per request (`from to key`) in a `for` loop and pipe them to `xargs -P 80 -L 1 sh -c '...'`. With `-L 1`, each line becomes the arguments of one `sh -c` command, where they are `$0`, `$1` and `$2`. In REST Client, `{{$guid}}` makes a new UUID every time you send.</Fragment>
+<Fragment slot="solution">
+
+`ledger/AccountActivity.java`:
+
+```java
+package dev.paydeck.api.ledger;
+
+import java.time.Instant;
+import java.util.UUID;
+
+/** One line of an account's history, as the account holder sees it. */
+public record AccountActivity(
+        UUID transactionId, TransactionType type, String description, long amountCents, Instant createdAt) {
+}
+```
+
+In `LedgerEntryRepository` (with `import java.util.List;` and `import org.springframework.data.domain.Pageable;`):
+
+```java
+@Query("""
+        select new dev.paydeck.api.ledger.AccountActivity(t.id, t.type, t.description, e.amountCents, t.createdAt)
+        from LedgerEntry e join e.transaction t
+        where e.accountId = :accountId
+        order by t.createdAt desc, t.id
+        """)
+List<AccountActivity> findActivity(UUID accountId, Pageable page);
+```
+
+`"""` starts a **text block**, a Java string that can span several lines, which keeps a long query readable. `select new ...` builds one `AccountActivity` per row, so no entities are loaded at all. `join e.transaction t` follows the `@ManyToOne` from lesson 24.2. Ordering by `t.id` as well makes the order stable when two transactions have the same time.
+
+In `LedgerService` (with `import org.springframework.data.domain.PageRequest;`):
+
+```java
+private static final int HISTORY_LIMIT = 100;
+```
+
+```java
+@Transactional(readOnly = true)
+public List<AccountActivity> activityOf(UUID accountId) {
+    return entries.findActivity(accountId, PageRequest.of(0, HISTORY_LIMIT));
+}
+```
+
+In `MoneyController`, inject `AccountRepository` and `LedgerService` as well, and add:
+
+```java
+@GetMapping("/api/accounts/{accountId}/transactions")
+public List<AccountActivity> history(@PathVariable UUID accountId) {
+    accounts.findById(accountId)
+            .filter(account -> account.getKind() == AccountKind.CUSTOMER)
+            .orElseThrow(() -> new NotFoundException("Account", accountId));
+    return ledger.activityOf(accountId);
+}
+```
+
+Gita tops up $50.00, sends Hugo $12.00 for lunch, and Hugo sends $3.00 back. Gita's history:
+
+```json
+[{"transactionId":"23d92fef-08a9-4264-9c9a-fe9769f97213","type":"TRANSFER","description":"Coffee back","amountCents":300,"createdAt":"2026-10-22T00:20:38.933306Z"},
+ {"transactionId":"db3ee683-8be2-460f-b4d1-ae22810a4c5e","type":"TRANSFER","description":"Lunch","amountCents":-1200,"createdAt":"2026-10-22T00:20:38.887194Z"},
+ {"transactionId":"45ddc3d2-ef08-4d46-a2a7-53b5e22e13ec","type":"TOP_UP","description":"Top-up from card","amountCents":5000,"createdAt":"2026-10-22T00:20:38.764240Z"}]
+```
+
+Hugo's shows the same transfers with the opposite signs:
+
+```json
+[{"transactionId":"23d92fef-08a9-4264-9c9a-fe9769f97213","type":"TRANSFER","description":"Coffee back","amountCents":-300,"createdAt":"2026-10-22T00:20:38.933306Z"},
+ {"transactionId":"db3ee683-8be2-460f-b4d1-ae22810a4c5e","type":"TRANSFER","description":"Lunch","amountCents":1200,"createdAt":"2026-10-22T00:20:38.887194Z"}]
+```
+
+The SQL behind it is one query, limited by the database (`fetch first ? rows only` is the standard spelling of `LIMIT`):
+
+```
+Hibernate: select t1_0.id,t1_0.type,t1_0.description,le1_0.amount_cents,t1_0.created_at from ledger_entries le1_0 join ledger_transactions t1_0 on t1_0.id=le1_0.transaction_id where le1_0.account_id=? order by t1_0.created_at desc,t1_0.id fetch first ? rows only
+```
+
+The additions to `http/paydeck.http` (after the requests that create `account`; add a second USD account named `friend` the same way):
+
+```http
+### Top up (a new key every time)
+POST {{baseUrl}}/api/accounts/{{account.response.body.$.id}}/top-ups
+Content-Type: application/json
+Idempotency-Key: {{$guid}}
+
+{
+  "amountCents": 5000,
+  "description": "Top-up from card"
+}
+
+### Transfer to the friend (a new key every time)
+POST {{baseUrl}}/api/transfers
+Content-Type: application/json
+Idempotency-Key: {{$guid}}
+
+{
+  "fromAccountId": "{{account.response.body.$.id}}",
+  "toAccountId": "{{friend.response.body.$.id}}",
+  "amountCents": 1200,
+  "description": "Lunch"
+}
+
+### A retry: send this twice. The first answers 201, the second 200 with Idempotent-Replayed: true
+POST {{baseUrl}}/api/transfers
+Content-Type: application/json
+Idempotency-Key: try-it-retry-1
+
+{
+  "fromAccountId": "{{account.response.body.$.id}}",
+  "toAccountId": "{{friend.response.body.$.id}}",
+  "amountCents": 300,
+  "description": "Coffee"
+}
+
+### History, newest first
+GET {{baseUrl}}/api/accounts/{{account.response.body.$.id}}/transactions
+
+### The friend's history
+GET {{baseUrl}}/api/accounts/{{friend.response.body.$.id}}/transactions
+```
+
+The fixed key only works once per database: change `try-it-retry-1` to a new value before running the file against the same database again, or you will get a `409` for reusing it with different accounts.
+
+`scripts/stress.sh`:
+
+```sh
+#!/bin/sh
+# Sends 20 transfers of 100 cents from $1 to $2 and 20 from $2 to $1, each one
+# twice with the same Idempotency-Key, all at the same time. Counts the answers.
+for i in $(seq 20); do
+  echo "$1 $2 stress-$$-ab-$i"; echo "$1 $2 stress-$$-ab-$i"
+  echo "$2 $1 stress-$$-ba-$i"; echo "$2 $1 stress-$$-ba-$i"
+done | xargs -P 80 -L 1 sh -c 'curl -s -o /dev/null -w "%{http_code}\n" -X POST localhost:8080/api/transfers \
+  -H "Content-Type: application/json" -H "Idempotency-Key: $2" \
+  -d "{\"fromAccountId\":\"$0\",\"toAccountId\":\"$1\",\"amountCents\":100,\"description\":\"Stress $2\"}"' | sort | uniq -c
+```
+
+After topping up Hugo with $20.00, so both have enough (Gita `4100`, Hugo `2900`):
+
+```sh
+scripts/stress.sh <Gita's id> <Hugo's id>
+```
+
+```
+  40 200
+  40 201
+```
+
+Forty transfers happened once each; forty copies were recognised and replayed. Balances afterwards: Gita `4100`, Hugo `2900`, exactly as before, because the same amount went each way.
+
+The audit:
+
+```sql
+-- 1. The whole ledger adds up to zero.
+SELECT sum(amount_cents) FROM ledger_entries;
+
+-- 2. Every transaction balances and has at least two entries. Any row here is a bug.
+SELECT transaction_id
+FROM ledger_entries
+GROUP BY transaction_id
+HAVING sum(amount_cents) <> 0 OR count(*) < 2;
+
+-- 3. Each stress transfer happened exactly once.
+SELECT count(*) AS transfers, count(DISTINCT idempotency_key) AS keys
+FROM ledger_transactions
+WHERE description LIKE 'Stress%';
+```
+
+```
+ sum
+-----
+   0
+
+ transaction_id
+----------------
+(0 rows)
+
+ transfers | keys
+-----------+------
+        40 |   40
+```
+
+(`count(DISTINCT ...)` counts different values only. If you run the stress test again, the third check shows 80 and 80.)
+
+What to notice:
+
+- **Every protection did its part.** The transaction made each transfer all-or-nothing, the ordered locks kept the two directions from deadlocking, and the keys turned 80 requests into exactly 40 transfers.
+- **Checks you can rerun are worth more than a demo.** The three audit queries do not care how the data got there; they would catch a bug in any future feature that touches money. Module 25 makes this kind of check run automatically with every build.
+- **The history needs no extra table.** It is just the ledger, read from one account's point of view.
+</Fragment>
+</Exercise>
+
+<MarkComplete />

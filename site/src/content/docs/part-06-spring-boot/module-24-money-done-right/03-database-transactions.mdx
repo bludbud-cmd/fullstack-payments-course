@@ -1,0 +1,268 @@
+---
+title: "24.3 Database transactions"
+description: "Add transfers between accounts, and see exactly where Spring opens, joins, commits and rolls back the database transaction that makes each one all-or-nothing."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson PayDeck can transfer money between accounts, and you can read in the log where each database transaction starts, which methods share it, and whether it commits or rolls back.
+
+## Why it matters
+
+A transfer is several steps: read both accounts, check the balance, write a transaction, write two entries. If the app crashed after writing the money *out* of one account but before writing it *into* the other, money would vanish. Module 20 showed you `BEGIN` and `ROLLBACK` in psql; this lesson shows how Spring uses them for you, and how to be sure every step of a payment is inside one.
+
+## The idea
+
+### ACID, in one paragraph
+
+Databases promise four things about a transaction, usually called **ACID**. **Atomic**: all of its changes happen, or none do. **Consistent**: it moves the database from one valid state to another (your `CHECK`s and foreign keys hold at the end). **Isolated**: transactions running at the same time do not see each other's half-finished work. **Durable**: once committed, it survives a crash or power cut. For money, *atomic* is the one you feel first, and it is this lesson's subject; *isolated* has a catch that lesson 24.4 deals with.
+
+### What @Transactional really does
+
+When a request calls a method marked `@Transactional`, Spring does this around it:
+
+1. Get a database connection and send `BEGIN`.
+2. Run your method. Every repository call inside it uses that same connection and transaction.
+3. If the method returns normally: write any pending changes and `COMMIT`.
+4. If it throws an unchecked exception (any `RuntimeException`, including your `BusinessRuleException`): `ROLLBACK`, and nothing it did is kept.
+
+When a `@Transactional` method calls *another* `@Transactional` method, the second one **joins** the transaction that is already open; it does not start its own. This is called **propagation**, and the default, `REQUIRED`, means "join one if there is one, otherwise start one".
+
+### Where the transaction belongs
+
+The transaction must wrap the whole *business operation*: here, `MoneyMovementService.transfer`. It is the one place that knows every step that has to happen together. The ledger can insist on that: `Propagation.MANDATORY` means "there **must** already be a transaction; refuse to run otherwise". `LedgerService.record` gets it, so nobody can ever record money outside an operation that also did the checks.
+
+## Worked example
+
+### Transfers
+
+In `MoneyMovementService`, add `transfer` (and `import dev.paydeck.api.common.BusinessRuleException;`):
+
+```java
+@Transactional
+public LedgerTransaction transfer(UUID fromId, UUID toId, long amountCents, String description) {
+    if (fromId.equals(toId)) {
+        throw new BusinessRuleException("SAME_ACCOUNT", "You cannot transfer money to the same account");
+    }
+    Account from = customerAccount(fromId);
+    Account to = customerAccount(toId);
+    if (from.getCurrency() != to.getCurrency()) {
+        throw new BusinessRuleException("CURRENCY_MISMATCH",
+                "Both accounts must use the same currency (" + from.getCurrency() + " and " + to.getCurrency() + ")");
+    }
+    if (ledger.balanceOf(from.getId()) < amountCents) {
+        throw new BusinessRuleException("INSUFFICIENT_FUNDS", "There is not enough money in the account");
+    }
+    // Lesson 24.5 replaces these two placeholders.
+    String idempotencyKey = UUID.randomUUID().toString();
+    String fingerprint = "-";
+    return ledger.record(TransactionType.TRANSFER, description, idempotencyKey, fingerprint,
+            List.of(new Posting(from.getId(), -amountCents), new Posting(to.getId(), amountCents)));
+}
+```
+
+The rules are checked in order of cost: the free check (same ID) first, then the ones that need the database. Comparing enums with `!=` is safe, because each enum value exists exactly once.
+
+In `MoneyController`, add a request record (and `import jakarta.validation.constraints.NotNull;`), the endpoint, and a small helper so both endpoints answer the same way:
+
+```java
+public record TransferRequest(
+        @NotNull UUID fromAccountId,
+        @NotNull UUID toAccountId,
+        @Positive @Max(MAX_AMOUNT_CENTS) long amountCents,
+        @NotBlank @Size(max = 140) String description) {
+}
+```
+
+```java
+@PostMapping("/api/accounts/{accountId}/top-ups")
+public ResponseEntity<TransactionResponse> topUp(@PathVariable UUID accountId,
+                                                 @Valid @RequestBody TopUpRequest request) {
+    LedgerTransaction transaction = money.topUp(accountId, request.amountCents(), request.description().strip());
+    return created(transaction, request.amountCents());
+}
+
+@PostMapping("/api/transfers")
+public ResponseEntity<TransactionResponse> transfer(@Valid @RequestBody TransferRequest request) {
+    LedgerTransaction transaction = money.transfer(request.fromAccountId(), request.toAccountId(),
+            request.amountCents(), request.description().strip());
+    return created(transaction, request.amountCents());
+}
+
+private static ResponseEntity<TransactionResponse> created(LedgerTransaction transaction, long amountCents) {
+    return ResponseEntity.status(HttpStatus.CREATED).body(new TransactionResponse(transaction.getId(),
+            transaction.getType(), transaction.getDescription(), amountCents, transaction.getCreatedAt()));
+}
+```
+
+`/api/transfers` is not under one account, because a transfer involves two.
+
+Finally, in `LedgerService`, make `record` insist on a caller's transaction (and `import org.springframework.transaction.annotation.Propagation;`):
+
+```java
+/** Must run inside the caller's transaction. */
+@Transactional(propagation = Propagation.MANDATORY)
+public LedgerTransaction record(TransactionType type, String description, String idempotencyKey,
+                                String requestFingerprint, List<Posting> postings) {
+```
+
+### Watch the transaction
+
+Spring can log every step of a transaction. Restart with that log turned on and `show-sql`:
+
+```sh
+SPRING_JPA_SHOW_SQL=true ./mvnw spring-boot:run \
+  -Dspring-boot.run.arguments=--logging.level.org.springframework.orm.jpa.JpaTransactionManager=DEBUG
+```
+
+(An environment variable written before a command applies to that command only.) Open a second USD account, for Chloe, then send her $5.00 from your account:
+
+```sh
+curl -X POST localhost:8080/api/transfers -H 'Content-Type: application/json' -d '{
+  "fromAccountId": "4e5831ca-61d5-45e7-b451-5726d7b68095",
+  "toAccountId": "b351c0cd-9a21-4b1b-bc31-f89bc7d35fdd",
+  "amountCents": 500,
+  "description": "Coffee"
+}'
+```
+
+```
+HTTP/1.1 201
+{"id":"19464b92-ba6e-48da-ad75-8818946223b2","type":"TRANSFER","description":"Coffee","amountCents":500,"createdAt":"2026-10-22T00:11:14.310572656Z"}
+```
+
+The log tells the whole story (shortened a little):
+
+```
+JpaTransactionManager : Creating new transaction with name [dev.paydeck.api.money.MoneyMovementService.transfer]: PROPAGATION_REQUIRED,ISOLATION_DEFAULT
+JpaTransactionManager : Participating in existing transaction
+Hibernate: select ... from accounts a1_0 where a1_0.id=?
+JpaTransactionManager : Participating in existing transaction
+Hibernate: select ... from accounts a1_0 where a1_0.id=?
+JpaTransactionManager : Participating in existing transaction
+Hibernate: select coalesce(sum(le1_0.amount_cents),0) from ledger_entries le1_0 where le1_0.account_id=?
+JpaTransactionManager : Participating in existing transaction
+JpaTransactionManager : Participating in existing transaction
+JpaTransactionManager : Initiating transaction commit
+JpaTransactionManager : Committing JPA transaction on EntityManager [SessionImpl(1274175859<open>)]
+Hibernate: insert into ledger_transactions (created_at,description,idempotency_key,request_fingerprint,type,id) values (?,?,?,?,?,?)
+Hibernate: insert into ledger_entries (account_id,amount_cents,transaction_id,id) values (?,?,?,?)
+Hibernate: insert into ledger_entries (account_id,amount_cents,transaction_id,id) values (?,?,?,?)
+JpaTransactionManager : Closing JPA EntityManager after transaction
+```
+
+One transaction is created, for `transfer`. Every repository call and `record` joins it ("Participating in existing transaction"). Notice also *when* the inserts happen: at commit. Hibernate collects changes and sends them in one go (it **flushes**) just before committing.
+
+Now ask for more than Chloe has:
+
+```
+HTTP/1.1 422
+{"detail":"There is not enough money in the account","instance":"/api/transfers","status":422,"title":"Request not allowed","code":"INSUFFICIENT_FUNDS"}
+```
+
+```
+JpaTransactionManager : Creating new transaction with name [dev.paydeck.api.money.MoneyMovementService.transfer]: PROPAGATION_REQUIRED,ISOLATION_DEFAULT
+...
+Hibernate: select coalesce(sum(le1_0.amount_cents),0) from ledger_entries le1_0 where le1_0.account_id=?
+JpaTransactionManager : Initiating transaction rollback
+JpaTransactionManager : Rolling back JPA transaction on EntityManager [SessionImpl(715847757<open>)]
+```
+
+The exception rolled the transaction back. The other two rules answer the same way:
+
+```
+{"detail":"You cannot transfer money to the same account","instance":"/api/transfers","status":422,"title":"Request not allowed","code":"SAME_ACCOUNT"}
+{"detail":"Both accounts must use the same currency (USD and EUR)","instance":"/api/transfers","status":422,"title":"Request not allowed","code":"CURRENCY_MISMATCH"}
+```
+
+### What MANDATORY protects
+
+Remove `@Transactional` from `transfer` for a moment, restart, and send a transfer. It fails with `500`, and the log says why:
+
+```
+org.springframework.transaction.IllegalTransactionStateException: No existing transaction found for transaction marked with propagation 'mandatory'
+```
+
+Without that guard, the checks and the recording would each run in their own little transaction, with gaps in between where anything could happen. Put `@Transactional` back.
+
+## Try it
+
+<Exercise title="Try it: crash in the middle">
+Prove that a transfer is all-or-nothing. In `transfer`, keep the result of `ledger.record` in a variable, and right after it, if the description is `"crash"`, throw an `IllegalStateException`, as if the server failed after recording. Restart with the transaction log on, note both balances, send a $10.00 transfer with the description `crash`, and check both balances again. Then remove the crash code.
+
+<Fragment slot="hint">
+
+```java
+LedgerTransaction transaction = ledger.record(...);
+if (description.equals("crash")) {
+    throw new IllegalStateException("Simulated crash after recording the transfer");
+}
+return transaction;
+```
+</Fragment>
+<Fragment slot="solution">
+
+Before: Ana has `5050`, Chloe `2500`. The transfer answers `500 Internal Server Error`, and the log shows:
+
+```
+JpaTransactionManager : Initiating transaction rollback
+JpaTransactionManager : Rolling back JPA transaction on EntityManager [SessionImpl(141267468<open>)]
+...
+java.lang.IllegalStateException: Simulated crash after recording the transfer
+```
+
+After: still `5050` and `2500`, and no new row in `ledger_transactions`. `record` had returned successfully, yet nothing was kept, because the transaction it joined was rolled back. (Here Hibernate had not even sent the inserts, since it flushes at commit; had it sent them, `ROLLBACK` would have thrown them away just the same.) A real crash, such as a power cut, behaves the same: PostgreSQL never commits a transaction that did not reach `COMMIT`.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="@Transactional on a private method, or called from the same class">
+Spring adds transactions by wrapping your bean in a **proxy**, an object that stands in front of it. Only calls that come in from *outside* the bean go through the proxy. A `private` method, or a call from one method to another in the same class, skips it and gets no transaction of its own. Put `@Transactional` on the public method that other classes call.
+</Aside>
+
+<Aside type="caution" title="Catching the exception inside the transaction">
+If `transfer` caught its own `BusinessRuleException` and returned normally, Spring would commit. Let exceptions leave the `@Transactional` method, and turn them into responses in `ApiExceptionHandler`.
+</Aside>
+
+<Aside type="caution" title="Calling slow outside services inside a transaction">
+A transaction holds a database connection (and, from the next lesson, locks) until it ends. Never wait for another company's API in the middle of one. Module 31 does Stripe calls outside the transaction for exactly this reason.
+</Aside>
+
+## Recap
+
+- A transaction is atomic: all of it is committed or none of it.
+- `@Transactional` begins a transaction, commits when the method returns, and rolls back on an unchecked exception.
+- Nested `@Transactional` methods join the open transaction (`REQUIRED`); `MANDATORY` refuses to run without one.
+- Put the transaction around the whole business operation, in the service.
+- Hibernate sends inserts and updates at commit (a flush), not when you call `save`.
+
+<Quiz
+	questions={[
+		{
+			question: 'transfer (@Transactional) calls ledger.record (@Transactional). How many database transactions are there?',
+			options: ['Two', 'One: record joins the one transfer started', 'None'],
+			answer: 1,
+			explanation: 'The default propagation, REQUIRED, joins an existing transaction.',
+		},
+		{
+			question: 'A transfer throws INSUFFICIENT_FUNDS after reading the balance. What is in the database afterwards?',
+			options: ['A transaction with no entries', 'Nothing new: the transaction was rolled back', 'One entry'],
+			answer: 1,
+			explanation: 'The exception left the @Transactional method, so Spring rolled back.',
+		},
+		{
+			question: 'Why does LedgerService.record use Propagation.MANDATORY?',
+			options: ['It is faster', 'So money can only be recorded inside an operation that also did its checks in the same transaction', 'Because it only reads'],
+			answer: 1,
+			explanation: 'Called without a transaction, it throws instead of quietly running on its own.',
+		},
+	]}
+/>
+
+<MarkComplete />

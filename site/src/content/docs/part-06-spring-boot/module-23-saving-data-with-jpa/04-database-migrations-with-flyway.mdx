@@ -1,0 +1,335 @@
+---
+title: "23.4 Database migrations with Flyway"
+description: "Write PayDeck's tables yourself as numbered SQL files that Flyway applies once, in order, on every database, and let Hibernate only check that the code matches them."
+sidebar:
+  order: 4
+---
+
+import { Aside, FileTree } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson PayDeck's tables are created by a SQL file you wrote, applied by Flyway, with the constraints that keep bad data out, and Hibernate only checks that your entities match.
+
+## Why it matters
+
+In lesson 23.3, `ddl-auto: update` tried to change a table full of data, failed, and started the app anyway with the wrong table. On your laptop you threw the data away. On a real server you cannot: the database holds people's money, and every change to its tables has to be planned, reviewed and applied the same way on every machine. That is what **migrations** are for.
+
+## The idea
+
+A **migration** is one numbered SQL file that changes the database: create a table, add a column, add an index. **Flyway** is a tool that applies them. When the app starts, Flyway:
+
+1. Looks at the files in `src/main/resources/db/migration`.
+2. Looks in its own table, `flyway_schema_history`, to see which ones this database already has.
+3. Runs the missing ones, in version order, and records each one.
+
+So every database, on your laptop, a teammate's, the test machine, production, ends up with exactly the same tables by running exactly the same files. A file that has been applied is **never edited again**: to change something, you add a new file.
+
+File names follow a strict pattern:
+
+```
+V1__create_accounts_and_cards.sql
+│ │  └─ description: words joined by single underscores
+│ └─ two underscores
+└─ V and the version number
+```
+
+Flyway turns the description back into words ("create accounts and cards") for its history table.
+
+Once Flyway owns the tables, Hibernate must stop changing them. The setting `ddl-auto: validate` makes Hibernate compare each entity with the real table at start-up and refuse to start if, for example, a field has no column. You get the safety of hand-written SQL and an early warning when the code and the database disagree.
+
+Writing the SQL yourself also lets you say things Hibernate cannot guess: that a limit must be positive, that a card's account must exist (a **foreign key**), that there is only one `SYSTEM` account per currency.
+
+## Worked example
+
+### Add Flyway
+
+In `pom.xml`, add two dependencies next to the JPA one:
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-flyway</artifactId>
+</dependency>
+<dependency>
+    <groupId>org.flywaydb</groupId>
+    <artifactId>flyway-database-postgresql</artifactId>
+</dependency>
+```
+
+The first runs Flyway when the app starts; the second teaches Flyway about PostgreSQL. Neither needs a `<version>`: Spring Boot picks matching ones.
+
+### Write the first migration
+
+Create the folders `db/migration` inside `src/main/resources`:
+
+<FileTree>
+- src/main/resources
+  - application.yml
+  - db
+    - migration
+      - V1__create_accounts_and_cards.sql
+</FileTree>
+
+`V1__create_accounts_and_cards.sql`:
+
+```sql
+-- An account holds money in one currency. SYSTEM accounts stand for the
+-- outside world (for example, a card network paying money in during a top-up),
+-- so the ledger always balances.
+CREATE TABLE accounts (
+    id          UUID PRIMARY KEY,
+    owner_name  VARCHAR(100) NOT NULL,
+    currency    VARCHAR(3)   NOT NULL,
+    kind        VARCHAR(10)  NOT NULL CHECK (kind IN ('CUSTOMER', 'SYSTEM')),
+    created_at  TIMESTAMPTZ  NOT NULL
+);
+
+-- Exactly one SYSTEM account per currency.
+CREATE UNIQUE INDEX accounts_one_system_account_per_currency
+    ON accounts (currency) WHERE kind = 'SYSTEM';
+
+INSERT INTO accounts (id, owner_name, currency, kind, created_at) VALUES
+    ('00000000-0000-0000-0000-000000000840', 'Outside world (USD)', 'USD', 'SYSTEM', now()),
+    ('00000000-0000-0000-0000-000000000978', 'Outside world (EUR)', 'EUR', 'SYSTEM', now()),
+    ('00000000-0000-0000-0000-000000000826', 'Outside world (GBP)', 'GBP', 'SYSTEM', now()),
+    ('00000000-0000-0000-0000-000000000356', 'Outside world (INR)', 'INR', 'SYSTEM', now());
+
+-- A virtual card spends from one account. We only ever store the last four
+-- digits: full card numbers never touch our database.
+CREATE TABLE cards (
+    id                    UUID PRIMARY KEY,
+    account_id            UUID         NOT NULL REFERENCES accounts (id),
+    nickname              VARCHAR(50)  NOT NULL,
+    last4                 VARCHAR(4)   NOT NULL,
+    status                VARCHAR(10)  NOT NULL CHECK (status IN ('ACTIVE', 'FROZEN', 'CANCELLED')),
+    spending_limit_cents  BIGINT       CHECK (spending_limit_cents > 0),
+    created_at            TIMESTAMPTZ  NOT NULL
+);
+
+CREATE INDEX cards_account_id ON cards (account_id);
+```
+
+Most of it is Module 20's SQL. The new parts:
+
+- **`CHECK (...)`** refuses any row for which the condition is false. Even if a bug in Java tried to save a limit of `-5` or a status of `LOST`, the database would say no.
+- **`REFERENCES accounts (id)`** is the foreign key: a card can only point at an account that exists.
+- **`CREATE UNIQUE INDEX ... WHERE kind = 'SYSTEM'`** is a *partial* unique index: the currency must be unique, but only among `SYSTEM` rows. Customers can have as many USD accounts as they like.
+- **The `INSERT`** creates the four "outside world" accounts that Module 24 needs for money arriving from outside PayDeck. Their IDs end in the currency's international number (840 is USD, 978 EUR), so they are easy to recognise. Data that every database needs belongs in a migration too.
+- **`CREATE INDEX cards_account_id`** makes "the cards of this account", PayDeck's most common query, fast.
+
+The VARCHAR lengths match the validation on the request records (`@Size(max = 50)` for a nickname, `@Size(max = 100)` for an owner name), so a value the API accepts always fits.
+
+### Switch Hibernate to validate
+
+In `application.yml`:
+
+```yaml
+spring:
+  jpa:
+    # Flyway owns the schema; Hibernate only checks that the entities match it.
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+```
+
+### Run it
+
+Restart the API. It refuses to start:
+
+```
+Found non-empty schema(s) "public" but no schema history table. Use baseline() or set baselineOnMigrate to true to initialize the schema history table.
+```
+
+Flyway found tables (the ones Hibernate made) but no history of how they got there, and it will not guess. The tables are throwaway practice data, so start the database afresh one last time:
+
+```sh
+docker compose down -v
+docker compose up -d
+```
+
+Start the API again and read the log:
+
+```
+Schema history table "public"."flyway_schema_history" does not exist yet
+Successfully validated 1 migration (execution time 00:00.019s)
+Creating Schema History table "public"."flyway_schema_history" ...
+Current version of schema "public": << Empty Schema >>
+Migrating schema "public" to version "1 - create accounts and cards"
+Successfully applied 1 migration to schema "public", now at version v1 (execution time 00:00.024s)
+```
+
+Stop it and start it once more. This time Flyway has nothing to do:
+
+```
+Current version of schema "public": 1
+Schema "public" is up to date. No migration necessary.
+```
+
+Look inside with `docker compose exec postgres psql -U paydeck`:
+
+```
+paydeck=# \dt
+                List of relations
+ Schema |         Name          | Type  |  Owner
+--------+-----------------------+-------+---------
+ public | accounts              | table | paydeck
+ public | cards                 | table | paydeck
+ public | flyway_schema_history | table | paydeck
+(3 rows)
+
+paydeck=# SELECT installed_rank, version, description, script, success FROM flyway_schema_history;
+ installed_rank | version |        description        |              script               | success
+----------------+---------+---------------------------+-----------------------------------+---------
+              1 | 1       | create accounts and cards | V1__create_accounts_and_cards.sql | t
+(1 row)
+
+paydeck=# SELECT owner_name, currency, kind FROM accounts;
+     owner_name      | currency |  kind
+---------------------+----------+--------
+ Outside world (USD) | USD      | SYSTEM
+ Outside world (EUR) | EUR      | SYSTEM
+ Outside world (GBP) | GBP      | SYSTEM
+ Outside world (INR) | INR      | SYSTEM
+(4 rows)
+```
+
+And `\d cards` now shows your lengths and rules, including the foreign key that was missing in lesson 23.3:
+
+```
+ nickname             | character varying(50)    |           | not null |
+ last4                | character varying(4)     |           | not null |
+ status               | character varying(10)    |           | not null |
+...
+Indexes:
+    "cards_pkey" PRIMARY KEY, btree (id)
+    "cards_account_id" btree (account_id)
+Check constraints:
+    "cards_spending_limit_cents_check" CHECK (spending_limit_cents > 0)
+    "cards_status_check" CHECK (status::text = ANY (ARRAY['ACTIVE'::character varying, 'FROZEN'::character varying, 'CANCELLED'::character varying]::text[]))
+Foreign-key constraints:
+    "cards_account_id_fkey" FOREIGN KEY (account_id) REFERENCES accounts(id)
+```
+
+PostgreSQL named the constraints for you: table, column, then `check`, `fkey` or `pkey`.
+
+### Validation at work
+
+To see `validate` protect you, add a field to `Card` that has no column:
+
+```java
+private String colour;
+```
+
+The app refuses to start:
+
+```
+Schema validation: missing column [colour] in table [cards]
+```
+
+Before, Hibernate would have quietly added the column. Now a change to the tables only happens through a migration that someone wrote and reviewed. Remove the field again.
+
+## Try it
+
+<Exercise title="Try it: let the database say no">
+In psql, try to break each rule by hand, and read how PostgreSQL refuses:
+
+1. A card with a spending limit of `0` for one of your real accounts.
+2. A card for an account ID that does not exist.
+3. A second `SYSTEM` account for USD.
+
+Then run `SELECT count(*) FROM cards;`. Did any of the bad rows get in?
+
+<Fragment slot="hint">Copy a real account ID from `SELECT id, owner_name FROM accounts WHERE kind = 'CUSTOMER';` (open one with the API first if you have none). An `INSERT` into `cards` needs every `NOT NULL` column: `id`, `account_id`, `nickname`, `last4`, `status`, `created_at`. `gen_random_uuid()` makes a new UUID in SQL.</Fragment>
+<Fragment slot="solution">
+
+```sql
+INSERT INTO cards (id, account_id, nickname, last4, status, spending_limit_cents, created_at)
+VALUES (gen_random_uuid(), '4e5831ca-61d5-45e7-b451-5726d7b68095', 'Zero', '1234', 'ACTIVE', 0, now());
+```
+
+```
+ERROR:  new row for relation "cards" violates check constraint "cards_spending_limit_cents_check"
+DETAIL:  Failing row contains (384d6284-2908-41fb-a84f-409b55d218d0, 4e5831ca-61d5-45e7-b451-5726d7b68095, Zero, 1234, ACTIVE, 0, 2026-10-22 00:02:45.529768+00).
+```
+
+```sql
+INSERT INTO cards (id, account_id, nickname, last4, status, created_at)
+VALUES (gen_random_uuid(), '00000000-0000-0000-0000-000000000000', 'Ghost', '1234', 'ACTIVE', now());
+```
+
+```
+ERROR:  insert or update on table "cards" violates foreign key constraint "cards_account_id_fkey"
+DETAIL:  Key (account_id)=(00000000-0000-0000-0000-000000000000) is not present in table "accounts".
+```
+
+```sql
+INSERT INTO accounts (id, owner_name, currency, kind, created_at)
+VALUES (gen_random_uuid(), 'Second outside world', 'USD', 'SYSTEM', now());
+```
+
+```
+ERROR:  duplicate key value violates unique constraint "accounts_one_system_account_per_currency"
+DETAIL:  Key (currency)=(USD) already exists.
+```
+
+None of them got in. The Java code already checks the first two, so why both? Because the database is the last line of defence: it also protects you from a future bug, from a teammate's script, and from you in psql at midnight. In a payments system, rules about money live in the database as well as in the code.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Migration checksum mismatch for migration version 1">
+You edited a migration that was already applied. Flyway stores a checksum (a fingerprint of the file) for each one and refuses to start if a file changed:
+
+```
+Migration checksum mismatch for migration version 1
+-> Applied to database : -1014083143
+-> Resolved locally    : 1838792820
+Either revert the changes to the migration, or run repair to update the schema history.
+```
+
+Undo your edit and put the change in a new file, `V2__...sql`. On your own practice database (never a shared one) you can instead start afresh with `docker compose down -v`.
+</Aside>
+
+<Aside type="caution" title="The migration never runs">
+Check the name: `V1__` needs a capital `V` and **two** underscores, the file must end in `.sql`, and it must be in `src/main/resources/db/migration`. Flyway quietly ignores files it does not recognise, and Hibernate's validation then complains about a missing table instead.
+</Aside>
+
+<Aside type="caution" title="Changing tables in psql">
+An `ALTER TABLE` typed by hand changes your database only, so your teammates' and the server's will differ from yours. Every change to tables goes in a migration.
+</Aside>
+
+## Recap
+
+- A migration is a numbered SQL file, `V<n>__<description>.sql`, in `src/main/resources/db/migration`.
+- Flyway applies the missing ones in order at start-up and records them in `flyway_schema_history`.
+- Never edit an applied migration; add a new one.
+- `ddl-auto: validate` makes Hibernate check, not change, the tables.
+- `CHECK`, foreign keys and unique indexes make the database refuse bad data, whatever the code does.
+
+<Quiz
+	questions={[
+		{
+			question: 'PayDeck has V1 and V2 applied. You need a new column. What do you do?',
+			options: ['Add it to V2', 'Write V3 with an ALTER TABLE', 'Set ddl-auto back to update'],
+			answer: 1,
+			explanation: 'Applied migrations never change. Every change is a new, numbered file.',
+		},
+		{
+			question: 'With ddl-auto: validate, what happens if an entity field has no column?',
+			options: ['Hibernate adds the column', 'The field is ignored', 'The app refuses to start'],
+			answer: 2,
+			explanation: 'Validate only compares. The fix is a migration that adds the column.',
+		},
+		{
+			question: 'Why put CHECK (spending_limit_cents > 0) in the database when Java validation already refuses negative limits?',
+			options: ['It makes queries faster', 'It protects the data from every source, including future bugs and manual SQL', 'Hibernate needs it'],
+			answer: 1,
+			explanation: 'The database is the last line of defence for data that matters.',
+		},
+	]}
+/>
+
+<MarkComplete />
