@@ -1,0 +1,241 @@
+---
+title: "Mini-project: full test suite for the PayDeck API"
+description: "Write the integration tests for PayDeck's money API, covering balances, transfers, every refusal and idempotent retries, then prove the suite catches real bugs by breaking the code on purpose."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Cards have unit tests and an API test; the ledger's rules and the concurrency have tests too. The money API itself, the part customers use most, has only the controller slice test with its mocks. In this project you give it real integration tests, so that the whole of Part 6 is protected before Part 7 connects the app to it.
+
+## The tasks
+
+1. **`MoneyApiTest`.** In `src/test/java/dev/paydeck/api/money`, extending `ApiTestSupport`, write one test for each of these, all through MockMvc:
+   1. A new account starts with balance 0, and shows its owner and currency.
+   2. A top-up adds to the balance.
+   3. A transfer answers `201` with `"type": "TRANSFER"` and `Idempotent-Replayed: false`, moves the money between the two balances, and appears first in the sender's history with a negative amount.
+   4. A transfer of more than the balance is refused with `INSUFFICIENT_FUNDS`, and the balance is unchanged.
+   5. A transfer between a USD and a EUR account is refused with `CURRENCY_MISMATCH`.
+   6. Retrying a transfer with the same key answers `200`, `Idempotent-Replayed: true` and the **same transaction ID**, and moves money only once.
+   7. Reusing a key for a different amount is refused with `409`, and moves no money.
+   8. A top-up without an `Idempotency-Key` answers `400` with the detail "The Idempotency-Key header is required".
+   9. A negative amount answers `400` with an error for `amountCents`.
+   10. A system account cannot be read (`404`).
+2. **Run everything.** `./mvnw test` must pass with your own database stopped.
+3. **Break it on purpose.** For each change in the table below, make the change, run the suite, note which tests fail, and undo it. Every change must be caught by at least one test.
+
+| Change in the code | What it simulates |
+| --- | --- |
+| In `transfer`, remove the `INSUFFICIENT_FUNDS` check | Forgetting a rule |
+| In `MoneyController.respond`, always answer `HttpStatus.CREATED` | Breaking replays for the app |
+| In `replay`, delete the fingerprint comparison (always return the earlier result) | Trusting the key alone |
+| In `LedgerService.checkBalanced`, delete the `total != 0` check | Letting money be created |
+
+4. Commit.
+
+<Exercise title="Build it">
+Do the four tasks. With the exercise tests from this module's lessons, `./mvnw test` reports 32 tests.
+
+<Fragment slot="hint">Add a private helper `transfer(from, to, amountCents, key)` that returns `mvc.perform(...)`'s `ResultActions`, so each test can add its own `andExpect`s. `header().string("Idempotent-Replayed", "true")` checks a response header. For "the same transaction ID", read the first response's `$.id` with `JsonPath.read` and compare it with `jsonPath("$.id").value(...)` on the second.</Fragment>
+<Fragment slot="solution">
+
+`src/test/java/dev/paydeck/api/money/MoneyApiTest.java`:
+
+```java
+package dev.paydeck.api.money;
+
+import static org.hamcrest.Matchers.hasSize;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import java.util.UUID;
+
+import dev.paydeck.api.ApiTestSupport;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.ResultActions;
+
+class MoneyApiTest extends ApiTestSupport {
+
+    @Test
+    void aNewAccountStartsEmpty() throws Exception {
+        UUID account = openAccount("Asha", "INR");
+
+        mvc.perform(get("/api/accounts/{id}", account))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ownerName").value("Asha"))
+                .andExpect(jsonPath("$.currency").value("INR"))
+                .andExpect(jsonPath("$.balanceCents").value(0));
+    }
+
+    @Test
+    void aTopUpAddsToTheBalance() throws Exception {
+        UUID account = openAccount("Asha", "USD");
+
+        topUp(account, 2_500);
+
+        mvc.perform(get("/api/accounts/{id}", account)).andExpect(jsonPath("$.balanceCents").value(2_500));
+    }
+
+    @Test
+    void aTransferMovesMoneyBetweenAccounts() throws Exception {
+        UUID from = openAccount("Asha", "USD");
+        UUID to = openAccount("Ben", "USD");
+        topUp(from, 10_000);
+
+        transfer(from, to, 3_000, UUID.randomUUID().toString())
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.type").value("TRANSFER"))
+                .andExpect(header().string("Idempotent-Replayed", "false"));
+
+        mvc.perform(get("/api/accounts/{id}", from)).andExpect(jsonPath("$.balanceCents").value(7_000));
+        mvc.perform(get("/api/accounts/{id}", to)).andExpect(jsonPath("$.balanceCents").value(3_000));
+        mvc.perform(get("/api/accounts/{id}/transactions", from))
+                .andExpect(jsonPath("$", hasSize(2)))
+                .andExpect(jsonPath("$[0].type").value("TRANSFER"))
+                .andExpect(jsonPath("$[0].amountCents").value(-3_000));
+    }
+
+    @Test
+    void aTransferCannotSpendMoreThanTheBalance() throws Exception {
+        UUID from = openAccount("Asha", "USD");
+        UUID to = openAccount("Ben", "USD");
+        topUp(from, 1_000);
+
+        transfer(from, to, 1_001, UUID.randomUUID().toString())
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.code").value("INSUFFICIENT_FUNDS"));
+
+        mvc.perform(get("/api/accounts/{id}", from)).andExpect(jsonPath("$.balanceCents").value(1_000));
+    }
+
+    @Test
+    void aTransferNeedsMatchingCurrencies() throws Exception {
+        UUID from = openAccount("Asha", "USD");
+        UUID to = openAccount("Ben", "EUR");
+        topUp(from, 1_000);
+
+        transfer(from, to, 500, UUID.randomUUID().toString())
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.code").value("CURRENCY_MISMATCH"));
+    }
+
+    @Test
+    void retryingWithTheSameKeyDoesNotMoveMoneyTwice() throws Exception {
+        UUID from = openAccount("Asha", "USD");
+        UUID to = openAccount("Ben", "USD");
+        topUp(from, 10_000);
+        String key = UUID.randomUUID().toString();
+
+        String firstId = transfer(from, to, 4_000, key).andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        transfer(from, to, 4_000, key)
+                .andExpect(status().isOk())
+                .andExpect(header().string("Idempotent-Replayed", "true"))
+                .andExpect(jsonPath("$.id").value(com.jayway.jsonpath.JsonPath.<String>read(firstId, "$.id")));
+
+        mvc.perform(get("/api/accounts/{id}", from)).andExpect(jsonPath("$.balanceCents").value(6_000));
+    }
+
+    @Test
+    void reusingAKeyForADifferentRequestIsRefused() throws Exception {
+        UUID from = openAccount("Asha", "USD");
+        UUID to = openAccount("Ben", "USD");
+        topUp(from, 10_000);
+        String key = UUID.randomUUID().toString();
+
+        transfer(from, to, 4_000, key).andExpect(status().isCreated());
+        transfer(from, to, 5_000, key).andExpect(status().isConflict());
+
+        mvc.perform(get("/api/accounts/{id}", from)).andExpect(jsonPath("$.balanceCents").value(6_000));
+    }
+
+    @Test
+    void moneyRequestsNeedAnIdempotencyKey() throws Exception {
+        UUID account = openAccount("Asha", "USD");
+
+        mvc.perform(post("/api/accounts/{id}/top-ups", account)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"amountCents": 100, "description": "No key"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.detail").value("The Idempotency-Key header is required"));
+    }
+
+    @Test
+    void amountsMustBePositive() throws Exception {
+        UUID account = openAccount("Asha", "USD");
+
+        mvc.perform(post("/api/accounts/{id}/top-ups", account)
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"amountCents": -100, "description": "Negative"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fields.amountCents").exists());
+    }
+
+    @Test
+    void systemAccountsAreHidden() throws Exception {
+        mvc.perform(get("/api/accounts/{id}", "00000000-0000-0000-0000-000000000840"))
+                .andExpect(status().isNotFound());
+    }
+
+    private ResultActions transfer(UUID from, UUID to, long amountCents, String key) throws Exception {
+        return mvc.perform(post("/api/transfers")
+                .header("Idempotency-Key", key)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"fromAccountId": "%s", "toAccountId": "%s", "amountCents": %d, "description": "Rent"}
+                        """.formatted(from, to, amountCents)));
+    }
+}
+```
+
+`JsonPath.<String>read(...)` tells Java the value is a `String` (JSONPath could return any type). Notice how every refusal test also checks the balance afterwards: a refusal that still moved money would be the worst bug of all. Writing `2_500` instead of `2500` is the same number; the underscore only makes long amounts easier to read.
+
+With your database stopped:
+
+```
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 5.131 s -- in dev.paydeck.api.money.MoneyControllerTest
+[INFO] Tests run: 10, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 11.13 s -- in dev.paydeck.api.money.MoneyApiTest
+[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.679 s -- in dev.paydeck.api.money.ConcurrentTransfersTest
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.107 s -- in dev.paydeck.api.money.IdempotentTopUpTest
+[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.010 s -- in dev.paydeck.api.HelloControllerTest
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.186 s -- in dev.paydeck.api.card.CardApiTest
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.018 s -- in dev.paydeck.api.card.CardTest
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.008 s -- in dev.paydeck.api.ledger.LedgerServiceTest
+[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.543 s -- in dev.paydeck.api.AppSmokeTest
+[INFO] Tests run: 32, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
+What breaking the code showed:
+
+| Change | Caught by |
+| --- | --- |
+| No `INSUFFICIENT_FUNDS` check | `MoneyApiTest.aTransferCannotSpendMoreThanTheBalance` and `ConcurrentTransfersTest.simultaneousTransfersNeverOverspend` |
+| Always `201` | `MoneyApiTest.retryingWithTheSameKeyDoesNotMoveMoneyTwice` and `MoneyControllerTest.aReplayedTopUpAnswers200` |
+| No fingerprint comparison | `MoneyApiTest.reusingAKeyForADifferentRequestIsRefused` |
+| No `total != 0` check | `LedgerServiceTest.rejectsPostingsThatWouldCreateMoney` |
+
+Each broken rule is caught, and the name of the failing test says which rule it was. That is what a good suite gives you: the confidence to change code, because a mistake shows up in half a minute instead of in a customer's account.
+
+What to notice:
+
+- **Each layer has its own tests.** Rules in unit tests (`CardTest`, `LedgerServiceTest`), HTTP details in a slice test (`MoneyControllerTest`), the whole system in integration tests (`MoneyApiTest`, `CardApiTest`), and timing in concurrency tests. Some bugs are caught by two layers, which is fine.
+- **Test names are sentences.** `aTransferCannotSpendMoreThanTheBalance` in a failure report needs no explanation.
+- **Part 6 is done.** You have built PayDeck's API from an empty folder: cards, accounts, a double-entry ledger, safe transfers, and 32 tests guarding them. In Part 7 the React Native app starts using it.
+</Fragment>
+</Exercise>
+
+<MarkComplete />

@@ -1,0 +1,367 @@
+---
+title: "25.2 Integration tests with Testcontainers"
+description: "Run the whole API against a fresh PostgreSQL that Testcontainers starts in Docker for every test run, so tests no longer depend on your own database."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson `./mvnw test` starts its own throwaway PostgreSQL in Docker, runs the real API against it through MockMvc, and passes whether or not your own database is running.
+
+## Why it matters
+
+In the Module 23 project, `./mvnw test` failed when your database was stopped, and when it passed, it wrote test data into the database you use by hand. Neither is acceptable: tests must give the same answer on every machine, every time, including on a build server (Module 36) that has never heard of your laptop. And the things that matter most in PayDeck, SQL, Flyway migrations, transactions and locks, can only be tested against the real database engine.
+
+## The idea
+
+**Testcontainers** is a library that starts Docker containers from inside your tests. Ask it for PostgreSQL, and it:
+
+1. Starts a `postgres` container on a random free port (so it never clashes with yours on 5432).
+2. Waits until the database is ready.
+3. Tells Spring Boot where to find it: with **`@ServiceConnection`**, Boot reads the container's address, user and password and uses them instead of `spring.datasource` in `application.yml`.
+4. Removes the container when the tests finish.
+
+Flyway then runs both migrations on the empty database, exactly as on a real server, so the tests also prove that your migrations work.
+
+Starting a container and Spring takes several seconds, but only once: Spring keeps the started app (its **context**) and reuses it for every test class with the same setup. So all integration tests share one setup, in one base class.
+
+Because the tests share one database for the whole run, each test must create the data it needs (its own accounts, with random IDs) and never assume the database is empty.
+
+## Worked example
+
+### Dependencies
+
+In `pom.xml`, after `spring-boot-starter-webmvc-test`, add:
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-data-jpa-test</artifactId>
+    <scope>test</scope>
+</dependency>
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-testcontainers</artifactId>
+    <scope>test</scope>
+</dependency>
+<dependency>
+    <groupId>org.testcontainers</groupId>
+    <artifactId>testcontainers-postgresql</artifactId>
+    <scope>test</scope>
+</dependency>
+<dependency>
+    <groupId>org.testcontainers</groupId>
+    <artifactId>testcontainers-junit-jupiter</artifactId>
+    <scope>test</scope>
+</dependency>
+```
+
+The first is Spring Boot's test kit for JPA (Initializr adds it with Spring Data JPA, so you may already have it); the second connects Boot to Testcontainers; the last two are Testcontainers itself, for PostgreSQL and JUnit. `<scope>test</scope>` keeps all of them out of the app you ship.
+
+### The container
+
+`src/test/java/dev/paydeck/api/TestcontainersConfiguration.java`:
+
+```java
+package dev.paydeck.api;
+
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.context.annotation.Bean;
+import org.testcontainers.postgresql.PostgreSQLContainer;
+
+/** Starts a real PostgreSQL in Docker for the tests, so they test what production runs. */
+@TestConfiguration(proxyBeanMethods = false)
+public class TestcontainersConfiguration {
+
+    @Bean
+    @ServiceConnection
+    PostgreSQLContainer postgres() {
+        return new PostgreSQLContainer("postgres:17-alpine");
+    }
+}
+```
+
+`@TestConfiguration` is a `@Configuration` (Module 21) for tests only. The container is a bean, so Spring starts it before anything that needs the database. `postgres:17-alpine` is the same PostgreSQL version as your `docker-compose.yml`.
+
+### The base class
+
+`src/test/java/dev/paydeck/api/ApiTestSupport.java` holds the setup and two helpers that most tests need:
+
+```java
+package dev.paydeck.api;
+
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import java.util.UUID;
+
+import com.jayway.jsonpath.JsonPath;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.context.annotation.Import;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.MockMvc;
+
+/** Shared setup for tests that call the API over HTTP, backed by a real database. */
+@SpringBootTest
+@AutoConfigureMockMvc
+@Import(TestcontainersConfiguration.class)
+public abstract class ApiTestSupport {
+
+    @Autowired
+    protected MockMvc mvc;
+
+    protected UUID openAccount(String owner, String currency) throws Exception {
+        String body = mvc.perform(post("/api/accounts")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"ownerName": "%s", "currency": "%s"}
+                                """.formatted(owner, currency)))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        return UUID.fromString(JsonPath.read(body, "$.id"));
+    }
+
+    protected void topUp(UUID accountId, long amountCents) throws Exception {
+        mvc.perform(post("/api/accounts/{id}/top-ups", accountId)
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"amountCents": %d, "description": "Test top-up"}
+                                """.formatted(amountCents)))
+                .andExpect(status().isCreated());
+    }
+}
+```
+
+- **`@SpringBootTest`** starts the whole app, this time with real services and repositories; **`@AutoConfigureMockMvc`** adds a `MockMvc` for it; **`@Import`** brings in the container.
+- **`abstract`** means the class cannot run by itself; test classes `extend` it and inherit everything, annotations included. `protected` makes `mvc` and the helpers visible to them.
+- **`"...%s...".formatted(owner, currency)`** fills the `%s` (text) and `%d` (whole number) placeholders in order.
+- **`JsonPath.read(body, "$.id")`** pulls one value out of a JSON string, the same `$.id` syntax as `jsonPath` in assertions. `.andReturn().getResponse().getContentAsString()` gives you the response body.
+
+### The first integration tests
+
+Delete `PayDeckApplicationTests.java` (the "context loads" test from Initializr), and replace it with something that checks more. `src/test/java/dev/paydeck/api/AppSmokeTest.java`:
+
+```java
+package dev.paydeck.api;
+
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import org.junit.jupiter.api.Test;
+
+class AppSmokeTest extends ApiTestSupport {
+
+    @Test
+    void reportsHealthy() throws Exception {
+        mvc.perform(get("/actuator/health"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("UP"));
+    }
+
+    @Test
+    void publishesItsApiDescription() throws Exception {
+        mvc.perform(get("/v3/api-docs"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.paths['/api/transfers']").exists());
+    }
+}
+```
+
+A **smoke test** is the first, broadest check: does it start and answer at all? Health being `UP` includes the database, and the OpenAPI document listing `/api/transfers` shows that the money controller is wired in. (`['/api/transfers']` is JSONPath for a field whose name contains slashes.)
+
+And the cards API, end to end, in `src/test/java/dev/paydeck/api/card/CardApiTest.java`:
+
+```java
+package dev.paydeck.api.card;
+
+import static org.hamcrest.Matchers.hasSize;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import java.util.UUID;
+
+import com.jayway.jsonpath.JsonPath;
+import dev.paydeck.api.ApiTestSupport;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.MediaType;
+
+class CardApiTest extends ApiTestSupport {
+
+    @Test
+    void aCardCanBeIssuedFrozenLimitedAndCancelled() throws Exception {
+        UUID account = openAccount("Asha", "GBP");
+
+        String issued = mvc.perform(post("/api/accounts/{id}/cards", account)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"nickname": "Groceries", "spendingLimitCents": 5000}
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("ACTIVE"))
+                .andExpect(jsonPath("$.last4").isString())
+                .andReturn().getResponse().getContentAsString();
+        String card = JsonPath.read(issued, "$.id");
+
+        mvc.perform(post("/api/cards/{id}/freeze", card))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("FROZEN"));
+        mvc.perform(post("/api/cards/{id}/freeze", card))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.code").value("CARD_NOT_ACTIVE"));
+        mvc.perform(post("/api/cards/{id}/unfreeze", card))
+                .andExpect(jsonPath("$.status").value("ACTIVE"));
+
+        mvc.perform(patch("/api/cards/{id}", card)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"nickname": "Food", "removeSpendingLimit": true}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.nickname").value("Food"))
+                .andExpect(jsonPath("$.spendingLimitCents").doesNotExist());
+
+        mvc.perform(get("/api/accounts/{id}/cards", account)).andExpect(jsonPath("$", hasSize(1)));
+
+        mvc.perform(delete("/api/cards/{id}", card)).andExpect(status().isNoContent());
+        mvc.perform(get("/api/cards/{id}", card)).andExpect(jsonPath("$.status").value("CANCELLED"));
+    }
+
+    @Test
+    void anUnknownAccountCannotGetACard() throws Exception {
+        mvc.perform(post("/api/accounts/{id}/cards", UUID.randomUUID())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"nickname": "Travel"}
+                                """))
+                .andExpect(status().isNotFound());
+    }
+}
+```
+
+The first test is a **story**: it follows one card through its whole life, as a customer would, checking each step. `hasSize(1)` (from a matcher library called Hamcrest) checks the length of a JSON list. `jsonPath(...).doesNotExist()` passes for a field that is `null`, which is how the removed limit comes back. Wherever `CardTest` checked a rule on the object, this test checks that the same rule reaches the customer as the right HTTP answer, after a real trip through PostgreSQL.
+
+### Run everything
+
+Make sure Docker Desktop is running, and stop your own database to prove the point:
+
+```sh
+docker compose stop
+./mvnw test
+```
+
+The first time, Docker downloads the `postgres:17-alpine` image, which takes a minute. Then the log shows Testcontainers at work (shortened):
+
+```
+Testcontainers version: 2.0.5
+Found Docker environment with local Unix socket (unix:///var/run/docker.sock)
+Creating container for image: testcontainers/ryuk:0.14.0
+Container testcontainers/ryuk:0.14.0 started in PT0.718210688S
+Ryuk started - will monitor and terminate Testcontainers containers on JVM exit
+Creating container for image: postgres:17-alpine
+Container postgres:17-alpine started in PT2.353140648S
+Container is started (JDBC URL: jdbc:postgresql://localhost:32769/test?loggerLevel=OFF)
+...
+Migrating schema "public" to version "1 - create accounts and cards"
+Migrating schema "public" to version "2 - create ledger"
+Successfully applied 2 migrations to schema "public", now at version v2 (execution time 00:00.064s)
+```
+
+**Ryuk** is Testcontainers' cleaner: a tiny container that removes the others when the tests end, even if they crash. Port `32769` was picked at random. And the results:
+
+```
+Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 4.888 s -- in dev.paydeck.api.money.MoneyControllerTest
+Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.091 s -- in dev.paydeck.api.HelloControllerTest
+Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 13.63 s -- in dev.paydeck.api.card.CardApiTest
+Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.022 s -- in dev.paydeck.api.card.CardTest
+Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.015 s -- in dev.paydeck.api.ledger.LedgerServiceTest
+Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.763 s -- in dev.paydeck.api.AppSmokeTest
+Tests run: 18, Failures: 0, Errors: 0, Skipped: 0
+BUILD SUCCESS
+```
+
+Look at the times: `CardApiTest` took 13.6 seconds because it paid for starting the container and Spring; `AppSmokeTest` reused both and took under a second. Your own database was never touched. Start it again with `docker compose start` when you next run the app.
+
+## Try it
+
+<Exercise title="Try it: the hidden account, tested">
+In the Module 23 project you showed by hand that nobody can issue a card for the USD system account (`00000000-0000-0000-0000-000000000840`). Turn that check into a test in `CardApiTest`, checking the status and the problem's `title`. Run only that class with `-Dtest=CardApiTest`.
+
+<Fragment slot="hint">Copy `anUnknownAccountCannotGetACard` and change the ID. The system accounts exist in the test database too: Flyway's `V1` created them.</Fragment>
+<Fragment slot="solution">
+
+```java
+@Test
+void aSystemAccountCannotGetACard() throws Exception {
+    mvc.perform(post("/api/accounts/{id}/cards", "00000000-0000-0000-0000-000000000840")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content("""
+                            {"nickname": "Sneaky"}
+                            """))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.title").value("Not found"));
+}
+```
+
+It passes. It is a different test from `anUnknownAccountCannotGetACard`: there the account does not exist at all, here it exists but is the wrong kind. If someone ever removed the `.filter(...)` from `requireCustomerAccount`, only this test would notice. (Keep it: the Module 25 project counts it.)
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Could not find a valid Docker environment">
+Testcontainers could not reach Docker. Start Docker Desktop, wait until it says it is running, and try again.
+</Aside>
+
+<Aside type="caution" title="Tests that depend on each other">
+"Test B uses the account test A created" works until JUnit runs them in a different order, which it is allowed to do. Each test opens its own accounts. Never assume the database is empty, either: `findAll()` returns every other test's data too.
+</Aside>
+
+<Aside type="caution" title="A different setup in every test class">
+Each new combination of annotations (or a `@MockitoBean` in a `@SpringBootTest`) makes Spring start a new context, and possibly a new container. Extending one base class keeps it to one.
+</Aside>
+
+## Recap
+
+- Testcontainers starts real services, such as PostgreSQL, in Docker for your tests, and removes them afterwards.
+- `@ServiceConnection` points Spring Boot at the container automatically.
+- `@SpringBootTest` + `@AutoConfigureMockMvc` test the whole app through HTTP; a shared base class keeps one context for all tests.
+- Flyway migrates the test database, so migrations are tested too.
+- Each test creates its own data and never relies on other tests or an empty database.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why do the integration tests pass with your own PostgreSQL stopped?',
+			options: ['They do not use a database', 'Testcontainers starts a separate PostgreSQL in Docker just for the tests', 'Spring uses an in-memory database'],
+			answer: 1,
+			explanation: '@ServiceConnection connects the app to the container instead of localhost:5432.',
+		},
+		{
+			question: 'CardApiTest took 13 seconds and AppSmokeTest under one. Why?',
+			options: ['AppSmokeTest has fewer tests', 'The first class started the container and Spring; the second reused them', 'AppSmokeTest skips the database'],
+			answer: 1,
+			explanation: 'Spring caches the test context between classes with the same setup.',
+		},
+		{
+			question: 'Where do the four SYSTEM accounts in the test database come from?',
+			options: ['ApiTestSupport creates them', 'Flyway runs V1 on the fresh database', 'They are mocked'],
+			answer: 1,
+			explanation: 'Every test run starts empty and migrates, exactly like a new server.',
+		},
+	]}
+/>
+
+<MarkComplete />
