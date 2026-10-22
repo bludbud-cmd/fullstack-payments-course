@@ -1,0 +1,331 @@
+---
+title: "30.3 Method security"
+description: "Put a rule right on the method it protects with @PreAuthorize, so only admins can change roles, and add the staff endpoints that the support screens will need."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson support staff can open a customer's details (who they are, their accounts and balances), and admins, and only admins, can change someone's role through the API.
+
+## Why it matters
+
+Lesson 30.1 keeps customers out of `/api/admin` with one URL rule. But inside `/api/admin` there are now two levels of staff: support may look things up, while changing roles is for admins only. You could write a URL rule for each admin-only path, but those rules live in `SecurityConfig`, far from the code they protect, and paths change. A rule written **on the method itself** moves with the method and is impossible to miss when you read it.
+
+## The idea
+
+### Three layers
+
+After this lesson PayDeck checks authorization in three places, from coarse to fine:
+
+1. **URL rules** in `SecurityConfig`: whole areas of the API. "Only staff under `/api/admin`."
+2. **Method rules** with `@PreAuthorize`: one endpoint. "Only admins may change roles."
+3. **`AccessPolicy`**: one account or card. "Sam may see Asha's card, but not raise its limit."
+
+Each layer catches mistakes the others might miss. That is called **defence in depth**: if a URL rule is accidentally widened, the method rule still holds.
+
+### @PreAuthorize
+
+`@PreAuthorize("hasRole('ADMIN')")` on a method means: before running this method, check this expression; if it is false, refuse with 403. The expression is written in SpEL (Spring Expression Language), and the common ones read like English: `hasRole('ADMIN')`, `hasAnyRole('SUPPORT', 'ADMIN')`, `isAuthenticated()`.
+
+It only works after you switch it on with `@EnableMethodSecurity`. Without that, Spring ignores the annotation completely: no error, no warning, no protection. You will see that for yourself in the exercise.
+
+Like `@Transactional` (lesson 24.3), it works through a **proxy** in front of the bean, so it only applies to calls that come into the bean from outside. That is exactly the case for controller methods, which Spring calls for each request.
+
+### When does a role change take effect?
+
+Changing Asha's role updates the `users` table immediately, but her **current access token** was made before the change and still carries the old role. Her app renews it within 15 minutes, and the new token carries the new role. You will write a test that proves both halves.
+
+### Guarding the guards
+
+An admin who demotes themselves by mistake might leave PayDeck with no admin at all, and no way to make one except SQL on the production database. So the API refuses to let anyone change their own role. Another admin has to do it.
+
+## Worked example
+
+### Switch it on
+
+In `SecurityConfig`, add one annotation to the class (import `org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity`):
+
+```java
+@Configuration
+@EnableMethodSecurity
+@EnableConfigurationProperties(AuthProperties.class)
+public class SecurityConfig {
+```
+
+### The new endpoints
+
+In `AdminController`, add two records at the top of the class:
+
+```java
+    public record UserDetails(UserResponse user, Instant createdAt, List<AccountResponse> accounts) {
+    }
+
+    public record ChangeRoleRequest(@NotNull Role role) {
+    }
+```
+
+The controller needs the accounts and their balances, so it gets two more dependencies:
+
+```java
+    private final UserRepository users;
+    private final AccountRepository accounts;
+    private final LedgerService ledger;
+
+    public AdminController(UserRepository users, AccountRepository accounts, LedgerService ledger) {
+        this.users = users;
+        this.accounts = accounts;
+        this.ledger = ledger;
+    }
+```
+
+And two methods, after `findUsers`:
+
+```java
+    /** Everything support needs on one screen: who they are, and their accounts with balances. */
+    @GetMapping("/users/{id}")
+    @Transactional(readOnly = true)
+    public UserDetails user(@PathVariable UUID id) {
+        User user = users.findById(id).orElseThrow(() -> new NotFoundException("User", id));
+        List<AccountResponse> owned = accounts.findByOwnerUserIdOrderByCreatedAt(id).stream()
+                .map(account -> AccountController.toResponse(account, ledger.balanceOf(account.getId())))
+                .toList();
+        return new UserDetails(UserResponse.of(user), user.getCreatedAt(), owned);
+    }
+
+    /** Takes effect when that person's access token is next renewed: within 15 minutes. */
+    @PutMapping("/users/{id}/role")
+    @PreAuthorize("hasRole('ADMIN')")
+    @Transactional
+    public UserResponse changeRole(CurrentUser admin, @PathVariable UUID id,
+                                   @Valid @RequestBody ChangeRoleRequest request) {
+        if (admin.id().equals(id)) {
+            throw new BusinessRuleException("CANNOT_CHANGE_OWN_ROLE",
+                    "Ask another admin to change your role, so PayDeck is never left without one.");
+        }
+        User user = users.findById(id).orElseThrow(() -> new NotFoundException("User", id));
+        user.changeRole(request.role());
+        return UserResponse.of(user);
+    }
+```
+
+The imports they need:
+
+```java
+import java.time.Instant;
+import java.util.UUID;
+
+import dev.paydeck.api.account.AccountController;
+import dev.paydeck.api.account.AccountController.AccountResponse;
+import dev.paydeck.api.account.AccountRepository;
+import dev.paydeck.api.auth.CurrentUser;
+import dev.paydeck.api.auth.Role;
+import dev.paydeck.api.common.BusinessRuleException;
+import dev.paydeck.api.common.NotFoundException;
+import dev.paydeck.api.ledger.LedgerService;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+```
+
+A few details:
+
+- `GET /users/{id}` has no `@PreAuthorize`: the URL rule already lets in support and admin, which is right for looking things up.
+- `PUT` replaces one thing completely, here "the role", which is why it is `PUT` rather than `PATCH`.
+- `changeRole` has no `save`: the user is loaded inside a transaction, and dirty checking writes the change (lesson 23.2).
+- Update the class comment to say what it now means: SecurityConfig keeps customers out of everything under `/api/admin`, and `@PreAuthorize` narrows some endpoints to admins.
+
+### Tests
+
+The tests need to find who opened an account. In `ApiTestSupport`, split `asOwnerOf` in two:
+
+```java
+    /** Sends the request as the person who opened this account. */
+    protected RequestPostProcessor asOwnerOf(UUID accountId) {
+        return as(ownerOf(accountId));
+    }
+
+    /** The person who opened this account with {@link #openAccount}. */
+    protected TestUser ownerOf(UUID accountId) {
+        return owners.get(accountId);
+    }
+```
+
+Then add three tests to `AdminApiTest`, with a helper at the bottom:
+
+```java
+    @Test
+    void supportSeesACustomersAccountsAndBalances() throws Exception {
+        UUID ashas = openAccount("Asha", "EUR");
+        topUp(ashas, 2500);
+        TestUser sam = registerAs("Sam", Role.SUPPORT);
+
+        mvc.perform(get("/api/admin/users/{id}", ownerOf(ashas).id()).with(as(sam)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.accounts[0].id").value(ashas.toString()))
+                .andExpect(jsonPath("$.accounts[0].balanceCents").value(2500));
+    }
+
+    @Test
+    void onlyAdminsChangeRoles() throws Exception {
+        TestUser asha = register("Asha");
+        TestUser sam = registerAs("Sam", Role.SUPPORT);
+        TestUser ada = registerAs("Ada", Role.ADMIN);
+
+        changeRole(sam, asha.id(), "SUPPORT")
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+        changeRole(ada, asha.id(), "SUPPORT")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.role").value("SUPPORT"));
+        changeRole(ada, ada.id(), "CUSTOMER")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.code").value("CANNOT_CHANGE_OWN_ROLE"));
+    }
+
+    @Test
+    void aNewRoleArrivesWithTheNextAccessToken() throws Exception {
+        TestUser asha = register("Asha");
+        TestUser ada = registerAs("Ada", Role.ADMIN);
+        changeRole(ada, asha.id(), "SUPPORT").andExpect(status().isOk());
+
+        // Her current token still says CUSTOMER...
+        mvc.perform(get("/api/admin/users").param("email", asha.email()).with(as(asha)))
+                .andExpect(status().isForbidden());
+        // ...until she gets a new one.
+        String body = mvc.perform(post("/api/auth/refresh").contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"refreshToken": "%s"}
+                                """.formatted(asha.refreshToken())))
+                .andReturn().getResponse().getContentAsString();
+        String newToken = JsonPath.read(body, "$.accessToken");
+        mvc.perform(get("/api/admin/users").param("email", asha.email()).header("Authorization", "Bearer " + newToken))
+                .andExpect(status().isOk());
+    }
+
+    private ResultActions changeRole(TestUser by, UUID userId, String role) throws Exception {
+        return mvc.perform(put("/api/admin/users/{id}/role", userId).with(as(by))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"role": "%s"}
+                        """.formatted(role)));
+    }
+```
+
+New imports for the test: `post` and `put` from `MockMvcRequestBuilders`, `java.util.UUID`, `com.jayway.jsonpath.JsonPath`, `org.springframework.http.MediaType` and `org.springframework.test.web.servlet.ResultActions`.
+
+`onlyAdminsChangeRoles` tests all three answers in order: support refused, admin allowed, admin on themselves refused. `aNewRoleArrivesWithTheNextAccessToken` pins down the 15-minute behaviour, so nobody "fixes" it by accident without deciding to. `./mvnw test`: 71 tests, all green.
+
+### Try it
+
+Restart the API. Sam opens Asha's details (only the names and balances are shown here, with `jq`):
+
+```sh
+curl -s localhost:8080/api/admin/users/538436cd-19d2-43a4-b803-f91e16867977 -H "Authorization: Bearer $SAM" \
+  | jq -c '{name: .user.displayName, accounts: [.accounts[] | {currency, balanceCents}]}'
+```
+
+```json
+{"name":"Asha Rao","accounts":[{"currency":"USD","balanceCents":12000},{"currency":"EUR","balanceCents":0},{"currency":"GBP","balanceCents":0},{"currency":"GBP","balanceCents":0}]}
+```
+
+Sam tries to promote Asha:
+
+```sh
+curl -s -X PUT localhost:8080/api/admin/users/538436cd-19d2-43a4-b803-f91e16867977/role \
+  -H "Authorization: Bearer $SAM" -H 'Content-Type: application/json' -d '{"role": "SUPPORT"}'
+```
+
+```json
+{"type":"about:blank","title":"Not allowed","status":403,"detail":"Your account is not allowed to do this.","code":"FORBIDDEN"}
+```
+
+Ada, with a token from signing in as `ada@paydeck.dev` in `$ADA`, makes Eve support, and then tries to change her own role:
+
+```sh
+curl -s -X PUT localhost:8080/api/admin/users/41609685-d300-4e72-8b60-949d329a3f9b/role \
+  -H "Authorization: Bearer $ADA" -H 'Content-Type: application/json' -d '{"role": "SUPPORT"}'
+```
+
+```json
+{"id":"41609685-d300-4e72-8b60-949d329a3f9b","email":"eve.moreau@gmail.com","displayName":"Eve Moreau","role":"SUPPORT","signInMethods":["PASSWORD","GOOGLE"]}
+```
+
+```sh
+curl -s -X PUT localhost:8080/api/admin/users/94de57a3-7cc4-429a-b8f4-92552a081814/role \
+  -H "Authorization: Bearer $ADA" -H 'Content-Type: application/json' -d '{"role": "CUSTOMER"}'
+```
+
+```json
+{"detail":"Ask another admin to change your role, so PayDeck is never left without one.","instance":"/api/admin/users/94de57a3-7cc4-429a-b8f4-92552a081814/role","status":422,"title":"Request not allowed","code":"CANNOT_CHANGE_OWN_ROLE"}
+```
+
+Use your own users' IDs, from `GET /api/admin/users?email=...`. Put Eve back to `CUSTOMER` when you are done.
+
+<Exercise title="The silent off switch">
+Remove `@EnableMethodSecurity` from `SecurityConfig` and run `./mvnw test -Dtest=AdminApiTest`. What happens, and why is it worse than a compile error? Put it back.
+
+<Fragment slot="hint">Does anything warn you that `@PreAuthorize` is now being ignored? Which test is the only thing that notices?</Fragment>
+<Fragment slot="solution">
+
+```
+[ERROR]   AdminApiTest.onlyAdminsChangeRoles:60 Status expected:<403> but was:<200>
+```
+
+The code compiles, the API starts, and nothing in the logs mentions it: `@PreAuthorize` is just an annotation that nobody reads any more. Support staff could now make anyone an admin, including themselves. Only the test notices. That is the general lesson about security code: a rule you have not seen fail is a rule you have not seen work. Write the test that sends the forbidden request.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Forgetting @EnableMethodSecurity">
+As the exercise shows, every `@PreAuthorize` is silently ignored without it.
+</Aside>
+
+<Aside type="caution" title="Relying on method rules alone">
+Annotations are easy to forget on a new method. Keep the URL rule for the whole staff area too, so a forgotten annotation still leaves customers outside.
+</Aside>
+
+<Aside type="caution" title="Trusting a role the client sends">
+A request body or a header that says "I am an admin" is just a claim from the client. The role that counts is the one the API itself wrote into the signed token.
+</Aside>
+
+## Recap
+
+- `@EnableMethodSecurity` switches on `@PreAuthorize`; without it the annotation does nothing, silently.
+- `@PreAuthorize("hasRole('ADMIN')")` protects one method, right where you read it.
+- URL rules, method rules and `AccessPolicy` are three layers: **defence in depth**.
+- A new role arrives with the next access token; the old token keeps the old role until it expires.
+- Nobody may change their own role, so PayDeck always keeps an admin.
+
+<Quiz
+	questions={[
+		{
+			question: 'Without @EnableMethodSecurity, what does @PreAuthorize("hasRole(\'ADMIN\')") do?',
+			options: ['Refuses everyone', 'Nothing at all', 'The API fails to start'],
+			answer: 1,
+			explanation: 'The annotation is only read when method security is switched on. Otherwise it is silently ignored.',
+		},
+		{
+			question: 'Sam (support) calls GET /api/admin/users/{id}. Which layer lets him in?',
+			options: ['The URL rule for /api/admin/**', '@PreAuthorize on the method', 'AccessPolicy'],
+			answer: 0,
+			explanation: 'That method has no @PreAuthorize; the URL rule allows support and admin.',
+		},
+		{
+			question: 'Why can an admin not change their own role?',
+			options: ['It is a Spring Security rule', 'So PayDeck is never left without an admin by mistake', 'Admins have no role'],
+			answer: 1,
+			explanation: 'An admin demoting themselves could leave nobody able to change roles. Another admin has to do it.',
+		},
+	]}
+/>
+
+<MarkComplete />

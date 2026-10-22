@@ -1,0 +1,439 @@
+---
+title: "30.1 Roles and permissions"
+description: "Give every PayDeck user a role (customer, support or admin), carry it in the access token, and keep customers out of the staff tools with one line of Spring Security."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson every PayDeck user has a **role**, the role travels inside their access token, and a new staff endpoint, "find a customer by email", answers support staff and refuses everyone else.
+
+## Why it matters
+
+So far PayDeck has one kind of user: a customer, who sees their own money and nothing else. A real payments company also has people who help those customers. When Asha phones to say she lost her card, someone at PayDeck has to find her account and freeze it. That person needs to see things Asha's neighbour must never see, and still must not be able to move Asha's money. Deciding **who may do what** is called **authorization**, and it is where the most common security bugs live.
+
+## The idea
+
+### Authentication and authorization, again
+
+Lesson 27.2 separated the two questions:
+
+- **Authentication:** who are you? Modules 27 to 29 answered it with passwords, tokens and Google.
+- **Authorization:** what may you do? This module answers it.
+
+PayDeck asks the second question in two layers, and this lesson builds the first:
+
+1. **Roles:** what may this person do anywhere in PayDeck? Support staff may look up customers; customers may not.
+2. **Relationships:** what may this person do with *this particular* account or card? Asha may top up her own account but not Bea's. Lesson 30.2 builds that.
+
+### Roles and permissions
+
+A **permission** is one thing someone may do: "look up a customer", "change someone's role", "cancel a card". A **role** is a named bundle of permissions that you give to people, so you do not hand out permissions one by one. This is called **role-based access control** (RBAC).
+
+PayDeck has three roles:
+
+| Role | Who | May |
+|------|-----|-----|
+| `CUSTOMER` | Everyone who signs up | Use their own accounts and cards |
+| `SUPPORT` | Staff who help customers | Look at any customer's accounts and cards, freeze and unfreeze cards |
+| `ADMIN` | Staff who run PayDeck | Everything support may, plus change roles, cancel cards and read the audit log |
+
+Two rules shape that table:
+
+- **Least privilege.** Give each role the least it needs to do its job. Support staff help with lost cards; they do not need to move money, so they cannot. If a support member's laptop is stolen, the thief gets a support account, not a bank vault.
+- **Separation of duties.** The power to hand out power (changing roles) belongs to a smaller group than everyday support.
+
+Everyone who signs up is a `CUSTOMER`. Nobody can make themselves staff: only an admin can change a role (lesson 30.3), and the very first admin is made by hand, in the database, by whoever runs PayDeck.
+
+### Where the role lives
+
+Each user's role is a column in the `users` table. The API also writes it into the **access token**, next to their ID and name, so a request can be checked without reading the database first.
+
+That is fast, and it has one consequence you must know: a token says what the role was **when the token was made**. If an admin makes Asha `SUPPORT`, her current token still says `CUSTOMER` until it is renewed, at most 15 minutes later (lesson 28.4). Taking a role away works the same way. For PayDeck, 15 minutes is an acceptable delay; a system that needed instant removal would read the role from the database on every request instead, and pay for it with one more query each time.
+
+### Spring Security's roles
+
+Spring Security calls each thing a person is allowed an **authority**, and a role is an authority whose name starts with `ROLE_`. You will write `hasAnyRole("SUPPORT", "ADMIN")` and Spring will look for `ROLE_SUPPORT` or `ROLE_ADMIN`. By default, Spring Security fills a token's authorities from a `scope` claim, which PayDeck's tokens do not have, so you tell it to read the `role` claim instead.
+
+## Worked example
+
+### The database
+
+`src/main/resources/db/migration/V8__add_roles.sql`:
+
+```sql
+-- What each person may do across PayDeck: CUSTOMER, SUPPORT or ADMIN.
+-- Everyone who already exists is a customer.
+ALTER TABLE users ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT 'CUSTOMER';
+```
+
+The default fills the column for everyone who already exists, so the `NOT NULL` is safe.
+
+### The role
+
+`src/main/java/dev/paydeck/api/auth/Role.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+/**
+ * What a person may do across the whole of PayDeck. Whether they may use a
+ * particular account or card is decided separately, in
+ * {@link dev.paydeck.api.access.AccessPolicy}.
+ */
+public enum Role {
+    /** Someone using PayDeck for their own money. */
+    CUSTOMER,
+    /** Staff who help customers: they can look at accounts and freeze cards, but never move money. */
+    SUPPORT,
+    /** Staff who run PayDeck: what support can do, plus changing roles, cancelling cards and reading the audit log. */
+    ADMIN
+}
+```
+
+`AccessPolicy` does not exist yet; you write it in the next lesson. Javadoc links to a missing class are only a warning.
+
+In `User.java`, add the field after `googleSubject` (import `jakarta.persistence.EnumType` and `jakarta.persistence.Enumerated`):
+
+```java
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private Role role = Role.CUSTOMER;
+```
+
+and, next to the other getters:
+
+```java
+    public Role getRole() {
+        return role;
+    }
+
+    public void changeRole(Role role) {
+        this.role = role;
+    }
+```
+
+`EnumType.STRING` stores the name, `'SUPPORT'`, rather than a position number. That keeps the column readable, and it stays correct if you ever add a role in the middle of the enum.
+
+### The role in the token
+
+In `TokenService`, where the access token's claims are built, add one line after the `name` claim:
+
+```java
+                .claim("name", user.getDisplayName())
+                .claim("role", user.getRole().name())
+```
+
+`CurrentUser` (from the Module 27 project) carries it to the controllers:
+
+```java
+public record CurrentUser(UUID id, Role role) {
+
+    public static CurrentUser from(Jwt jwt) {
+        String role = jwt.getClaimAsString("role");
+        // A token made before roles existed has none: give it the least powerful role.
+        return new CurrentUser(UUID.fromString(jwt.getSubject()), role == null ? Role.CUSTOMER : Role.valueOf(role));
+    }
+
+    /** PayDeck staff: support or admin. */
+    public boolean isStaff() {
+        return role == Role.SUPPORT || role == Role.ADMIN;
+    }
+}
+```
+
+When the API restarts with this code, the app may still hold an access token from before, which has no `role` claim. Treating it as `CUSTOMER`, the least powerful role, is safe: the worst case is that staff see "not allowed" until their token is renewed.
+
+And the API should tell the app what someone's role is. In `AuthController`, `UserResponse` gains a `role`:
+
+```java
+    /** Who someone is, what they may do, and how they can sign in: "PASSWORD", "GOOGLE" or both. */
+    public record UserResponse(UUID id, String email, String displayName, Role role, List<String> signInMethods) {
+```
+
+and its `of` method passes `user.getRole()` in the same position:
+
+```java
+            return new UserResponse(user.getId(), user.getEmail(), user.getDisplayName(), user.getRole(), methods);
+```
+
+### Keeping customers out of the staff tools
+
+All staff endpoints will live under `/api/admin`. In `SecurityConfig`, add one rule to `authorizeHttpRequests`, **before** `anyRequest()`:
+
+```java
+                        .requestMatchers("/api/auth/**", "/oauth2/**", "/login/oauth2/**").permitAll()
+                        .requestMatchers("/actuator/health", "/docs/**", "/swagger-ui/**", "/v3/api-docs/**",
+                                "/error").permitAll()
+                        // Staff tools. Customers get 403 before any controller runs.
+                        .requestMatchers("/api/admin/**").hasAnyRole("SUPPORT", "ADMIN")
+                        .anyRequest().authenticated())
+```
+
+Spring Security checks the rules from top to bottom and uses the first one that matches, which is why the specific rules come before the catch-all. Then tell it where the roles are. Replace the empty `.jwt(jwt -> { })` with:
+
+```java
+                        .jwt(jwt -> jwt.jwtAuthenticationConverter(rolesFromToken())))
+```
+
+and add the method to the class (import `org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter` and `...authentication.JwtGrantedAuthoritiesConverter`):
+
+```java
+    /** Turns the token's "role" claim, such as "SUPPORT", into the authority ROLE_SUPPORT that hasRole checks. */
+    private static JwtAuthenticationConverter rolesFromToken() {
+        JwtGrantedAuthoritiesConverter roles = new JwtGrantedAuthoritiesConverter();
+        roles.setAuthoritiesClaimName("role");
+        roles.setAuthorityPrefix("ROLE_");
+        JwtAuthenticationConverter converter = new JwtAuthenticationConverter();
+        converter.setJwtGrantedAuthoritiesConverter(roles);
+        return converter;
+    }
+```
+
+The refusal uses `ProblemResponses.notAllowed()`, which you wrote in lesson 27.5 and which has been waiting for a reason to run.
+
+### The first staff endpoint
+
+`src/main/java/dev/paydeck/api/admin/AdminController.java`:
+
+```java
+package dev.paydeck.api.admin;
+
+import java.util.List;
+
+import dev.paydeck.api.auth.AuthController.UserResponse;
+import dev.paydeck.api.auth.User;
+import dev.paydeck.api.auth.UserRepository;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+/** Tools for PayDeck staff. SecurityConfig keeps customers out of everything under /api/admin. */
+@RestController
+@RequestMapping("/api/admin")
+public class AdminController {
+
+    private final UserRepository users;
+
+    public AdminController(UserRepository users) {
+        this.users = users;
+    }
+
+    /** Finds a customer by their email, the way a support conversation usually starts. */
+    @GetMapping("/users")
+    @Transactional(readOnly = true)
+    public List<UserResponse> findUsers(@RequestParam String email) {
+        return users.findByEmail(User.normalizeEmail(email)).stream().map(UserResponse::of).toList();
+    }
+}
+```
+
+`@RequestMapping("/api/admin")` on the class puts every method's path under `/api/admin`. The method returns a list, empty when nobody has that email, so a search with no results is not an error. Notice what the controller does **not** contain: any check of who is asking. `SecurityConfig` has already done that for every URL under `/api/admin`, so a staff endpoint added next year is protected without anyone remembering to protect it.
+
+### Tests
+
+Tests need staff users. In `ApiTestSupport`, add a `UserRepository` field:
+
+```java
+    @Autowired
+    private UserRepository users;
+```
+
+and a helper next to `register` (import `dev.paydeck.api.auth.Role`, `dev.paydeck.api.auth.User` and `dev.paydeck.api.auth.UserRepository`):
+
+```java
+    /**
+     * Signs up someone new and gives them a role. The role is written into
+     * access tokens, so they sign in again to get one that has it.
+     */
+    protected TestUser registerAs(String name, Role role) throws Exception {
+        TestUser signedUp = register(name);
+        User user = users.findById(signedUp.id()).orElseThrow();
+        user.changeRole(role);
+        users.save(user);
+        String body = mvc.perform(post("/api/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"email": "%s", "password": "%s"}
+                                """.formatted(signedUp.email(), PASSWORD)))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        return new TestUser(signedUp.id(), signedUp.email(), JsonPath.read(body, "$.accessToken"),
+                JsonPath.read(body, "$.refreshToken"));
+    }
+```
+
+`src/test/java/dev/paydeck/api/admin/AdminApiTest.java`:
+
+```java
+package dev.paydeck.api.admin;
+
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import dev.paydeck.api.ApiTestSupport;
+import dev.paydeck.api.auth.Role;
+import org.junit.jupiter.api.Test;
+
+class AdminApiTest extends ApiTestSupport {
+
+    @Test
+    void customersCannotUseStaffTools() throws Exception {
+        TestUser asha = register("Asha");
+        TestUser bea = register("Bea");
+
+        mvc.perform(get("/api/admin/users").param("email", asha.email()).with(as(bea)))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+    }
+
+    @Test
+    void supportFindsCustomersByEmail() throws Exception {
+        TestUser asha = register("Asha");
+        TestUser sam = registerAs("Sam", Role.SUPPORT);
+
+        mvc.perform(get("/api/admin/users").param("email", asha.email().toUpperCase()).with(as(sam)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].id").value(asha.id().toString()))
+                .andExpect(jsonPath("$[0].role").value("CUSTOMER"));
+    }
+}
+```
+
+The second test searches in capitals on purpose: emails are normalized (lesson 27.4), and support staff type whatever the customer reads out. `./mvnw test`: 62 tests, all green.
+
+### Making staff, by hand
+
+Restart the API, so Flyway adds the column. In the app or with REST Client, sign up two staff members, for example `sam@paydeck.dev` (Sam Okoro) and `ada@paydeck.dev` (Ada Lovelace). Both are customers, like everyone. Promote them in the database:
+
+```sh
+docker compose exec postgres psql -U paydeck -c \
+  "update users set role = 'SUPPORT' where email = 'sam@paydeck.dev'"
+docker compose exec postgres psql -U paydeck -c \
+  "update users set role = 'ADMIN' where email = 'ada@paydeck.dev'"
+docker compose exec postgres psql -U paydeck -c \
+  "select email, role from users where role <> 'CUSTOMER'"
+```
+
+```
+UPDATE 1
+UPDATE 1
+      email      |  role   
+-----------------+---------
+ sam@paydeck.dev | SUPPORT
+ ada@paydeck.dev | ADMIN
+(2 rows)
+```
+
+On a real server, this one SQL command is the **only** time anyone touches roles by hand: from now on, Ada promotes people through the API (lesson 30.3).
+
+Sign in as Sam and look inside his token, the way you did in lesson 27.5:
+
+```sh
+SAM=$(curl -s localhost:8080/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"email": "sam@paydeck.dev", "password": "correct horse battery"}' | jq -r .accessToken)
+echo "$SAM" | jq -R -c 'split(".") | .[1] | gsub("-";"+") | gsub("_";"/") | @base64d | fromjson | {sub, name, role}'
+```
+
+```
+{"sub":"99c63d2b-d4b0-48f4-a402-05f0aa1d24fb","name":"Sam Okoro","role":"SUPPORT"}
+```
+
+Now ask the staff endpoint about Asha, first as Asha herself (with her token in `$ASHA`, made the same way) and then as Sam:
+
+```sh
+curl -s "localhost:8080/api/admin/users?email=asha@example.com" -H "Authorization: Bearer $ASHA"
+```
+
+```json
+{"type":"about:blank","title":"Not allowed","status":403,"detail":"Your account is not allowed to do this.","code":"FORBIDDEN"}
+```
+
+```sh
+curl -s "localhost:8080/api/admin/users?email=asha@example.com" -H "Authorization: Bearer $SAM" | jq .
+```
+
+```json
+[
+  {
+    "id": "538436cd-19d2-43a4-b803-f91e16867977",
+    "email": "asha@example.com",
+    "displayName": "Asha Rao",
+    "role": "CUSTOMER",
+    "signInMethods": [
+      "PASSWORD",
+      "GOOGLE"
+    ]
+  }
+]
+```
+
+Your IDs will differ. Asha is refused even though she is asking about herself: the rule is about **who is asking**, not who is being asked about.
+
+<Exercise title="Open the door">
+In `SecurityConfig`, change `.hasAnyRole("SUPPORT", "ADMIN")` to `.authenticated()`, which only asks "signed in?", and run `./mvnw test -Dtest=AdminApiTest`. Which test fails, and what does the failure say about what a customer could now do? Put the rule back.
+
+<Fragment slot="hint">With `authenticated()`, any valid token gets through. Which test sends a customer's token to `/api/admin/users`?</Fragment>
+<Fragment slot="solution">
+
+```
+[ERROR]   AdminApiTest.customersCannotUseStaffTools:19 Status expected:<403> but was:<200>
+```
+
+Any signed-in customer could look up any other customer by email, and see their name, their role and how they sign in. That is a privacy leak, and the first step of many attacks: it tells an attacker which emails have PayDeck accounts and which of them only use a password. The `hasAnyRole` line is what stands in the way, which is why the test exists.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Hiding the button instead of checking on the server">
+The app will only show staff screens to staff (lesson 30.4), but that is for convenience. Anyone can send requests straight to the API with curl, as you just did. Every rule must be enforced by the API.
+</Aside>
+
+<Aside type="caution" title="Letting people choose their role at sign-up">
+If the sign-up request accepted `"role": "ADMIN"`, anyone could make themselves an admin. New users are always customers; the `role` field is not in `RegisterRequest` at all.
+</Aside>
+
+<Aside type="caution" title="Writing hasRole(&quot;ROLE_ADMIN&quot;)">
+`hasRole` adds the `ROLE_` prefix itself, so `hasRole("ROLE_ADMIN")` looks for `ROLE_ROLE_ADMIN` and never matches. Write `hasRole("ADMIN")`.
+</Aside>
+
+## Recap
+
+- **Authorization** decides what someone may do. PayDeck uses **roles** for "anywhere in PayDeck" and, from the next lesson, **relationships** for "this account or card".
+- A role bundles **permissions**. Give each role the **least** it needs.
+- The role is stored on the user and copied into the access token, so a change reaches a person when their token is renewed, within 15 minutes.
+- One `requestMatchers(...).hasAnyRole(...)` line protects every staff endpoint, including ones not written yet.
+- The first admin is made by hand in the database; every role change after that goes through an admin.
+
+<Quiz
+	questions={[
+		{
+			question: 'Ada makes Asha SUPPORT at 10:00. Asha\'s access token was made at 09:58. When can Asha use the staff endpoints?',
+			options: ['Immediately', 'When her app renews the access token, by about 10:13 at the latest', 'Only after she signs out and in again'],
+			answer: 1,
+			explanation: 'The role is read from the token, and the token says CUSTOMER until it is renewed. Access tokens last 15 minutes, and the app renews them by itself.',
+		},
+		{
+			question: 'Why may support staff freeze cards but not top up accounts?',
+			options: ['Topping up is too slow', 'Least privilege: helping with a lost card does not need the power to move money', 'Spring Security cannot check top-ups'],
+			answer: 1,
+			explanation: 'Each role gets only what its job needs, so a stolen support account cannot move money.',
+		},
+		{
+			question: 'You add a new staff endpoint, GET /api/admin/stats, and forget to think about security. Who can call it?',
+			options: ['Anyone', 'Any signed-in user', 'Only support and admin'],
+			answer: 2,
+			explanation: 'The rule in SecurityConfig covers every path under /api/admin, including ones added later.',
+		},
+	]}
+/>
+
+<MarkComplete />

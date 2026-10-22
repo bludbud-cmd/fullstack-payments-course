@@ -1,0 +1,469 @@
+---
+title: "30.4 Support and admin screens"
+description: "Give staff their own side of the PayDeck app: find a customer, see their accounts and cards, freeze a card, and, for admins, change someone's role."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson, when Sam (support) signs in to the app he sees a **Customers** screen instead of a wallet. He finds Asha by email, sees her accounts and cards, and freezes a lost card. When Ada (admin) signs in she can also change people's roles.
+
+## Why it matters
+
+Support staff will not use curl. The API now has everything they need; this lesson gives them screens. It also shows the right relationship between an app and authorization: the app decides what is **convenient** to show, and the API decides what is **allowed**.
+
+## The idea
+
+### A work login
+
+In real payment companies, staff tools are separate from customer tools, and a staff member's work login is not their personal bank account. PayDeck follows the same idea, inside one app:
+
+- Someone with role `CUSTOMER` gets the app you know: Wallet, Cards, Activity, You.
+- Someone with role `SUPPORT` or `ADMIN` gets the staff side: one tab, **Customers**, with no wallet of their own.
+
+This also avoids a muddle: if Sam had a personal account in the same login, every screen would have to ask "his money, or a customer's?"
+
+### The app hides; the API refuses
+
+The app knows the role from `/api/me` (lesson 30.1 added it to `UserResponse`), and uses it to pick which screens to show. If a customer somehow reached a staff screen, for example in a modified copy of the app, every request it made would come back `403`. Hiding is only for convenience. That means the screens can stay simple: they show the API's error message if something is refused, and never try to second-guess the rules.
+
+### Staff look at other people's things
+
+Every hook you wrote so far reads the signed-in person's own account with `useAccountId()`. Staff screens look at **someone else's** accounts, so their hooks take IDs as arguments instead. The card list for an account uses the same query key, `['cards', accountId]`, as the owner's own card list (lesson 26.3), so after a freeze, invalidating that key refreshes it wherever it is shown.
+
+## Worked example
+
+### Types and requests
+
+In `src/types.ts`, add the role, and give `User` a `role` field:
+
+```ts
+/** What someone may do across PayDeck. */
+export type Role = 'CUSTOMER' | 'SUPPORT' | 'ADMIN';
+
+/** A person who can sign in, as the API sends them. */
+export type User = {
+  id: string;
+  email: string;
+  displayName: string;
+  role: Role;
+  /** How this person can sign in. */
+  signInMethods: ('PASSWORD' | 'GOOGLE')[];
+};
+```
+
+Changing a role uses `PUT`, which `request` in `src/api/client.ts` does not allow yet. Add it to the list:
+
+```ts
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+```
+
+`src/api/admin.ts`:
+
+```ts
+import type { Account, Role, User } from '../types';
+import { request } from './client';
+
+/** What support sees about one customer. */
+export type UserDetails = {
+  user: User;
+  createdAt: string;
+  accounts: Account[];
+};
+
+export const findUsers = (email: string) => request<User[]>(`/api/admin/users?email=${encodeURIComponent(email)}`);
+
+export const getUserDetails = (userId: string) => request<UserDetails>(`/api/admin/users/${userId}`);
+
+export const changeRole = (userId: string, role: Role) =>
+  request<User>(`/api/admin/users/${userId}/role`, { method: 'PUT', body: { role } });
+```
+
+`encodeURIComponent` turns characters that mean something in a URL, such as `+` and `&`, into safe codes. Without it, `asha+work@example.com` would arrive at the API as `asha work@example.com`.
+
+### Hooks
+
+`src/api/staffHooks.ts`:
+
+```ts
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import type { Role } from '../types';
+import * as adminApi from './admin';
+import * as api from './paydeck';
+
+// Staff look at other people's things, so these hooks take IDs instead of
+// reading the signed-in person's own account.
+const keys = {
+  find: (email: string) => ['admin', 'find', email] as const,
+  user: (id: string) => ['admin', 'user', id] as const,
+  cards: (accountId: string) => ['cards', accountId] as const,
+};
+
+export function useFindUsers(email: string) {
+  return useQuery({
+    queryKey: keys.find(email),
+    queryFn: () => adminApi.findUsers(email),
+    enabled: email !== '', // Nothing to search for yet.
+  });
+}
+
+export function useUserDetails(userId: string) {
+  return useQuery({ queryKey: keys.user(userId), queryFn: () => adminApi.getUserDetails(userId) });
+}
+
+export function useChangeRole(userId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (role: Role) => adminApi.changeRole(userId, role),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.user(userId) }),
+  });
+}
+
+export function useCardsOf(accountId: string) {
+  return useQuery({ queryKey: keys.cards(accountId), queryFn: () => api.listCards(accountId) });
+}
+
+/** Freeze or unfreeze someone's card, then fetch that account's cards again. */
+export function useSetCardFrozen(accountId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ cardId, frozen }: { cardId: string; frozen: boolean }) =>
+      frozen ? api.freezeCard(cardId) : api.unfreezeCard(cardId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.cards(accountId) }),
+  });
+}
+```
+
+`enabled: email !== ''` tells TanStack Query not to run the search until there is something to search for. The freeze and unfreeze requests are the same ones the owner's Card screen uses: the API decides that Sam may send them, through `AccessPolicy`.
+
+### Finding a customer
+
+`src/screens/StaffScreen.tsx`:
+
+```tsx
+import { useState } from 'react';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useFindUsers } from '../api/staffHooks';
+import { useAuth } from '../auth/AuthContext';
+import { Button } from '../components/Button';
+import { Field } from '../components/Field';
+import { QueryState } from '../components/QueryState';
+import { Screen } from '../components/Screen';
+import { useNavigation } from '../navigation/NavigationContext';
+
+/** Where support starts: find a customer by their email. */
+export function StaffScreen() {
+  const [email, setEmail] = useState('');
+  const [searched, setSearched] = useState('');
+  const found = useFindUsers(searched);
+  const { navigate } = useNavigation();
+  const { signOut } = useAuth();
+
+  return (
+    <Screen title="Find a customer">
+      <Field
+        label="Customer's email"
+        value={email}
+        onChangeText={setEmail}
+        autoCapitalize="none"
+        autoCorrect={false}
+        keyboardType="email-address"
+        onSubmitEditing={() => setSearched(email.trim())}
+      />
+      <Button title="Find" onPress={() => setSearched(email.trim())} />
+      {searched !== '' &&
+        (found.data === undefined ? (
+          <QueryState queries={[found]} />
+        ) : found.data.length === 0 ? (
+          <Text style={styles.muted}>Nobody has that email.</Text>
+        ) : (
+          found.data.map((user) => (
+            <Pressable
+              key={user.id}
+              accessibilityRole="button"
+              onPress={() => navigate({ name: 'customer', userId: user.id })}
+              style={styles.row}
+            >
+              <View>
+                <Text style={styles.name}>{user.displayName}</Text>
+                <Text style={styles.muted}>{user.email}</Text>
+              </View>
+              <Text style={styles.muted}>{user.role}</Text>
+            </Pressable>
+          ))
+        ))}
+      <View style={styles.signOut}>
+        <Button title="Sign out" variant="secondary" onPress={signOut} />
+      </View>
+    </Screen>
+  );
+}
+
+const styles = StyleSheet.create({
+  row: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#dfe1ea',
+    borderRadius: 10,
+  },
+  name: { fontWeight: '700' },
+  muted: { color: '#5d6177' },
+  signOut: { marginTop: 32 },
+});
+```
+
+Two pieces of state: `email` is what is typed, `searched` is what was last searched for. Searching on every keystroke would send a request per letter, and would show half-typed emails' results. Staff have no **You** tab, so **Sign out** lives here.
+
+### One customer
+
+`src/screens/CustomerScreen.tsx`:
+
+```tsx
+import { StyleSheet, Text, View } from 'react-native';
+import { useCardsOf, useChangeRole, useSetCardFrozen, useUserDetails } from '../api/staffHooks';
+import { useAuth } from '../auth/AuthContext';
+import { Button } from '../components/Button';
+import { QueryState } from '../components/QueryState';
+import { Screen } from '../components/Screen';
+import { formatMoney } from '../money';
+import type { Account, Role } from '../types';
+
+const ROLES: Role[] = ['CUSTOMER', 'SUPPORT', 'ADMIN'];
+
+/** One customer, as support sees them. Every action here is checked again by the API. */
+export function CustomerScreen({ userId }: { userId: string }) {
+  const { session } = useAuth();
+  const details = useUserDetails(userId);
+  const changeRole = useChangeRole(userId);
+  const me = session.status === 'signedIn' ? session.user : null;
+
+  if (details.data === undefined) {
+    return (
+      <Screen title="Customer">
+        <QueryState queries={[details]} />
+      </Screen>
+    );
+  }
+  const { user, createdAt, accounts } = details.data;
+
+  return (
+    <Screen title={user.displayName}>
+      <Text>{user.email}</Text>
+      <Text style={styles.muted}>
+        {user.role} since {createdAt.slice(0, 10)}
+      </Text>
+      {accounts.length === 0 && <Text style={styles.muted}>No accounts yet.</Text>}
+      {accounts.map((account) => (
+        <AccountCards key={account.id} account={account} />
+      ))}
+
+      {me?.role === 'ADMIN' && me.id !== user.id && (
+        <View style={styles.section}>
+          <Text style={styles.heading}>Role</Text>
+          {ROLES.filter((role) => role !== user.role).map((role) => (
+            <Button
+              key={role}
+              title={`Make ${role.toLowerCase()}`}
+              variant="secondary"
+              onPress={() => changeRole.mutate(role)}
+              disabled={changeRole.isPending}
+            />
+          ))}
+          {changeRole.error !== null && <Text style={styles.error}>{changeRole.error.message}</Text>}
+        </View>
+      )}
+    </Screen>
+  );
+}
+
+/** One account's balance and cards, with freeze buttons for support. */
+function AccountCards({ account }: { account: Account }) {
+  const cards = useCardsOf(account.id);
+  const setFrozen = useSetCardFrozen(account.id);
+
+  return (
+    <View style={styles.section}>
+      <Text style={styles.heading}>
+        {account.currency} account, {formatMoney(account.balanceCents, account.currency)}
+      </Text>
+      {cards.data === undefined ? (
+        <QueryState queries={[cards]} />
+      ) : (
+        cards.data.map((card) => (
+          <View key={card.id} style={styles.card}>
+            <Text style={styles.cardName}>
+              {card.nickname} •••• {card.last4}
+            </Text>
+            <Text style={styles.muted}>{card.status}</Text>
+            {card.status !== 'CANCELLED' && (
+              <Button
+                title={card.status === 'FROZEN' ? 'Unfreeze' : 'Freeze'}
+                variant="secondary"
+                onPress={() => setFrozen.mutate({ cardId: card.id, frozen: card.status !== 'FROZEN' })}
+                disabled={setFrozen.isPending}
+              />
+            )}
+          </View>
+        ))
+      )}
+      {setFrozen.error !== null && <Text style={styles.error}>{setFrozen.error.message}</Text>}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  section: { gap: 8, marginTop: 8 },
+  heading: { fontSize: 18, fontWeight: '700' },
+  card: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  cardName: { flex: 1 },
+  muted: { color: '#5d6177' },
+  error: { color: '#b3261e' },
+});
+```
+
+Things to notice:
+
+- Each account gets its own `AccountCards` component, because each needs its own `useCardsOf` hook, and hooks cannot be called in a loop (lesson 10.5's rules of hooks).
+- The role buttons only appear for an admin, and never on the admin's own page, matching the API's rules. If the app got this wrong, the API would still refuse, and the error message would appear under the buttons.
+- There is no top-up button and no limit field. Staff cannot do those things, so the screen does not offer them.
+
+### Routes and the staff side
+
+In `src/navigation/routes.ts`, add two routes to `Route`:
+
+```ts
+  | { name: 'staff' }
+  | { name: 'customer'; userId: string };
+```
+
+and, after `tabs`, the staff side's tabs:
+
+```ts
+/** Staff sign in to work, not to use their own wallet, so they get different tabs. */
+export const staffTabs = [{ name: 'staff', label: 'Customers' }] as const;
+
+export type TabName = (typeof tabs)[number]['name'] | (typeof staffTabs)[number]['name'];
+```
+
+In `AppNavigator.tsx`, import `useAuth`, `CustomerScreen`, `StaffScreen` and `staffTabs`, add the two cases to `renderScreen`:
+
+```tsx
+    case 'staff':
+      return <StaffScreen />;
+    case 'customer':
+      return <CustomerScreen userId={route.userId} />;
+```
+
+and choose the tabs from the role, before the stack starts:
+
+```tsx
+  const { width } = useWindowDimensions();
+  const wide = width >= WIDE_LAYOUT;
+  // Which tabs to show is for convenience only: the API refuses staff
+  // requests from anyone else, whatever the app shows.
+  const { session } = useAuth();
+  const staff = session.status === 'signedIn' && session.user.role !== 'CUSTOMER';
+  const visibleTabs = staff ? staffTabs : tabs;
+  const [stack, setStack] = useState<NavState>([{ name: visibleTabs[0].name }]);
+```
+
+Further down, the tab buttons are built from `visibleTabs` instead of `tabs`:
+
+```tsx
+  const tabButtons = visibleTabs.map((tab) => {
+```
+
+Finally, staff must not be sent to "open your first account". In `App.tsx`, `Root` checks the role before the `AccountGate` from lesson 28.3:
+
+```tsx
+  if (session.status === 'signedOut') {
+    return <SignInScreen message={session.message} />;
+  }
+  if (session.user.role !== 'CUSTOMER') {
+    // A staff login is for work: it has no wallet of its own.
+    return <AppNavigator />;
+  }
+  return (
+    <AccountGate openAccount={OpenAccountScreen}>
+      <AppNavigator />
+    </AccountGate>
+  );
+```
+
+After the `signedOut` check, TypeScript knows `session.status` is `'signedIn'`, so `session.user` is safe to use. Update `Root`'s comment too: signed in, you see your own wallet, or, for staff, the staff screens. Run `npx tsc --noEmit`: no errors.
+
+### Try it
+
+Run the API and the app on the Mac.
+
+1. Sign in as Sam. There is one tab, **Customers**, titled **Find a customer**. No wallet.
+2. Type Asha's email and tap **Find**. One row: Asha Rao, her email, `CUSTOMER`.
+3. Tap it. Her screen shows each of her accounts with its balance, and each card with its status.
+4. Tap **Freeze** on one of her cards. It becomes `FROZEN` and the button turns into **Unfreeze**. There is no button for her limit or her money.
+5. Sign out and sign in as Ada. Find any customer: under **Role** there are **Make support** and **Make admin**. Make them support, see the line above change to `SUPPORT since ...`, then make them a customer again. Find yourself: no role buttons.
+6. Sign in as Asha. Her card is frozen, and she can unfreeze it by opening it from her Cards tab. There is no Customers tab.
+
+<Exercise title="The app is not the guard">
+Prove that hiding the buttons is only convenience. Signed in as Asha (a customer) in the app, take her access token from a REST Client or curl sign-in, and send `GET /api/admin/users/{id}` for any user, then `PUT /api/admin/users/{her own id}/role` with `{"role": "ADMIN"}`. What does each answer, and which layer from lesson 30.3 refused each one?
+
+<Fragment slot="hint">Both are under `/api/admin`. Which rule runs first, before any controller code?</Fragment>
+<Fragment slot="solution">
+
+Both answer:
+
+```json
+{"type":"about:blank","title":"Not allowed","status":403,"detail":"Your account is not allowed to do this.","code":"FORBIDDEN"}
+```
+
+The URL rule (`/api/admin/**` needs support or admin) refuses both before any controller runs, so `@PreAuthorize` and the "not your own role" check are never even reached. The app never showed Asha those screens, but that is not what kept her out.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Giving staff the customer screens with someone else's ID">
+It is tempting to reuse the Wallet screen "as Asha". But those screens offer top-ups and limit changes, which staff may not do, and `useAccountId()` is about the signed-in person. Separate staff screens show only what staff may do.
+</Aside>
+
+<Aside type="caution" title="Searching on every keystroke">
+Each letter would send a request and briefly show results for the wrong email. Search when the person asks to.
+</Aside>
+
+## Recap
+
+- Staff sign in to a **work** side of the app: one **Customers** tab, no wallet.
+- The app uses the role to choose what to show; the API decides what is allowed. A hidden button is convenience, not security.
+- Staff hooks take IDs as arguments and share query keys with the owner's screens, so a freeze refreshes the same card list everywhere.
+- The screens only offer what the role may do, and show the API's message if it refuses anyway.
+
+<Quiz
+	questions={[
+		{
+			question: 'A modified copy of the app shows the Customers tab to Bea, a customer. What happens when she searches?',
+			options: ['She sees the results', 'The API answers 403', 'The app crashes'],
+			answer: 1,
+			explanation: 'The API checks the role in her token for every request under /api/admin. The app\'s tabs make no difference.',
+		},
+		{
+			question: 'Why does each account on the customer screen get its own AccountCards component?',
+			options: ['For styling', 'Each account needs its own useCardsOf hook, and hooks cannot be called in a loop', 'React requires one component per account'],
+			answer: 1,
+			explanation: 'Hooks must be called the same way on every render, so a list of hooks goes into a list of components.',
+		},
+		{
+			question: 'Sam freezes Asha\'s card. Asha has her Cards screen open on her phone. When does she see it frozen?',
+			options: ['Immediately, always', 'The next time her app fetches her cards', 'Never, until she reinstalls'],
+			answer: 1,
+			explanation: 'Her app has its own cache; it fetches again when the screen is opened or refreshed. A live feed (Part 9) can push changes as they happen.',
+		},
+	]}
+/>
+
+<MarkComplete />

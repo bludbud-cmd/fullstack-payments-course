@@ -1,0 +1,512 @@
+---
+title: "30.2 Ownership checks"
+description: "Put every \"may this person do this to this account or card?\" decision into one AccessPolicy class, written as a table, so support staff can help customers without being able to move their money."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson one class, `AccessPolicy`, decides who may do what with every account and card. Owners can do everything with their own things, support staff can look and freeze, and nobody else can even tell that someone else's account exists.
+
+## Why it matters
+
+The most common serious security bug in web APIs is not clever cryptography. It is this: Bea is signed in, she changes the account ID in a URL from hers to Asha's, and the API answers. Lesson 27's mini-project closed that hole with `OwnedAccounts`: only the owner may use an account. Now support staff need to see customers' accounts too, which means the rule is about to get more complicated. A complicated rule copied into a dozen controllers is how the hole comes back.
+
+## The idea
+
+### Broken access control
+
+Security people call Bea's trick an **insecure direct object reference** (IDOR): the request names an object directly (`/api/accounts/20f0ebd9-…`) and the server forgets to ask whether the caller may use it. It is the classic example of **broken access control**, number one in the OWASP Top 10 (lesson 30.6). Random UUIDs make IDs hard to guess, but IDs leak all the time, in screenshots, logs, support emails, and shared links. The check is what protects the account, not the ID.
+
+### Two questions for every request
+
+Whenever a request touches an account or a card, PayDeck now asks:
+
+1. **How is this person connected to it?** PayDeck calls that their **relationship**: `OWNER` if it is theirs, `NONE` if not. (The mini-project adds a third.)
+2. **Given their role and relationship, may they do this action?**
+
+The actions are listed as enums, so the compiler knows every one:
+
+- Account actions: `VIEW` (balance, history, cards), `MOVE_MONEY` (top up, send), `ISSUE_CARD`.
+- Card actions: `VIEW`, `FREEZE`, `UNFREEZE`, `CHANGE_SETTINGS` (name, limit), `CANCEL`.
+
+### The rules, as a table
+
+| | owner | support | admin |
+|---|:---:|:---:|:---:|
+| account: view | yes | yes | yes |
+| account: move money | yes | no | no |
+| account: issue card | yes | no | no |
+| card: view | yes | yes | yes |
+| card: freeze | yes | yes | yes |
+| card: unfreeze | yes | yes | yes |
+| card: change settings | yes | no | no |
+| card: cancel | yes | no | yes |
+
+Read it like a support manager would: staff can see everything, so they can help; they can stop a card, because a lost card is urgent; only an admin can cancel one for good; and **no staff member ever moves a customer's money or changes their limits**. Customers with relationship `NONE` (Bea looking at Asha's things) get no row at all: every answer is no.
+
+A table you can read is a table you can review. Putting it in one class, with the table copied into its comment, means the rules the business agreed on and the rules the code enforces are the same thing, in one place.
+
+### Not found, or not allowed?
+
+When the answer is no, which error? Lesson 27's mini-project decided that a stranger gets **404 Not Found**, exactly as if the ID did not exist, so they cannot even learn that it does. But Sam (support) can see Asha's account; when he tries to top it up, "not found" would be a lie, and a confusing one. So:
+
+- **May not even see it** → `404 Not Found`.
+- **May see it, but not do this** → `403 Forbidden`, "You are not allowed to do this to this account."
+
+The policy checks `VIEW` first, then the action, so it always knows which one to answer.
+
+## Worked example
+
+### The vocabulary
+
+Create the package `dev.paydeck.api.access`, with three small enums.
+
+`AccountAction.java`:
+
+```java
+package dev.paydeck.api.access;
+
+/** Things someone may want to do with an account. */
+public enum AccountAction {
+    /** See its balance, history and cards. */
+    VIEW,
+    /** Top up, or send money from it. */
+    MOVE_MONEY,
+    /** Issue a new card on it. */
+    ISSUE_CARD
+}
+```
+
+`CardAction.java`:
+
+```java
+package dev.paydeck.api.access;
+
+/** Things someone may want to do with a card. */
+public enum CardAction {
+    VIEW,
+    FREEZE,
+    UNFREEZE,
+    /** Rename it, or change its spending limit. */
+    CHANGE_SETTINGS,
+    CANCEL
+}
+```
+
+`Relationship.java`:
+
+```java
+package dev.paydeck.api.access;
+
+/** How someone is connected to a particular account or card. */
+public enum Relationship {
+    /** They opened the account (or the card's account). */
+    OWNER,
+    /** No connection at all. */
+    NONE
+}
+```
+
+### "Not allowed"
+
+In `common`, a new exception, `ForbiddenException.java`:
+
+```java
+package dev.paydeck.api.common;
+
+/** The person may see this thing, but not do this to it. Becomes a 403. */
+public class ForbiddenException extends RuntimeException {
+
+    public ForbiddenException(String message) {
+        super(message);
+    }
+}
+```
+
+and its handler in `ApiExceptionHandler`, next to the one for `NotFoundException`:
+
+```java
+    @ExceptionHandler(ForbiddenException.class)
+    ProblemDetail forbidden(ForbiddenException e) {
+        ProblemDetail problem = problem(HttpStatus.FORBIDDEN, "Not allowed", e.getMessage());
+        problem.setProperty("code", "FORBIDDEN");
+        return problem;
+    }
+```
+
+The `code` is the same `FORBIDDEN` that Spring Security's refusals use, so the app can treat every 403 alike.
+
+### The policy
+
+`AccessPolicy.java`:
+
+```java
+package dev.paydeck.api.access;
+
+import java.util.Locale;
+import java.util.UUID;
+
+import dev.paydeck.api.account.Account;
+import dev.paydeck.api.account.AccountKind;
+import dev.paydeck.api.account.AccountRepository;
+import dev.paydeck.api.auth.CurrentUser;
+import dev.paydeck.api.auth.Role;
+import dev.paydeck.api.card.Card;
+import dev.paydeck.api.card.CardRepository;
+import dev.paydeck.api.common.ForbiddenException;
+import dev.paydeck.api.common.NotFoundException;
+import org.springframework.stereotype.Component;
+
+/**
+ * Every "may this person do this to this thing?" decision in one place.
+ *
+ * <pre>
+ *                        owner  support  admin
+ * account: view            yes     yes     yes
+ * account: move money      yes      -       -
+ * account: issue card      yes      -       -
+ * card: view               yes     yes     yes
+ * card: freeze             yes     yes     yes
+ * card: unfreeze           yes     yes     yes
+ * card: change settings    yes      -       -
+ * card: cancel             yes      -      yes
+ * </pre>
+ *
+ * Staff never move customers' money. Someone who may not even see a thing
+ * gets "not found", so they cannot learn that it exists; someone who may see
+ * it but not do this to it gets "not allowed".
+ */
+@Component
+public class AccessPolicy {
+
+    private final AccountRepository accounts;
+    private final CardRepository cards;
+
+    public AccessPolicy(AccountRepository accounts, CardRepository cards) {
+        this.accounts = accounts;
+        this.cards = cards;
+    }
+
+    static boolean allows(Role role, Relationship relationship, AccountAction action) {
+        boolean owner = relationship == Relationship.OWNER;
+        boolean staff = role == Role.SUPPORT || role == Role.ADMIN;
+        return switch (action) {
+            case VIEW -> owner || staff;
+            case MOVE_MONEY, ISSUE_CARD -> owner;
+        };
+    }
+
+    static boolean allows(Role role, Relationship relationship, CardAction action) {
+        boolean owner = relationship == Relationship.OWNER;
+        boolean staff = role == Role.SUPPORT || role == Role.ADMIN;
+        return switch (action) {
+            case VIEW, FREEZE, UNFREEZE -> owner || staff;
+            case CHANGE_SETTINGS -> owner;
+            case CANCEL -> owner || role == Role.ADMIN;
+        };
+    }
+
+    /** The customer account, if this person may do {@code action} with it. */
+    public Account account(CurrentUser user, UUID accountId, AccountAction action) {
+        Account account = accounts.findById(accountId)
+                .filter(a -> a.getKind() == AccountKind.CUSTOMER)
+                .orElseThrow(() -> new NotFoundException("Account", accountId));
+        Relationship relationship = user.id().equals(account.getOwnerUserId()) ? Relationship.OWNER : Relationship.NONE;
+        check(allows(user.role(), relationship, AccountAction.VIEW), allows(user.role(), relationship, action),
+                "Account", accountId);
+        return account;
+    }
+
+    /** The card, if this person may do {@code action} with it. */
+    public Card card(CurrentUser user, UUID cardId, CardAction action) {
+        Card card = cards.findById(cardId).orElseThrow(() -> new NotFoundException("Card", cardId));
+        UUID ownerId = accounts.findById(card.getAccountId()).map(Account::getOwnerUserId).orElse(null);
+        Relationship relationship = user.id().equals(ownerId) ? Relationship.OWNER : Relationship.NONE;
+        check(allows(user.role(), relationship, CardAction.VIEW), allows(user.role(), relationship, action),
+                "Card", cardId);
+        return card;
+    }
+
+    private static void check(boolean maySee, boolean mayDo, String thing, UUID id) {
+        if (!maySee) {
+            throw new NotFoundException(thing, id);
+        }
+        if (!mayDo) {
+            throw new ForbiddenException("You are not allowed to do this to this " + thing.toLowerCase(Locale.ROOT) + ".");
+        }
+    }
+}
+```
+
+The two `allows` methods are the table, line for line, and they are pure: no database, no Spring, just "role, relationship, action → yes or no". That makes them easy to test exhaustively. The `switch` has no `default`: if someone adds a new action to the enum and forgets the rule, the code does not compile.
+
+`account` and `card` do the work around the table: load the thing (system accounts from lesson 24.2 are never visible), work out the relationship, ask the table, and either return the thing or throw. Returning the loaded account or card means the controller cannot get hold of it **without** going through the check.
+
+### Using it everywhere
+
+`OwnedAccounts` from the Module 27 project is replaced: delete `account/OwnedAccounts.java`, and in each controller swap the field and constructor parameter `OwnedAccounts owned` for `AccessPolicy access`. Then each check names its action:
+
+| Where | Before | After |
+|-------|--------|-------|
+| `AccountController`, get one account | `owned.require(id, user)` | `access.account(user, id, AccountAction.VIEW)` |
+| `MoneyController`, top up | `owned.require(accountId, user)` | `access.account(user, accountId, AccountAction.MOVE_MONEY)` |
+| `MoneyController`, transfer | `owned.require(request.fromAccountId(), user)` | `access.account(user, request.fromAccountId(), AccountAction.MOVE_MONEY)` |
+| `MoneyController`, history | `owned.require(accountId, user)` | `access.account(user, accountId, AccountAction.VIEW)` |
+| `CardController`, issue | `owned.require(accountId, user)` | `access.account(user, accountId, AccountAction.ISSUE_CARD)` |
+| `CardController`, list | `owned.require(accountId, user)` | `access.account(user, accountId, AccountAction.VIEW)` |
+
+`CardController` also had its own `find(id, user)` helper. Delete it, and use the policy with the right action in each card endpoint:
+
+```java
+        return CardResponse.of(access.card(user, id, CardAction.VIEW));          // get
+        Card card = access.card(user, id, CardAction.CHANGE_SETTINGS);           // update
+        Card card = access.card(user, id, CardAction.FREEZE);                    // freeze
+        Card card = access.card(user, id, CardAction.UNFREEZE);                  // unfreeze
+        access.card(user, id, CardAction.CANCEL).cancel();                       // cancel
+```
+
+In `MoneyControllerTest`, the slice test from lesson 25.1, the mocked `OwnedAccounts` becomes a mocked `AccessPolicy`:
+
+```java
+    @MockitoBean
+    AccessPolicy access;
+```
+
+A Mockito mock returns `null` and throws nothing unless told otherwise, so those tests carry on testing validation and errors as before.
+
+### Testing the table
+
+`src/test/java/dev/paydeck/api/access/AccessPolicyTest.java` checks the table without starting Spring:
+
+```java
+package dev.paydeck.api.access;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import dev.paydeck.api.auth.Role;
+import org.junit.jupiter.api.Test;
+
+/** The rules table in AccessPolicy, checked line by line without a database. */
+class AccessPolicyTest {
+
+    @Test
+    void ownersMayDoEverythingWithTheirOwnThings() {
+        for (AccountAction action : AccountAction.values()) {
+            assertThat(AccessPolicy.allows(Role.CUSTOMER, Relationship.OWNER, action)).as(action.name()).isTrue();
+        }
+        for (CardAction action : CardAction.values()) {
+            assertThat(AccessPolicy.allows(Role.CUSTOMER, Relationship.OWNER, action)).as(action.name()).isTrue();
+        }
+    }
+
+    @Test
+    void customersMayDoNothingWithOtherPeoplesThings() {
+        for (AccountAction action : AccountAction.values()) {
+            assertThat(AccessPolicy.allows(Role.CUSTOMER, Relationship.NONE, action)).as(action.name()).isFalse();
+        }
+        for (CardAction action : CardAction.values()) {
+            assertThat(AccessPolicy.allows(Role.CUSTOMER, Relationship.NONE, action)).as(action.name()).isFalse();
+        }
+    }
+
+    @Test
+    void staffNeverMoveMoneyOrChangeCards() {
+        for (Role staff : new Role[] {Role.SUPPORT, Role.ADMIN}) {
+            assertThat(AccessPolicy.allows(staff, Relationship.NONE, AccountAction.MOVE_MONEY)).isFalse();
+            assertThat(AccessPolicy.allows(staff, Relationship.NONE, AccountAction.ISSUE_CARD)).isFalse();
+            assertThat(AccessPolicy.allows(staff, Relationship.NONE, CardAction.CHANGE_SETTINGS)).isFalse();
+        }
+        assertThat(AccessPolicy.allows(Role.SUPPORT, Relationship.NONE, CardAction.CANCEL)).isFalse();
+        assertThat(AccessPolicy.allows(Role.ADMIN, Relationship.NONE, CardAction.CANCEL)).isTrue();
+    }
+}
+```
+
+The loops over `values()` mean a new action is tested automatically. `.as(action.name())` puts the action's name in the failure message, so you know which one broke. The test sits in the same package as `AccessPolicy`, which is why it may call the package-private `allows` methods.
+
+And `StaffAccessApiTest.java`, in the same package, checks the real endpoints:
+
+```java
+package dev.paydeck.api.access;
+
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import java.util.UUID;
+
+import com.jayway.jsonpath.JsonPath;
+import dev.paydeck.api.ApiTestSupport;
+import dev.paydeck.api.auth.Role;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.MediaType;
+
+/** What PayDeck staff may and may not do with a customer's account and cards. */
+class StaffAccessApiTest extends ApiTestSupport {
+
+    @Test
+    void supportCanLookAndFreezeButNeverMoveMoney() throws Exception {
+        UUID ashas = openAccount("Asha", "USD");
+        UUID card = issueCard(ashas);
+        TestUser sam = registerAs("Sam", Role.SUPPORT);
+
+        mvc.perform(get("/api/accounts/{id}", ashas).with(as(sam))).andExpect(status().isOk());
+        mvc.perform(get("/api/accounts/{id}/transactions", ashas).with(as(sam))).andExpect(status().isOk());
+        mvc.perform(post("/api/cards/{id}/freeze", card).with(as(sam)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("FROZEN"));
+
+        mvc.perform(post("/api/accounts/{id}/top-ups", ashas).with(as(sam))
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"amountCents": 1000, "description": "Not allowed"}
+                                """))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.detail").value("You are not allowed to do this to this account."));
+        mvc.perform(patch("/api/cards/{id}", card).with(as(sam))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"spendingLimitCents": 99999}
+                                """))
+                .andExpect(status().isForbidden());
+        mvc.perform(delete("/api/cards/{id}", card).with(as(sam))).andExpect(status().isForbidden());
+    }
+
+    @Test
+    void onlyAnAdminMayCancelSomeoneElsesCard() throws Exception {
+        UUID ashas = openAccount("Asha", "USD");
+        UUID card = issueCard(ashas);
+        TestUser ada = registerAs("Ada", Role.ADMIN);
+
+        mvc.perform(delete("/api/cards/{id}", card).with(as(ada))).andExpect(status().isNoContent());
+    }
+
+    @Test
+    void otherCustomersStillSeeNothing() throws Exception {
+        UUID ashas = openAccount("Asha", "USD");
+        UUID card = issueCard(ashas);
+        TestUser bea = register("Bea");
+
+        mvc.perform(get("/api/accounts/{id}", ashas).with(as(bea))).andExpect(status().isNotFound());
+        mvc.perform(post("/api/cards/{id}/freeze", card).with(as(bea))).andExpect(status().isNotFound());
+    }
+
+    private UUID issueCard(UUID accountId) throws Exception {
+        String body = mvc.perform(post("/api/accounts/{id}/cards", accountId).with(asOwnerOf(accountId))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"nickname": "Groceries"}
+                                """))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        return UUID.fromString(JsonPath.read(body, "$.id"));
+    }
+}
+```
+
+`OwnershipApiTest` from Module 27 still passes unchanged: that is the point of keeping it. It proves customers are as locked out of each other's things as before. `./mvnw test`: 68 tests, all green.
+
+### Try it
+
+Restart the API. Sam (support) looks at Asha's account, then tries to add money to it, then Eve (another customer) tries to look:
+
+```sh
+A=20f0ebd9-5f0d-4685-b788-d6c386e6ac85   # one of Asha's account IDs
+curl -s localhost:8080/api/accounts/$A -H "Authorization: Bearer $SAM"
+```
+
+```json
+{"id":"20f0ebd9-5f0d-4685-b788-d6c386e6ac85","ownerName":"Asha Rao","currency":"USD","balanceCents":12000,"createdAt":"2026-10-22T04:12:17.778063Z"}
+```
+
+```sh
+curl -s -X POST localhost:8080/api/accounts/$A/top-ups -H "Authorization: Bearer $SAM" \
+  -H "Idempotency-Key: $(python3 -c 'import uuid; print(uuid.uuid4())')" \
+  -H 'Content-Type: application/json' -d '{"amountCents": 1000, "description": "Just testing"}'
+```
+
+```json
+{"detail":"You are not allowed to do this to this account.","instance":"/api/accounts/20f0ebd9-5f0d-4685-b788-d6c386e6ac85/top-ups","status":403,"title":"Not allowed","code":"FORBIDDEN"}
+```
+
+```sh
+curl -s localhost:8080/api/accounts/$A -H "Authorization: Bearer $EVE"
+```
+
+```json
+{"detail":"Account 20f0ebd9-5f0d-4685-b788-d6c386e6ac85 was not found","instance":"/api/accounts/20f0ebd9-5f0d-4685-b788-d6c386e6ac85","status":404,"title":"Not found"}
+```
+
+Three people, one URL, three different answers, all decided by the same table.
+
+<Exercise title="A helpful change">
+A support manager asks: "Could staff top up a customer's account when a payment goes wrong?" Make the change in the quickest way: in `allows`, change the `MOVE_MONEY, ISSUE_CARD` line to `owner || staff`. Run `./mvnw test -Dtest='AccessPolicyTest,StaffAccessApiTest'`. What fails? Then answer the manager: why is the answer still no, and what would you build instead? Put the line back.
+
+<Fragment slot="hint">Who could then add money to any account, and from where would that money come? Think about a support member whose password was stolen.</Fragment>
+<Fragment slot="solution">
+
+```
+[ERROR]   AccessPolicyTest.staffNeverMoveMoneyOrChangeCards:34 
+Expecting value to be false but was true
+[ERROR]   StaffAccessApiTest.supportCanLookAndFreezeButNeverMoveMoney:39 Status expected:<403> but was:<201>
+```
+
+Both the table test and the real request catch it. The answer stays no because money movement by staff is exactly what fraud looks like: anyone with a support login, or anyone who steals one, could add money to any account, including their own. Real payment companies fix mistakes with a separate, deliberate process: a correction is requested by one person, approved by a second (separation of duties), and recorded in the audit log (lesson 30.5). That is a feature to design on purpose, not a line to flip.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Checking in some endpoints and forgetting others">
+The bug is almost never a wrong rule. It is a missing check in the one endpoint added on a Friday. Make the policy the only way to load an account or card in a controller, and test every endpoint as an outsider (as `OwnershipApiTest` does).
+</Aside>
+
+<Aside type="caution" title="Answering 403 to strangers">
+"Forbidden" tells Bea the account exists. Strangers get 404; only people who may see the thing get 403.
+</Aside>
+
+<Aside type="caution" title="Trusting an ID from the request body">
+The transfer request names the account to send **from** in its body, not the URL. It still goes through `access.account(..., MOVE_MONEY)`. Every ID the client sends, wherever it is, is a claim to be checked.
+</Aside>
+
+## Recap
+
+- Broken access control, often an **IDOR**, is the most common serious API bug: the request names an object and nobody checks the caller may use it.
+- PayDeck decides every access with **role + relationship + action**, in one class, `AccessPolicy`.
+- The rules are a **table**, written as two pure `allows` methods with no `default`, and tested exhaustively.
+- Can't see it → **404**. Can see it, can't do this → **403**.
+- Staff can look and freeze; nobody but the owner moves money or changes a card's settings.
+
+<Quiz
+	questions={[
+		{
+			question: 'Sam (support) sends PATCH /api/cards/{id} to raise the limit on Asha\'s card. What does he get?',
+			options: ['200 OK', '403 Forbidden', '404 Not Found'],
+			answer: 1,
+			explanation: 'Support may view the card, so it is not hidden from him; changing settings is owner-only, so the answer is "not allowed".',
+		},
+		{
+			question: 'Bea (a customer) sends POST /api/cards/{id}/freeze for Asha\'s card. What does she get?',
+			options: ['200 OK', '403 Forbidden', '404 Not Found'],
+			answer: 2,
+			explanation: 'Bea has no relationship to the card and no staff role, so she may not even see it: 404, the same as a card that does not exist.',
+		},
+		{
+			question: 'Why do the allows methods have no default branch?',
+			options: ['Java does not allow it', 'So a new action without a rule is a compile error instead of a silent yes or no', 'It makes them faster'],
+			answer: 1,
+			explanation: 'A switch expression over an enum must cover every value. Leaving out default turns a forgotten rule into a compile error.',
+		},
+	]}
+/>
+
+<MarkComplete />
