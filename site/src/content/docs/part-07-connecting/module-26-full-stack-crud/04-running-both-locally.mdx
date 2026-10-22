@@ -1,0 +1,247 @@
+---
+title: "26.4 Running both locally"
+description: "A daily routine for running the database, the API and both apps together, how each device reaches the API, why plain http works for now, and how to find out which part is broken."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can start the whole of PayDeck on your Mac in the right order, connect the emulator or a real Android phone to your API, and work out quickly which part is at fault when the app says it cannot reach PayDeck.
+
+## Why it matters
+
+PayDeck is now four programs that must all be running and able to reach each other: PostgreSQL, the API, Metro and the app itself. When something is wrong, the app only sees the symptom ("Could not reach PayDeck"), not the cause. Professional developers spend a surprising amount of time on exactly this, and a calm routine saves hours.
+
+## The idea
+
+### Four programs, one chain
+
+```
+app (Mac or Android)  ──JavaScript──▶  Metro         (port 8081, from npm start)
+app                   ──HTTP──────▶  PayDeck API   (port 8080, from ./mvnw spring-boot:run)
+PayDeck API           ──SQL───────▶  PostgreSQL    (port 5432, in Docker)
+```
+
+Each arrow can break, and each breaks differently:
+
+- **Metro** gives the app its JavaScript (lesson 11.4). If Metro is down, the app shows a red screen about the development server, and never gets as far as calling the API.
+- **The API** answers the app. If it is down, every request fails with no answer: "Could not reach PayDeck".
+- **PostgreSQL** stores the data. If it is down, the API does not even start (lesson 23.1).
+
+So start them **from the bottom up**, and when something fails, check them in the same order.
+
+### How each device finds the API
+
+The API listens on port 8080 of your Mac, on all of the Mac's network addresses. Who can reach it, and how:
+
+| Where the app runs | Address in `config.ts` | Why |
+|---|---|---|
+| Mac app | `http://localhost:8080` | Same computer. |
+| Android emulator | `http://10.0.2.2:8080` | The emulator's own `localhost` is the emulator; `10.0.2.2` is its built-in route to the Mac. |
+| Android phone on USB | `http://localhost:8080` (change the Android address in `config.ts`), plus `adb reverse tcp:8080 tcp:8080` | `adb reverse` forwards the phone's port 8080 down the cable to the Mac's port 8080. |
+
+`adb reverse` is the same trick `npm run android` already uses for Metro on port 8081 (lesson 11.4). It works for the emulator too, but it is forgotten whenever the device restarts or is unplugged, which is why PayDeck uses `10.0.2.2` for the emulator by default.
+
+### Why plain http is allowed (for now)
+
+`http://` sends everything unencrypted. Anyone on the same Wi-Fi could read it, so both platforms block it by default:
+
+- **Android** refuses unencrypted traffic since Android 9, unless the app's manifest says `usesCleartextTraffic`. Look in `android/app/src/main/AndroidManifest.xml`: it says `android:usesCleartextTraffic="${usesCleartextTraffic}"`. React Native's build setup fills that in with `true` for **debug** builds (what `npm run android` makes) and `false` for **release** builds (what you would publish).
+- **macOS** apps run in a **sandbox**, a set of walls around what the app may do. Making network connections needs the **entitlement** (a permission written into the app) `com.apple.security.network.client`, and Apple's **App Transport Security** blocks plain http. The template already has both: `macos/PayDeck-macOS/PayDeck.entitlements` grants `network.client`, and `macos/PayDeck-macOS/Info.plist` allows http to `localhost` under `NSAppTransportSecurity`.
+
+So http works while you develop, and a published Android app would refuse it. That is correct: Part 10 puts the API on a real server with `https://`, and changes `API_BASE_URL` to match.
+
+### Native apps do not need CORS
+
+If you have read about web development you may have met **CORS**, the rule that stops a web page from calling a different server unless that server allows it. It is a *browser* rule. The PayDeck apps are not web pages, so the API needs no CORS settings for them.
+
+## Worked example
+
+### The daily start
+
+Use three terminal windows (or tabs, `Cmd+T` in Terminal):
+
+1. **Database.** Open Docker Desktop and wait until it says it is running. Then, in `~/Projects/course/paydeck-api`:
+
+   ```sh
+   docker compose up -d
+   ```
+
+2. **API**, in the same folder:
+
+   ```sh
+   ./mvnw spring-boot:run
+   ```
+
+   Wait for `Started PayDeckApplication`. Leave this window open: the API's log is where server errors appear.
+
+3. **Metro**, in `~/Projects/course/PayDeck` in a second window:
+
+   ```sh
+   npm start
+   ```
+
+4. **The apps**, in a third window in the same folder: start the emulator from Android Studio's Device Manager first, then
+
+   ```sh
+   npm run macos
+   npm run android
+   ```
+
+   Both apps share one Metro, and both talk to the same API, so a top-up on Android shows up on the Mac after its next refetch (switch tabs to trigger one).
+
+To stop: `Ctrl+C` in the API and Metro windows, quit the apps, and `docker compose stop` to stop the database without deleting its data.
+
+### Checking each link
+
+When the app says "Could not reach PayDeck", test each link yourself, from the bottom:
+
+```sh
+docker compose ps
+```
+
+shows whether the `postgres` service is running. Then:
+
+```sh
+curl -i localhost:8080/api/accounts/00000000-0000-0000-0000-000000000840
+```
+
+If the API is up, it answers within a moment with `HTTP/1.1 404` and the problem details. That is good news here: the API is running and answering. If instead curl says `Failed to connect to localhost port 8080`, the API is not running: look at its window for the reason.
+
+If the Mac's curl works but the Android app still cannot connect, the problem is the route from the device to the Mac: check the address in `config.ts`, and for a USB phone, run `adb reverse tcp:8080 tcp:8080` again.
+
+### Watching the app's requests
+
+When you want to see exactly what the app sends, add a temporary `console.log` at the start of `request` in `client.ts`:
+
+```ts
+  console.log(options.method ?? 'GET', path);
+```
+
+The messages appear in React Native DevTools: press `j` in Metro and open the **Console** tab (lesson 11.4). Reload and switch tabs, and you can watch TanStack Query fetch, refetch and retry as in lesson 26.3. Remove the line afterwards; logs like this are noise once you are done.
+
+### A database reset
+
+Sometimes you want a clean database, for example after experimenting. `docker compose down -v` deletes the container **and its volume** (the `-v`), so every account is gone. Start it again with `docker compose up -d`, then restart the API so Flyway recreates the tables (lesson 23.4).
+
+Now the app has a problem: the account ID it saved no longer exists. Every screen shows, after TanStack Query's retries:
+
+```
+Account 00000000-0000-0000-0000-000000000840 was not found
+```
+
+with your account's ID in place of the zeros, and **Try again** cannot help. Until sign-in arrives, the way out is to make the app forget its account, which is this lesson's exercise.
+
+<Exercise title="Use a different account">
+Add a **Use a different account** button to the You screen. Pressing it removes the saved account ID from the device and shows the welcome screen, where the person can open a new account. Do it by giving `AccountIdGate`'s context a `forget` function, and add a hook `useForgetAccount()` next to `useAccountId()`. Test it after a database reset.
+
+<Fragment slot="hint">The context currently holds just the ID string. Make it hold an object `{ accountId, forget }` instead. `useAccountId()` keeps returning a string, so no other screen has to change.</Fragment>
+<Fragment slot="hint2">`forget` does the opposite of `onOpened`: `AsyncStorage.removeItem(STORAGE_KEY)`, and set the state to `{ status: 'none' }`. The gate then shows the welcome screen on its own.</Fragment>
+<Fragment slot="solution">
+
+In `src/state/AccountIdContext.tsx`, the context and the end of `AccountIdGate`:
+
+```tsx
+type AccountIdValue = { accountId: string; forget: () => void };
+
+const AccountIdContext = createContext<AccountIdValue | null>(null);
+```
+
+```tsx
+  const forget = () => {
+    AsyncStorage.removeItem(STORAGE_KEY).catch(() => {});
+    setState({ status: 'none' });
+  };
+  return (
+    <AccountIdContext.Provider value={{ accountId: state.accountId, forget }}>{children}</AccountIdContext.Provider>
+  );
+}
+```
+
+and the hooks at the bottom:
+
+```tsx
+function useAccountIdValue(): AccountIdValue {
+  const value = useContext(AccountIdContext);
+  if (value === null) {
+    throw new Error('useAccountId must be used inside <AccountIdGate>');
+  }
+  return value;
+}
+
+export function useAccountId(): string {
+  return useAccountIdValue().accountId;
+}
+
+/** Forgets this device's account and shows the welcome screen again. */
+export function useForgetAccount(): () => void {
+  return useAccountIdValue().forget;
+}
+```
+
+`useAccountIdValue` is not exported: it is a helper for the two hooks. In `ProfileScreen.tsx`, import `Button` and `useForgetAccount`, call `const forget = useForgetAccount();` next to `useAccount()`, and add below the text:
+
+```tsx
+      <Button title="Use a different account" variant="secondary" onPress={forget} />
+```
+
+Tested with a saved ID that does not exist: the Wallet showed "Account 00000000-0000-0000-0000-000000000840 was not found"; on the You tab, the button brought back **Welcome to PayDeck**, and the saved ID was gone (`AsyncStorage.getItem` returned `null`).
+
+Nothing from the old account can leak into the new one, because every query key includes the account ID (lesson 26.3). Part 8 replaces this button with **Sign out**.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Starting the API before Docker">
+The API stops at startup with `Connection to localhost:5432 refused` (lesson 23.1). Start Docker Desktop, run `docker compose up -d`, then start the API again.
+</Aside>
+
+<Aside type="caution" title="Two copies of the API">
+`Port 8080 was already in use` means an API is already running, often in a terminal window you forgot about. Find that window and stop it with `Ctrl+C`, or use the one that is running.
+</Aside>
+
+<Aside type="caution" title="An old API">
+After changing Java code, the running API is still the old version until you stop it and run `./mvnw spring-boot:run` again. If the app's request "should" work and does not, check that the API you are talking to has your change.
+</Aside>
+
+<Aside type="caution" title="Turning cleartext on for release builds">
+Setting `usesCleartextTraffic` to `true` for everything makes the error go away and leaves your published app sending money data unencrypted. Keep http for development on your own Mac, and use https for anything real (Part 10).
+</Aside>
+
+## Recap
+
+- Start from the bottom: Docker and PostgreSQL, then the API, then Metro, then the apps. Debug in the same order.
+- The Mac app uses `localhost`, the emulator `10.0.2.2`, and a USB phone `localhost` with `adb reverse tcp:8080 tcp:8080`.
+- Plain http works only because debug builds allow it on Android and the macOS template allows it for localhost; real servers use https.
+- `curl` from the Mac tells you whether the API itself is fine, which splits every problem in half.
+- After a database reset the saved account no longer exists; the app needs a way to forget it.
+
+<Quiz
+	questions={[
+		{
+			question: 'The Mac app works, but the Android emulator says "Could not reach PayDeck". What is the most likely cause?',
+			options: ['PostgreSQL is not running', 'The Android app is using localhost instead of 10.0.2.2', 'The API has a bug'],
+			answer: 1,
+			explanation: 'If the Mac app works, the API and database are fine. What differs is the route from the emulator to the Mac.',
+		},
+		{
+			question: 'Why can the debug Android app use http://10.0.2.2:8080 when Android blocks unencrypted traffic?',
+			options: ['10.0.2.2 is always allowed', 'React Native turns usesCleartextTraffic on for debug builds only', 'The API encrypts it'],
+			answer: 1,
+			explanation: 'The manifest placeholder is true for debug builds and false for release builds, which is why real servers need https.',
+		},
+		{
+			question: 'curl localhost:8080/api/accounts/... answers 404 with problem details. What does that tell you?',
+			options: ['The API is broken', 'The API and its database are running and answering', 'The account exists'],
+			answer: 1,
+			explanation: 'A 404 for an unknown account is a correct answer from a working API. The problem, if any, is between the device and the Mac.',
+		},
+	]}
+/>
+
+<MarkComplete />
