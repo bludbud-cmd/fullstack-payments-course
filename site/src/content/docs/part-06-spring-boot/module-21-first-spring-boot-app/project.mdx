@@ -1,0 +1,150 @@
+---
+title: "Mini-project: health-check endpoint"
+description: "Give the PayDeck API a detailed health check for your Mac, a short one for the internet, and a /api/status endpoint built from settings, Actuator and an injected clock."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Every service that runs on a server needs a way to answer "are you all right?". Hosting platforms call a **health-check** endpoint every few seconds and restart the service, or stop sending it traffic, when the answer is not `UP`. In Part 10 you will point PayDeck's host at exactly this. In this project you set it up properly, and add a small status endpoint of your own that uses everything from this module: a controller, injected beans, your settings and a profile.
+
+## The tasks
+
+1. **Details on your Mac only.** Right now `/actuator/health` says only `"status":"UP"`. Make it show **all its details** (the checks it ran) when no profile is active, and **no details** with the `production` profile. Strangers on the internet should not learn about your server's disks.
+2. **A status endpoint.** Add `GET /api/status`, in a new `StatusController` in the `dev.paydeck.api` package, that answers:
+
+   ```json
+   {"service":"paydeck-api","environment":"local","status":"UP","time":"2026-10-21T23:30:25.373184700Z"}
+   ```
+
+   - `service` is the `spring.application.name` setting.
+   - `environment` comes from your `PayDeckProperties`.
+   - `status` is the same status Actuator reports.
+   - `time` comes from the injected `Clock`.
+3. **Check both profiles** with curl, and commit.
+
+<Exercise title="Build it">
+Do the three tasks. With no profile, `/actuator/health` should list components such as `diskSpace` and `ping`; with `production`, it should show only the status and groups, and `/api/status` should say `"environment":"production"`.
+
+<Fragment slot="hint">The setting is `management.endpoint.health.show-details`, with the values `always` and `never`. Put one value in each YAML file.</Fragment>
+<Fragment slot="hint2">Actuator's health check is itself a bean, of type `HealthEndpoint` (in the package `org.springframework.boot.health.actuate.endpoint`), so you can inject it: `health.health().getStatus().getCode()` gives `"UP"`. A single setting can be injected into a constructor parameter with `@Value("${spring.application.name}") String serviceName`.</Fragment>
+<Fragment slot="solution">
+
+`application.yml`:
+
+```yaml
+spring:
+  application:
+    name: paydeck-api
+
+management:
+  endpoint:
+    health:
+      show-details: always
+
+paydeck:
+  environment: local
+  default-card-limit-cents: 50000
+```
+
+`application-production.yml`:
+
+```yaml
+spring:
+  main:
+    banner-mode: off
+
+management:
+  endpoint:
+    health:
+      show-details: never
+
+paydeck:
+  environment: production
+```
+
+`src/main/java/dev/paydeck/api/StatusController.java`:
+
+```java
+package dev.paydeck.api;
+
+import java.time.Clock;
+import java.time.Instant;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.health.actuate.endpoint.HealthEndpoint;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class StatusController {
+
+    public record StatusResponse(String service, String environment, String status, Instant time) {
+    }
+
+    private final String serviceName;
+    private final PayDeckProperties properties;
+    private final HealthEndpoint health;
+    private final Clock clock;
+
+    public StatusController(@Value("${spring.application.name}") String serviceName,
+                            PayDeckProperties properties, HealthEndpoint health, Clock clock) {
+        this.serviceName = serviceName;
+        this.properties = properties;
+        this.health = health;
+        this.clock = clock;
+    }
+
+    @GetMapping("/api/status")
+    public StatusResponse status() {
+        String status = health.health().getStatus().getCode();
+        return new StatusResponse(serviceName, properties.environment(), status, clock.instant());
+    }
+}
+```
+
+With no profile (`./mvnw spring-boot:run`):
+
+```sh
+curl localhost:8080/actuator/health
+```
+
+```
+{"components":{"diskSpace":{"details":{"total":270553174016,"free":26872057856,"threshold":10485760,"path":"/Users/you/Projects/course/paydeck-api/.","exists":true},"status":"UP"},"livenessState":{"status":"UP"},"ping":{"status":"UP"},"readinessState":{"status":"UP"},"ssl":{"details":{"expiringChains":[],"invalidChains":[],"validChains":[]},"status":"UP"}},"groups":["liveness","readiness"],"status":"UP"}
+```
+
+```sh
+curl localhost:8080/api/status
+```
+
+```
+{"service":"paydeck-api","environment":"local","status":"UP","time":"2026-10-21T23:30:25.373184700Z"}
+```
+
+With `./mvnw spring-boot:run -Dspring-boot.run.profiles=production`:
+
+```
+{"groups":["liveness","readiness"],"status":"UP"}
+{"service":"paydeck-api","environment":"production","status":"UP","time":"2026-10-21T23:30:36.702143388Z"}
+```
+
+Your disk numbers and path will differ. Commit with `git add .` and `git commit -m "Add a status endpoint and health details"`.
+
+What to notice:
+
+- Each health **component** is one check. `diskSpace` turns `DOWN` when the disk is nearly full; when you add a database in Module 23, a `db` component appears by itself, and the whole status turns `DOWN` if PostgreSQL cannot be reached.
+- `liveness` and `readiness` are two standard questions hosts ask: "is the process alive, or should it be restarted?" and "is it ready for traffic yet?". Each has its own address, `/actuator/health/liveness` and `/actuator/health/readiness`.
+- `StatusController` has four dependencies and creates none of them, so a test can give it a fixed clock and made-up settings, as you did in lesson 21.3.
+- `@Value` is handy for one setting; for a group of your own settings, a `@ConfigurationProperties` record keeps them together and named.
+</Fragment>
+</Exercise>
+
+<Aside type="note" title="Practice classes">
+`HelloController`, `CardPreviewController` and `StatusController` were practice for this module. Keep them for now: Module 22 replaces the card preview with a real cards API.
+</Aside>
+
+<MarkComplete />

@@ -1,0 +1,340 @@
+---
+title: "23.1 Entities"
+description: "Connect the PayDeck API to PostgreSQL: start a database with Docker Compose, add Spring Data JPA, and map the Card class to a table with @Entity."
+sidebar:
+  order: 1
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson the PayDeck API stores its cards in PostgreSQL, so they survive a restart.
+
+## Why it matters
+
+Every card you have issued so far vanished the moment the API stopped. In Module 20 you stored data in PostgreSQL with SQL by hand; now the API does it. You could write every `INSERT` and `SELECT` yourself, but for a few hundred tables that is a lot of repetitive code. **JPA** lets you describe how a Java class maps to a table, once, and then save and load objects without writing SQL for the everyday cases.
+
+## The idea
+
+- **JPA** (Jakarta Persistence) is the Java standard for saving objects in relational databases. **Hibernate** is the library that does the work behind it. **Spring Data JPA** adds the Spring conveniences on top, such as repositories (next lesson).
+- An **entity** is a class whose objects are rows in a table. You mark it `@Entity` and say which field is the primary key with `@Id`. Every field becomes a column, named in `snake_case`: `spendingLimitCents` becomes `spending_limit_cents`. This is called **object-relational mapping** (ORM).
+- A **JDBC driver** is the piece that actually talks to one kind of database; for PostgreSQL it is the `postgresql` dependency.
+- **Docker Compose** starts containers described in a file, `docker-compose.yml`, instead of a long `docker run` command. The file lives in the project, so everyone who clones it gets the same database with one command.
+
+Entities have a few rules, because Hibernate creates objects itself when it loads rows:
+
+- They need a constructor with no parameters. It can be `protected`, so your own code still cannot use it.
+- Their fields cannot be `final`, because Hibernate fills them in after creating the object.
+
+## Worked example
+
+<Steps>
+
+1. **Describe the database.** In the project folder, next to `pom.xml`, create `docker-compose.yml`:
+
+   ```yaml
+   # Starts the PostgreSQL database PayDeck needs on your computer.
+   #   docker compose up -d     start it in the background
+   #   docker compose down      stop it (your data is kept)
+   services:
+     postgres:
+       image: postgres:17-alpine
+       environment:
+         POSTGRES_DB: paydeck
+         POSTGRES_USER: paydeck
+         POSTGRES_PASSWORD: paydeck
+       ports:
+         - "5432:5432"
+       volumes:
+         - paydeck-data:/var/lib/postgresql/data
+
+   volumes:
+     paydeck-data:
+   ```
+
+   It is the same as Module 20's `docker run`, written down: a database called `paydeck`, on port 5432 this time, with its data in the volume `paydeck-data`. (Your `course-postgres` from Module 20 uses 5433, so both can run at once.)
+
+2. **Start it**, with Docker Desktop running:
+
+   ```sh
+   docker compose up -d
+   ```
+
+   ```
+    Container paydeck-api-postgres-1 Started
+   ```
+
+   Compose names the container after the folder and the service. `docker compose ps` shows it running.
+
+3. **Add the dependencies.** In `pom.xml`, after `spring-boot-starter-webmvc`:
+
+   ```xml
+   <dependency>
+       <groupId>org.springframework.boot</groupId>
+       <artifactId>spring-boot-starter-data-jpa</artifactId>
+   </dependency>
+   <dependency>
+       <groupId>org.postgresql</groupId>
+       <artifactId>postgresql</artifactId>
+       <scope>runtime</scope>
+   </dependency>
+   ```
+
+   `runtime` means your code never refers to the driver directly; it is only needed when the app runs.
+
+4. **Tell Spring where the database is.** In `application.yml`, add `datasource` and `jpa` under the existing `spring:` key:
+
+   ```yaml
+   spring:
+     application:
+       name: paydeck-api
+     datasource:
+       url: jdbc:postgresql://localhost:5432/paydeck
+       username: paydeck
+       password: paydeck
+     jpa:
+       hibernate:
+         ddl-auto: update
+       open-in-view: false
+   ```
+
+   - The **JDBC URL** says which driver, which computer, which port and which database.
+   - These are development passwords for a database on your own Mac only; a real server will get its own through environment variables (lesson 21.4).
+   - `ddl-auto: update` lets Hibernate **create and change tables** to match your entities. It is a shortcut for this lesson only: lesson 23.4 replaces it with something safer.
+   - `open-in-view: false` switches off an old convenience that keeps database connections open longer than needed. The finished PayDeck API turns it off too.
+
+</Steps>
+
+### Make Card an entity
+
+Replace `Card.java`. The rules and getters are the same as before; what changed is the top half:
+
+```java
+package dev.paydeck.api.card;
+
+import java.security.SecureRandom;
+import java.time.Instant;
+import java.util.UUID;
+
+import dev.paydeck.api.common.BusinessRuleException;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+
+/**
+ * A virtual card. We only keep the last four digits; a full card number
+ * never reaches PayDeck's database.
+ */
+@Entity
+@Table(name = "cards")
+public class Card {
+
+    private static final SecureRandom RANDOM = new SecureRandom();
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private UUID id;
+
+    @Column(nullable = false)
+    private String nickname;
+
+    @Column(nullable = false)
+    private String last4;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private CardStatus status;
+
+    /** The most one payment can be, or {@code null} for no limit. */
+    private Long spendingLimitCents;
+
+    @Column(nullable = false)
+    private Instant createdAt;
+
+    protected Card() {
+        // For JPA
+    }
+
+    public static Card issue(String nickname, Long spendingLimitCents) {
+        Card card = new Card();
+        card.nickname = nickname;
+        card.last4 = String.format("%04d", RANDOM.nextInt(10_000));
+        card.status = CardStatus.ACTIVE;
+        card.spendingLimitCents = spendingLimitCents;
+        card.createdAt = Instant.now();
+        return card;
+    }
+
+    // rename, setSpendingLimit, freeze, unfreeze, cancel, requireNotCancelled
+    // and the getters stay exactly as they were.
+}
+```
+
+- `@Table(name = "cards")` names the table (otherwise it would be `card`).
+- `@GeneratedValue(strategy = GenerationType.UUID)`: Hibernate makes a random UUID when the card is first saved. So `issue` no longer sets `id`, and a brand-new card's ID is `null` until it is saved.
+- `@Column(nullable = false)` says the column may not be empty.
+- `@Enumerated(EnumType.STRING)` stores `"FROZEN"` rather than the enum's position number. Numbers would silently change meaning if anyone ever reordered the enum.
+- The fields lost `final`, and there is now a `protected` no-argument constructor.
+
+### Replace the store
+
+Delete `CardStore.java` and create `card/CardRepository.java`:
+
+```java
+package dev.paydeck.api.card;
+
+import java.util.UUID;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface CardRepository extends JpaRepository<Card, UUID> {
+}
+```
+
+An interface with nothing in it, and yet it has `save`, `findById`, `findAll` and many more: Spring writes the class for you when the app starts. The next lesson explains how. In `CardController`, change the two places that say `CardStore` to `CardRepository`. Because you chose the same method names in Module 22, nothing else in the controller has to change. (In `list`, `findAll()` now returns cards in no particular order; lesson 23.2 fixes that too.)
+
+### Run it
+
+Start the API with one extra setting that prints every SQL statement Hibernate runs:
+
+```sh
+./mvnw spring-boot:run -Dspring-boot.run.arguments=--spring.jpa.show-sql=true
+```
+
+Among the start-up lines:
+
+```
+... HikariPool-1 - Start completed.
+Hibernate: create table cards (id uuid not null, created_at timestamp(6) with time zone not null, last4 varchar(255) not null, nickname varchar(255) not null, spending_limit_cents bigint, status varchar(255) not null check ((status in ('ACTIVE','FROZEN','CANCELLED'))), primary key (id))
+```
+
+**HikariCP** is the **connection pool**: it keeps a few database connections open and lends them to requests, because opening a new connection each time is slow. Hibernate then created the table from your entity. Issue a card:
+
+```sh
+curl -X POST localhost:8080/api/cards -H 'Content-Type: application/json' -d '{"nickname": "Groceries", "spendingLimitCents": 20000}'
+```
+
+```
+{"id":"52c0e819-8b66-47aa-ba8f-218111943c1f","nickname":"Groceries","last4":"8948","status":"ACTIVE","spendingLimitCents":20000,"createdAt":"2026-10-21T23:49:17.316386456Z"}
+```
+
+```
+Hibernate: insert into cards (created_at,last4,nickname,spending_limit_cents,status,id) values (?,?,?,?,?,?)
+```
+
+The `?` are **parameters**: the values travel separately from the SQL, which makes SQL injection (Part 8) impossible. Now stop the API with Ctrl+C, start it again, and list the cards: the Groceries card is still there. Your data finally outlives the program. Check it from the database's side too:
+
+```sh
+docker compose exec postgres psql -U paydeck -c 'select nickname, last4, status from cards'
+```
+
+```
+ nickname  | last4 | status
+-----------+-------+--------
+ Groceries | 8948  | ACTIVE
+(1 row)
+```
+
+`docker compose exec postgres` is the Compose way of saying `docker exec` for the `postgres` service, and `-c` runs one command and exits.
+
+### Something is not right
+
+Freeze that card (use your own ID):
+
+```sh
+curl -X POST localhost:8080/api/cards/52c0e819-8b66-47aa-ba8f-218111943c1f/freeze
+```
+
+```
+{"id":"52c0e819-8b66-47aa-ba8f-218111943c1f","nickname":"Groceries","last4":"8948","status":"FROZEN",...}
+```
+
+The response says `FROZEN`. Now ask the database again: it still says `ACTIVE`. The log shows a `select`, but no `update`. The API told the app the card was frozen, and it is not: in a payments app, that is a serious bug. Lesson 23.2 explains exactly why, and fixes it with one annotation.
+
+Commit your work, including `docker-compose.yml`.
+
+## Try it
+
+<Exercise title="Try it: look at the table">
+Open psql inside the Compose database and describe the `cards` table. Which Java field became which column, and with which type? Which part of the entity produced the `CHECK` constraint?
+
+<Fragment slot="hint">`docker compose exec postgres psql -U paydeck`, then `\d cards`.</Fragment>
+<Fragment slot="solution">
+
+```
+                                Table "public.cards"
+        Column        |            Type             | Collation | Nullable | Default
+----------------------+-----------------------------+-----------+----------+---------
+ id                   | uuid                        |           | not null |
+ created_at           | timestamp(6) with time zone |           | not null |
+ last4                | character varying(255)      |           | not null |
+ nickname             | character varying(255)      |           | not null |
+ spending_limit_cents | bigint                      |           |          |
+ status               | character varying(255)      |           | not null |
+Indexes:
+    "cards_pkey" PRIMARY KEY, btree (id)
+Check constraints:
+    "cards_status_check" CHECK (status::text = ANY (ARRAY['ACTIVE'::character varying, 'FROZEN'::character varying, 'CANCELLED'::character varying]::text[]))
+```
+
+`UUID` became `uuid`, `Instant` became `timestamp with time zone`, `String` became `varchar(255)`, `Long` became `bigint`. Only `spending_limit_cents` may be empty, because only it lacks `@Column(nullable = false)`. The `CHECK` came from `@Enumerated(EnumType.STRING)`: Hibernate knows the only allowed values. Notice what is missing, too: nothing limits `nickname` to 50 characters or `last4` to 4. Hibernate guessed; lesson 23.4 takes control.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Connection to localhost:5432 refused">
+The database is not running, so the API cannot start. Start Docker Desktop, then `docker compose up -d` in the project folder.
+</Aside>
+
+<Aside type="caution" title="Tests now fail with the same message">
+`PayDeckApplicationTests` starts the whole app, so `./mvnw test` now needs the database running too. Module 25 gives the tests their own database.
+</Aside>
+
+<Aside type="caution" title="An entity without a no-argument constructor">
+Hibernate cannot create objects when it loads rows, and the first query fails. Add `protected Card() { }`.
+</Aside>
+
+<Aside type="caution" title="Using ddl-auto: update for real">
+It only ever adds things, guesses column types, cannot rename or move data, and gives up on changes it cannot make. It is fine for one lesson on your own Mac; it is never used on a real database. Lesson 23.4 replaces it.
+</Aside>
+
+## Recap
+
+- `docker-compose.yml` describes the project's database; `docker compose up -d` starts it.
+- Spring Data JPA plus the PostgreSQL driver, and a `spring.datasource` URL, connect the API to it.
+- `@Entity`, `@Id`, `@GeneratedValue`, `@Column` and `@Enumerated(EnumType.STRING)` map a class to a table.
+- Entities need a no-argument constructor and non-final fields.
+- `--spring.jpa.show-sql=true` shows the SQL Hibernate runs.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why store the card status with EnumType.STRING?',
+			options: ['Strings are smaller', 'The value stays correct even if someone reorders the enum', 'Hibernate cannot store numbers'],
+			answer: 1,
+			explanation: 'Position numbers change meaning when the enum changes; names do not.',
+		},
+		{
+			question: 'What does the ? in insert into cards (...) values (?,?,...) mean?',
+			options: ['Unknown values', 'Parameters sent separately from the SQL', 'An error'],
+			answer: 1,
+			explanation: 'Values never become part of the SQL text, which prevents SQL injection.',
+		},
+		{
+			question: 'Why does Card now have a protected constructor with no parameters?',
+			options: ['Java requires it', 'Hibernate needs it to create objects when loading rows', 'For tests'],
+			answer: 1,
+			explanation: 'Protected keeps other code using Card.issue(...).',
+		},
+	]}
+/>
+
+<MarkComplete />

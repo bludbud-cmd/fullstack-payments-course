@@ -1,0 +1,531 @@
+---
+title: "23.3 Relationships"
+description: "Add accounts to the PayDeck API and link each card to its account, choosing between a plain ID column and JPA's @ManyToOne and @OneToMany."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson PayDeck has accounts, every card belongs to one, and you can explain the two ways JPA can link entities and why PayDeck uses each.
+
+## Why it matters
+
+A card spends money from an account; without accounts, cards have nothing to spend. In Module 20 you linked tables with foreign keys: `cards.account_id` points at `accounts.id`. Now the Java side needs the same link, and JPA gives you a choice that affects how much it loads from the database and how tangled your classes become.
+
+## The idea
+
+### Two ways to link
+
+**1. Keep the ID.** The card stores the account's ID, exactly like the table does:
+
+```java
+@Column(nullable = false)
+private UUID accountId;
+```
+
+Simple and predictable: loading a card loads one row. When you need the account, you ask `AccountRepository` for it.
+
+**2. Keep the object.** The card holds the `Account` itself, and JPA fills it in:
+
+```java
+@ManyToOne(fetch = FetchType.LAZY, optional = false)
+@JoinColumn(name = "account_id")
+private Account account;
+```
+
+- **`@ManyToOne`**: many cards, one account. `@JoinColumn` names the foreign key column.
+- The other side can have a list: `@OneToMany(mappedBy = "account") private List<Card> cards;` on `Account`. `mappedBy` says "the card's `account` field owns this link"; the list is just a view of it.
+- **`FetchType.LAZY`** means the account is only loaded from the database when your code first uses it. Convenient, but it hides database queries inside ordinary-looking method calls. Looping over 100 cards and calling `card.getAccount().getOwnerName()` can quietly run 101 queries: the famous **N+1 problem**.
+
+### PayDeck's choice
+
+PayDeck links **cards to accounts by ID**. Accounts and cards are managed separately (an account has its own endpoints, a card has its own), and keeping them apart keeps every query obvious. In Module 24 you will meet the opposite case: a ledger transaction and its entries are always created, saved and read together, so there an entry holds its transaction with `@ManyToOne`.
+
+A rule of thumb: link with objects when things live and die together; link with IDs when they are separate things that merely refer to each other.
+
+## Worked example
+
+### Accounts
+
+An account holds money in one currency. Create a package `money` with `SupportedCurrency.java`:
+
+```java
+package dev.paydeck.api.money;
+
+/**
+ * The currencies PayDeck accounts can hold. Amounts are always stored as a
+ * whole number of the currency's smallest unit (cents, pence, paise), never
+ * as a decimal, so there are no rounding errors.
+ */
+public enum SupportedCurrency {
+    USD, EUR, GBP, INR
+}
+```
+
+and a package `account` with three files. `AccountKind.java`:
+
+```java
+package dev.paydeck.api.account;
+
+public enum AccountKind {
+    /** Belongs to a PayDeck user. Its balance can never go below zero. */
+    CUSTOMER,
+    /** Stands for the outside world, so money coming in has somewhere to come from. */
+    SYSTEM
+}
+```
+
+Every account opened through the API is a `CUSTOMER` account. PayDeck also keeps one `SYSTEM` account per currency, which Module 24 needs so that money arriving from outside has somewhere to come from. They must never be visible through the API.
+
+`Account.java`:
+
+```java
+package dev.paydeck.api.account;
+
+import java.time.Instant;
+import java.util.UUID;
+
+import dev.paydeck.api.money.SupportedCurrency;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+
+/** An account that holds money in one currency. Its balance lives in the ledger. */
+@Entity
+@Table(name = "accounts")
+public class Account {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private UUID id;
+
+    @Column(nullable = false)
+    private String ownerName;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private SupportedCurrency currency;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private AccountKind kind;
+
+    @Column(nullable = false)
+    private Instant createdAt;
+
+    protected Account() {
+        // For JPA
+    }
+
+    public static Account openCustomerAccount(String ownerName, SupportedCurrency currency) {
+        Account account = new Account();
+        account.ownerName = ownerName;
+        account.currency = currency;
+        account.kind = AccountKind.CUSTOMER;
+        account.createdAt = Instant.now();
+        return account;
+    }
+
+    public UUID getId() {
+        return id;
+    }
+
+    public String getOwnerName() {
+        return ownerName;
+    }
+
+    public SupportedCurrency getCurrency() {
+        return currency;
+    }
+
+    public AccountKind getKind() {
+        return kind;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+}
+```
+
+There is no balance field: Module 24 works balances out from a ledger. For now an account has an owner's name; in Part 8 it will belong to a signed-in user. `AccountRepository.java`:
+
+```java
+package dev.paydeck.api.account;
+
+import java.util.UUID;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface AccountRepository extends JpaRepository<Account, UUID> {
+}
+```
+
+And `AccountController.java`:
+
+```java
+package dev.paydeck.api.account;
+
+import java.net.URI;
+import java.time.Instant;
+import java.util.UUID;
+
+import dev.paydeck.api.common.NotFoundException;
+import dev.paydeck.api.money.SupportedCurrency;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
+import org.springframework.http.ResponseEntity;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/accounts")
+public class AccountController {
+
+    public record OpenAccountRequest(
+            @NotBlank @Size(max = 100) String ownerName,
+            @NotNull SupportedCurrency currency) {
+    }
+
+    public record AccountResponse(UUID id, String ownerName, SupportedCurrency currency, Instant createdAt) {
+    }
+
+    private final AccountRepository accounts;
+
+    public AccountController(AccountRepository accounts) {
+        this.accounts = accounts;
+    }
+
+    @PostMapping
+    @Transactional
+    public ResponseEntity<AccountResponse> open(@Valid @RequestBody OpenAccountRequest request) {
+        Account account = accounts.save(Account.openCustomerAccount(request.ownerName().strip(), request.currency()));
+        return ResponseEntity.created(URI.create("/api/accounts/" + account.getId()))
+                .body(toResponse(account));
+    }
+
+    @GetMapping("/{id}")
+    @Transactional(readOnly = true)
+    public AccountResponse get(@PathVariable UUID id) {
+        Account account = accounts.findById(id)
+                .filter(a -> a.getKind() == AccountKind.CUSTOMER)
+                .orElseThrow(() -> new NotFoundException("Account", id));
+        return toResponse(account);
+    }
+
+    private static AccountResponse toResponse(Account account) {
+        return new AccountResponse(account.getId(), account.getOwnerName(), account.getCurrency(),
+                account.getCreatedAt());
+    }
+}
+```
+
+`Optional.filter(...)` empties the `Optional` if the condition is false, so a `SYSTEM` account is treated exactly like one that does not exist: `404`. Nobody even learns it is there.
+
+### Cards belong to accounts
+
+In `Card.java`, add the account's ID after `id`, take it in `issue`, and add a getter:
+
+```java
+@Column(nullable = false)
+private UUID accountId;
+```
+
+```java
+public static Card issue(UUID accountId, String nickname, Long spendingLimitCents) {
+    Card card = new Card();
+    card.accountId = accountId;
+    card.nickname = nickname;
+    ...
+}
+
+public UUID getAccountId() {
+    return accountId;
+}
+```
+
+In `CardRepository`, replace the two queries with the one PayDeck needs:
+
+```java
+List<Card> findByAccountIdOrderByCreatedAt(UUID accountId);
+```
+
+Cards are now issued and listed **through their account**: `POST /api/accounts/{accountId}/cards` and `GET /api/accounts/{accountId}/cards`. A single card keeps its own short address, `/api/cards/{id}`. Because the paths no longer share a beginning, remove `@RequestMapping("/api/cards")` from `CardController` and write each full path on its method. Replace the whole controller with:
+
+```java
+package dev.paydeck.api.card;
+
+import java.net.URI;
+import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
+
+import dev.paydeck.api.account.AccountKind;
+import dev.paydeck.api.account.AccountRepository;
+import dev.paydeck.api.common.NotFoundException;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.Size;
+import org.springframework.http.ResponseEntity;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RestController;
+
+@Tag(name = "Cards", description = "Issue and manage virtual cards")
+@RestController
+public class CardController {
+
+    public record IssueCardRequest(
+            @NotBlank @Size(max = 50) String nickname,
+            @Positive @Max(10_000_000) Long spendingLimitCents) {
+    }
+
+    /**
+     * Only the fields that are sent change. To remove a spending limit, send
+     * {@code "removeSpendingLimit": true}.
+     */
+    public record UpdateCardRequest(
+            @Size(min = 1, max = 50) String nickname,
+            @Positive @Max(10_000_000) Long spendingLimitCents,
+            Boolean removeSpendingLimit) {
+    }
+
+    public record CardResponse(
+            UUID id, UUID accountId, String nickname, String last4, CardStatus status,
+            Long spendingLimitCents, Instant createdAt) {
+
+        static CardResponse of(Card card) {
+            return new CardResponse(card.getId(), card.getAccountId(), card.getNickname(), card.getLast4(),
+                    card.getStatus(), card.getSpendingLimitCents(), card.getCreatedAt());
+        }
+    }
+
+    private final CardRepository cards;
+    private final AccountRepository accounts;
+
+    public CardController(CardRepository cards, AccountRepository accounts) {
+        this.cards = cards;
+        this.accounts = accounts;
+    }
+
+    @PostMapping("/api/accounts/{accountId}/cards")
+    @Transactional
+    public ResponseEntity<CardResponse> issue(@PathVariable UUID accountId,
+                                              @Valid @RequestBody IssueCardRequest request) {
+        requireCustomerAccount(accountId);
+        Card card = cards.save(Card.issue(accountId, request.nickname().strip(), request.spendingLimitCents()));
+        return ResponseEntity.created(URI.create("/api/cards/" + card.getId())).body(CardResponse.of(card));
+    }
+
+    @GetMapping("/api/accounts/{accountId}/cards")
+    @Transactional(readOnly = true)
+    public List<CardResponse> list(@PathVariable UUID accountId) {
+        requireCustomerAccount(accountId);
+        return cards.findByAccountIdOrderByCreatedAt(accountId).stream().map(CardResponse::of).toList();
+    }
+
+    @GetMapping("/api/cards/{id}")
+    @Transactional(readOnly = true)
+    public CardResponse get(@PathVariable UUID id) {
+        return CardResponse.of(find(id));
+    }
+
+    @PatchMapping("/api/cards/{id}")
+    @Transactional
+    public CardResponse update(@PathVariable UUID id, @Valid @RequestBody UpdateCardRequest request) {
+        Card card = find(id);
+        if (request.nickname() != null) {
+            card.rename(request.nickname().strip());
+        }
+        if (Boolean.TRUE.equals(request.removeSpendingLimit())) {
+            card.setSpendingLimit(null);
+        } else if (request.spendingLimitCents() != null) {
+            card.setSpendingLimit(request.spendingLimitCents());
+        }
+        return CardResponse.of(card);
+    }
+
+    @Operation(summary = "Freeze a card", description = "Blocks an active card until it is unfrozen.")
+    @PostMapping("/api/cards/{id}/freeze")
+    @Transactional
+    public CardResponse freeze(@PathVariable UUID id) {
+        Card card = find(id);
+        card.freeze();
+        return CardResponse.of(card);
+    }
+
+    @PostMapping("/api/cards/{id}/unfreeze")
+    @Transactional
+    public CardResponse unfreeze(@PathVariable UUID id) {
+        Card card = find(id);
+        card.unfreeze();
+        return CardResponse.of(card);
+    }
+
+    @Operation(summary = "Cancel a card", description = "Closes a card for good. It stays in the list as CANCELLED.")
+    @DeleteMapping("/api/cards/{id}")
+    @Transactional
+    public ResponseEntity<Void> cancel(@PathVariable UUID id) {
+        find(id).cancel();
+        return ResponseEntity.noContent().build();
+    }
+
+    private Card find(UUID id) {
+        return cards.findById(id).orElseThrow(() -> new NotFoundException("Card", id));
+    }
+
+    private void requireCustomerAccount(UUID accountId) {
+        accounts.findById(accountId)
+                .filter(account -> account.getKind() == AccountKind.CUSTOMER)
+                .orElseThrow(() -> new NotFoundException("Account", accountId));
+    }
+}
+```
+
+The status filter on the list is gone: an account has a handful of cards, and the app shows them all. `CardResponse` now includes `accountId`. Finally, `CardTest` creates a card without an account; give it a random one:
+
+```java
+private final Card card = Card.issue(UUID.randomUUID(), "Groceries", null);
+```
+
+with `import java.util.UUID;`.
+
+### Start the database afresh
+
+Restart the API. Among the start-up lines is a warning:
+
+```
+WARN ... : GenerationTarget encountered exception accepting command : Error executing DDL "alter table if exists cards add column account_id uuid not null" via JDBC [ERROR: column "account_id" of relation "cards" contains null values]
+```
+
+Hibernate tried to add a required `account_id` column to a table whose existing cards have no account, the database refused, and the app started anyway, with a table that does not match the code. This is exactly why `ddl-auto: update` is not used for real. Your practice cards are worthless, so throw the database away and start again:
+
+```sh
+docker compose down -v
+docker compose up -d
+```
+
+`-v` also deletes the volume, and with it all the data. Restart the API, then open an account and give it a card:
+
+```sh
+curl -X POST localhost:8080/api/accounts -H 'Content-Type: application/json' -d '{"ownerName": "Ben Okafor", "currency": "EUR"}'
+```
+
+```
+{"id":"1bf71277-c0ac-42fe-905d-7ee7ebf7b0bc","ownerName":"Ben Okafor","currency":"EUR","createdAt":"2026-10-21T23:52:30.139598450Z"}
+```
+
+```sh
+curl -X POST localhost:8080/api/accounts/1bf71277-c0ac-42fe-905d-7ee7ebf7b0bc/cards \
+  -H 'Content-Type: application/json' -d '{"nickname": "Travel", "spendingLimitCents": 100000}'
+```
+
+```
+{"id":"dcf7eee5-4d4c-447c-b22f-e9a8b73db15d","accountId":"1bf71277-c0ac-42fe-905d-7ee7ebf7b0bc","nickname":"Travel","last4":"4504","status":"ACTIVE","spendingLimitCents":100000,"createdAt":"2026-10-21T23:52:30.422388836Z"}
+```
+
+A card for an account that does not exist is refused before anything is saved:
+
+```
+HTTP/1.1 404
+{"detail":"Account 00000000-0000-0000-0000-000000000000 was not found","instance":"/api/accounts/00000000-0000-0000-0000-000000000000/cards","status":404,"title":"Not found"}
+```
+
+And a currency PayDeck does not support (`"currency": "JPY"`) is refused with `400`, because `JPY` cannot be turned into a `SupportedCurrency`.
+
+## Try it
+
+<Exercise title="Try it: join them in SQL">
+The API keeps cards and accounts apart, but they are linked in the database. In psql, write one query that lists each card's nickname and last four digits next to its owner's name and the account's currency.
+
+<Fragment slot="hint">`docker compose exec postgres psql -U paydeck`, then a `JOIN` from Module 20: `FROM cards c JOIN accounts a ON a.id = c.account_id`.</Fragment>
+<Fragment slot="solution">
+
+```sql
+SELECT a.owner_name, a.currency, c.nickname, c.last4
+FROM cards c
+JOIN accounts a ON a.id = c.account_id;
+```
+
+```
+ owner_name | currency | nickname | last4
+------------+----------+----------+-------
+ Ben Okafor | EUR      | Travel   | 4504
+(1 row)
+```
+
+The ID in `cards.account_id` works for a join whether or not Java holds an `Account` object. Run `\d cards` too, and notice that there is **no foreign key** on `account_id`: Hibernate only creates one for `@ManyToOne`. The next lesson writes the tables yourself, foreign key included.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="LazyInitializationException: could not initialize proxy - no Session">
+With `@ManyToOne(fetch = LAZY)`, you used the linked object after the transaction ended, so Hibernate could no longer load it. Read what you need inside the `@Transactional` method, and turn it into a response record before returning.
+</Aside>
+
+<Aside type="caution" title="Infinite JSON">
+Returning an entity with `@OneToMany` from a controller can make Jackson go from card to account to cards to account... forever. Response records avoid this entirely.
+</Aside>
+
+<Aside type="caution" title="Forgetting the account check">
+Without `requireCustomerAccount`, a card could be issued for a `SYSTEM` account or for an ID that does not exist. Check that the parent exists before creating the child.
+</Aside>
+
+## Recap
+
+- Entities can link by ID (`UUID accountId`) or by object (`@ManyToOne` / `@OneToMany(mappedBy = ...)`).
+- Object links load related rows for you, lazily, which is convenient but can hide many queries (N+1).
+- PayDeck links cards to accounts by ID; things that live and die together, such as ledger entries, use `@ManyToOne`.
+- Child resources go under their parent's path: `/api/accounts/{accountId}/cards`.
+- `ddl-auto: update` cannot make every change; start afresh with `docker compose down -v`, and use migrations instead (next lesson).
+
+<Quiz
+	questions={[
+		{
+			question: 'Many cards belong to one account. With object links, which annotation goes on Card.account?',
+			options: ['@OneToMany', '@ManyToOne', '@OneToOne'],
+			answer: 1,
+			explanation: 'Many cards to one account.',
+		},
+		{
+			question: 'What is the N+1 problem?',
+			options: ['A bug in UUIDs', 'Loading a list with one query, then one more query for each item', 'Having one too many tables'],
+			answer: 1,
+			explanation: 'Lazy links can quietly turn one query into hundreds.',
+		},
+		{
+			question: 'Why does GET /api/accounts/{id} answer 404 for a SYSTEM account?',
+			options: ['It does not exist', 'It is filtered out so nobody learns about internal accounts', 'SYSTEM accounts have no ID'],
+			answer: 1,
+			explanation: 'Internal accounts look exactly like missing ones from outside.',
+		},
+	]}
+/>
+
+<MarkComplete />

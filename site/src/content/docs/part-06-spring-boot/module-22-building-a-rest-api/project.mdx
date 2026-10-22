@@ -1,0 +1,220 @@
+---
+title: "Mini-project: cards API with in-memory data"
+description: "Finish PayDeck's cards API: unfreeze and cancel cards, protect cancelled cards with business rules, prove the rules with unit tests, and write a .http file that exercises every endpoint and error."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Your cards API can issue, list, read, rename, limit and freeze cards. In this project you finish the life cycle of a card, as a real card issuer would, and leave the API documented, tested and easy to try. Everything stays in memory; Module 23 swaps the store for PostgreSQL without changing the behaviour you build here.
+
+## The tasks
+
+1. **Unfreeze.** `POST /api/cards/{id}/unfreeze` turns a `FROZEN` card back to `ACTIVE`. Unfreezing a card that is not frozen is refused with `422` and the code `CARD_NOT_FROZEN`.
+2. **Cancel.** `DELETE /api/cards/{id}` cancels a card for good and answers `204 No Content`. The card is **not removed**: it stays in the list with the status `CANCELLED`, because people need to see old cards in their history.
+3. **Cancelled means final.** A cancelled card cannot be renamed, have its limit changed, be frozen or be cancelled again. Renaming, changing the limit or cancelling a cancelled card answers `422` with the code `CARD_CANCELLED`. (Freezing one already answers `CARD_NOT_ACTIVE`.)
+4. **Unit tests.** Write `CardTest` in `src/test/java/dev/paydeck/api/card` testing the rules directly on `Card`, without Spring: a new card is active with four digits; freeze then unfreeze works; unfreezing an active card is refused with `CARD_NOT_FROZEN`; a cancelled card cannot be renamed, frozen or cancelled.
+5. **Try-it file.** Create `http/cards.http` in the project with a request for every endpoint, in an order that works from top to bottom, plus one request for each kind of error: `400`, `404` and `422`.
+6. Add an `@Operation` summary for cancelling, run `./mvnw test`, and commit.
+
+<Exercise title="Build it">
+Do the six tasks. `./mvnw test` should report 7 tests (the context test, the two greeting tests from Module 21 and four in `CardTest`), all passing.
+
+<Fragment slot="hint">Write the rules in `Card` first. A private helper `requireNotCancelled()` that throws can be called at the start of `rename`, `setSpendingLimit` and `cancel`.</Fragment>
+<Fragment slot="hint2">For a `204` with no body, return `ResponseEntity<Void>` and build it with `ResponseEntity.noContent().build()`. In AssertJ, `assertThatThrownBy(card::unfreeze).isInstanceOf(BusinessRuleException.class).extracting("code").isEqualTo("CARD_NOT_FROZEN")` checks the exception and its code.</Fragment>
+<Fragment slot="solution">
+
+The new methods in `Card.java`:
+
+```java
+public void rename(String nickname) {
+    requireNotCancelled();
+    this.nickname = nickname;
+}
+
+public void setSpendingLimit(Long spendingLimitCents) {
+    requireNotCancelled();
+    this.spendingLimitCents = spendingLimitCents;
+}
+
+public void freeze() {
+    if (status != CardStatus.ACTIVE) {
+        throw new BusinessRuleException("CARD_NOT_ACTIVE", "Only an active card can be frozen");
+    }
+    status = CardStatus.FROZEN;
+}
+
+public void unfreeze() {
+    if (status != CardStatus.FROZEN) {
+        throw new BusinessRuleException("CARD_NOT_FROZEN", "Only a frozen card can be unfrozen");
+    }
+    status = CardStatus.ACTIVE;
+}
+
+public void cancel() {
+    requireNotCancelled();
+    status = CardStatus.CANCELLED;
+}
+
+private void requireNotCancelled() {
+    if (status == CardStatus.CANCELLED) {
+        throw new BusinessRuleException("CARD_CANCELLED", "A cancelled card cannot be changed");
+    }
+}
+```
+
+The new endpoints in `CardController.java` (plus `import org.springframework.web.bind.annotation.DeleteMapping;`):
+
+```java
+@PostMapping("/{id}/unfreeze")
+public CardResponse unfreeze(@PathVariable UUID id) {
+    Card card = find(id);
+    card.unfreeze();
+    return CardResponse.of(card);
+}
+
+@Operation(summary = "Cancel a card", description = "Closes a card for good. It stays in the list as CANCELLED.")
+@DeleteMapping("/{id}")
+public ResponseEntity<Void> cancel(@PathVariable UUID id) {
+    find(id).cancel();
+    return ResponseEntity.noContent().build();
+}
+```
+
+`src/test/java/dev/paydeck/api/card/CardTest.java`:
+
+```java
+package dev.paydeck.api.card;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import dev.paydeck.api.common.BusinessRuleException;
+import org.junit.jupiter.api.Test;
+
+class CardTest {
+
+    private final Card card = Card.issue("Groceries", null);
+
+    @Test
+    void aNewCardIsActiveWithFourDigits() {
+        assertThat(card.getStatus()).isEqualTo(CardStatus.ACTIVE);
+        assertThat(card.getLast4()).matches("\\d{4}");
+    }
+
+    @Test
+    void canBeFrozenAndUnfrozen() {
+        card.freeze();
+        assertThat(card.getStatus()).isEqualTo(CardStatus.FROZEN);
+        card.unfreeze();
+        assertThat(card.getStatus()).isEqualTo(CardStatus.ACTIVE);
+    }
+
+    @Test
+    void cannotUnfreezeAnActiveCard() {
+        assertThatThrownBy(card::unfreeze)
+                .isInstanceOf(BusinessRuleException.class)
+                .extracting("code").isEqualTo("CARD_NOT_FROZEN");
+    }
+
+    @Test
+    void aCancelledCardCannotChange() {
+        card.cancel();
+        assertThatThrownBy(() -> card.rename("Travel")).isInstanceOf(BusinessRuleException.class);
+        assertThatThrownBy(card::freeze).isInstanceOf(BusinessRuleException.class);
+        assertThatThrownBy(card::cancel).isInstanceOf(BusinessRuleException.class);
+    }
+}
+```
+
+`"\\d{4}"` is a **regular expression** meaning "exactly four digits" (the backslash is doubled because it is inside a Java string). JUnit creates a fresh `CardTest`, and so a fresh `card`, for every test, so the tests cannot affect each other.
+
+```
+[INFO] Tests run: 7, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
+`http/cards.http`:
+
+```http
+@baseUrl = http://localhost:8080
+
+### Issue a card
+# @name issue
+POST {{baseUrl}}/api/cards
+Content-Type: application/json
+
+{
+  "nickname": "Travel",
+  "spendingLimitCents": 100000
+}
+
+### List cards
+GET {{baseUrl}}/api/cards
+
+### Read the card
+GET {{baseUrl}}/api/cards/{{issue.response.body.$.id}}
+
+### Rename it and remove its limit
+PATCH {{baseUrl}}/api/cards/{{issue.response.body.$.id}}
+Content-Type: application/json
+
+{
+  "nickname": "Holidays",
+  "removeSpendingLimit": true
+}
+
+### Freeze it
+POST {{baseUrl}}/api/cards/{{issue.response.body.$.id}}/freeze
+
+### Unfreeze it
+POST {{baseUrl}}/api/cards/{{issue.response.body.$.id}}/unfreeze
+
+### Cancel it (204)
+DELETE {{baseUrl}}/api/cards/{{issue.response.body.$.id}}
+
+### Only cancelled cards
+GET {{baseUrl}}/api/cards?status=CANCELLED
+
+### Error 400: blank nickname and negative limit
+POST {{baseUrl}}/api/cards
+Content-Type: application/json
+
+{
+  "nickname": " ",
+  "spendingLimitCents": -5
+}
+
+### Error 404: no such card
+GET {{baseUrl}}/api/cards/00000000-0000-0000-0000-000000000000
+
+### Error 422: a cancelled card cannot be renamed
+PATCH {{baseUrl}}/api/cards/{{issue.response.body.$.id}}
+Content-Type: application/json
+
+{
+  "nickname": "Again"
+}
+```
+
+Sending the requests in order gives `201`, `200`, `200`, `200` (with `"spendingLimitCents":null`), `200` (`FROZEN`), `200` (`ACTIVE`), `204`, `200` (one `CANCELLED` card), then the three errors:
+
+```
+{"detail":"Some fields are not valid","instance":"/api/cards","status":400,"title":"Invalid request","fields":{"nickname":"must not be blank","spendingLimitCents":"must be greater than 0"}}
+{"detail":"Card 00000000-0000-0000-0000-000000000000 was not found","instance":"/api/cards/00000000-0000-0000-0000-000000000000","status":404,"title":"Not found"}
+{"detail":"A cancelled card cannot be changed","instance":"/api/cards/4596c0a1-af7b-49de-8337-8dcf7bea004b","status":422,"title":"Request not allowed","code":"CARD_CANCELLED"}
+```
+
+What to notice:
+
+- **`DELETE` that does not delete.** The request means "this card should be gone" from the client's point of view, and the card can never be used again. Keeping the row is how payment systems work: every old payment still points at a card that exists.
+- **The tests needed no Spring.** Because the rules live in `Card`, they can be tested in a few milliseconds with plain JUnit. Module 25 adds tests that go through HTTP as well.
+- **`CardStore` is the only class that knows cards are in memory.** In Module 23 you replace it, and the controller barely changes.
+</Fragment>
+</Exercise>
+
+<MarkComplete />

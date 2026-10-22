@@ -1,0 +1,240 @@
+---
+title: "21.2 Project structure"
+description: "Find your way around a Spring Boot project: the pom.xml, the main class, resources, tests and the target folder, and how to organise code into packages by feature."
+sidebar:
+  order: 2
+---
+
+import { Aside, FileTree } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you know what every file in the new project is for, where new code goes, and how to build the API into a single file that runs anywhere.
+
+## Why it matters
+
+A Spring Boot project is a Maven project from Module 18 with a few extra conventions. Knowing them means you always know where to put a new class, where settings live, and what is safe to delete. It also lets you read other people's Spring Boot projects, including the finished PayDeck API in the course repository, because they all look like this.
+
+## The idea
+
+<FileTree>
+- paydeck-api/
+  - .mvn/wrapper/ settings for the Maven wrapper
+  - mvnw the Maven wrapper (mvnw.cmd is the Windows version)
+  - pom.xml the project description and its dependencies
+  - HELP.md links to guides; safe to delete
+  - .gitignore
+  - src/
+    - main/
+      - java/dev/paydeck/api/
+        - PayDeckApplication.java the main class
+        - HelloController.java
+      - resources/
+        - application.properties settings
+        - static/ files served as-is (unused in an API)
+        - templates/ HTML templates (unused in an API)
+    - test/java/dev/paydeck/api/
+      - PayDeckApplicationTests.java
+  - target/ everything Maven builds; safe to delete
+</FileTree>
+
+### pom.xml
+
+The same kind of file as in Module 18, with two differences:
+
+```xml
+<parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>4.1.1</version>
+</parent>
+...
+<dependencies>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-webmvc</artifactId>
+    </dependency>
+
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-webmvc-test</artifactId>
+        <scope>test</scope>
+    </dependency>
+</dependencies>
+```
+
+- The **parent** is a pom that Spring Boot publishes. Your pom inherits from it, which is why the dependencies have **no versions**: the parent has already chosen versions of hundreds of libraries that are known to work together. You upgrade all of them at once by changing the parent's version.
+- The **test starter** brings JUnit, AssertJ and Spring's testing tools, for test code only. Initializr may also have added `-test` starters for Actuator and Validation; that is fine, keep them.
+
+### The main class
+
+```java
+@SpringBootApplication
+public class PayDeckApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(PayDeckApplication.class, args);
+    }
+
+}
+```
+
+`main` hands control to Spring. `@SpringBootApplication` switches on three things:
+
+- **Component scanning**: Spring searches this class's package, `dev.paydeck.api`, and every package inside it, for classes like `@RestController` and creates them.
+- **Auto-configuration**: Spring looks at which libraries are present and sets them up. Tomcat is present, so it starts a web server; later, when you add PostgreSQL, it will connect to a database.
+- **Configuration**: this class may define settings of its own (lesson 21.3).
+
+### resources
+
+Files here are copied next to your compiled classes. `application.properties` holds settings (lesson 21.4). `static` and `templates` are for websites that send HTML; an API does not need them, so delete both folders.
+
+### The test
+
+```java
+@SpringBootTest
+class PayDeckApplicationTests {
+
+    @Test
+    void contextLoads() {
+    }
+
+}
+```
+
+An empty test that still checks something useful: `@SpringBootTest` starts the whole application, so if any part cannot start, this test fails. Run all tests with:
+
+```sh
+./mvnw test
+```
+
+```
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
+### Packages by feature
+
+As the API grows, you will put each feature in its own package inside `dev.paydeck.api`:
+
+<FileTree>
+- src/main/java/dev/paydeck/api/
+  - PayDeckApplication.java
+  - account/ accounts: the class, its controller, its database access
+  - card/ virtual cards
+  - ledger/ the record of every movement of money (Module 24)
+  - common/ small things every feature uses, such as error handling
+</FileTree>
+
+This is called **package by feature**. Everything about cards is in one place, so a change to cards touches one folder. (The other common style, **package by layer**, puts all controllers in one package and all database classes in another; it spreads one feature across many folders.) Every one of these packages is inside `dev.paydeck.api`, so component scanning finds them all.
+
+## Worked example
+
+Build the API into one file that runs anywhere Java 25 is installed:
+
+```sh
+./mvnw clean package
+```
+
+```
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Building jar: .../paydeck-api/target/paydeck-api-0.0.1-SNAPSHOT.jar
+[INFO] Replacing main artifact .../paydeck-api-0.0.1-SNAPSHOT.jar with repackaged archive, adding nested dependencies in BOOT-INF/.
+[INFO] BUILD SUCCESS
+```
+
+`clean` deletes `target` first; `package` compiles, runs the tests, and builds the jar. The last step is Spring Boot's: it packs every dependency **inside** the jar (about 23 MB), so it needs nothing else. Run it:
+
+```sh
+java -jar target/paydeck-api-0.0.1-SNAPSHOT.jar
+```
+
+The same banner appears, and `curl localhost:8080/hello` answers as before. This file is what you will put on a server in Part 10. Stop it with Ctrl+C.
+
+Finally, put the project under Git, as in Module 3:
+
+```sh
+rm -f HELP.md
+rm -rf src/main/resources/static src/main/resources/templates
+git init
+git add .
+git commit -m "Create the PayDeck API with Spring Initializr"
+```
+
+`-f` means "no complaint if it is already gone", in case your download did not include them. Initializr's `.gitignore` already leaves `target/` out of Git.
+
+## Try it
+
+<Exercise title="Try it: where does Tomcat come from?">
+You never added Tomcat, yet the log says "Tomcat started on port 8080". Run `./mvnw dependency:tree` and find out which of your dependencies brought it in. Which library converts your Java objects to JSON?
+
+<Fragment slot="hint">The output is a tree: each dependency's own dependencies are indented under it. Pipe it through `grep -i tomcat` to find the lines, then look upwards in the full output.</Fragment>
+<Fragment slot="solution">
+
+```
+[INFO] +- org.springframework.boot:spring-boot-starter-webmvc:jar:4.1.1:compile
+[INFO] |  |     \- tools.jackson.core:jackson-databind:jar:3.1.5:compile
+[INFO] |  +- org.springframework.boot:spring-boot-starter-tomcat:jar:4.1.1:compile
+[INFO] |  |  +- org.springframework.boot:spring-boot-starter-tomcat-runtime:jar:4.1.1:compile
+[INFO] |  |  |  +- org.apache.tomcat.embed:tomcat-embed-core:jar:11.0.24:compile
+```
+
+`spring-boot-starter-webmvc` depends on `spring-boot-starter-tomcat`, which depends on Tomcat itself (`tomcat-embed-core`). JSON comes from **Jackson** (`jackson-databind` 3), the same library you used in Module 18. These are **transitive dependencies**: dependencies of your dependencies. A starter is mostly a list of them.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="A class in the wrong package is ignored">
+A controller in `com.example` or directly in `src/main/java` is outside `dev.paydeck.api`, so component scanning never finds it, and its endpoints give 404. Keep the `package dev.paydeck.api...;` line matching the folder.
+</Aside>
+
+<Aside type="caution" title="Adding version numbers to Spring dependencies">
+Writing your own `<version>` on a Spring Boot starter overrides the parent's tested choice, and mismatched versions fail in confusing ways. Leave versions out for anything the parent manages.
+</Aside>
+
+<Aside type="caution" title="Committing target/">
+`target` is rebuilt every time and can be huge (the jar alone is 23 MB). Make sure `.gitignore` lists `target/` before your first commit.
+</Aside>
+
+## Recap
+
+- A Spring Boot project is a Maven project whose pom inherits versions from `spring-boot-starter-parent`.
+- `@SpringBootApplication` scans its own package and those inside it, and auto-configures the libraries it finds.
+- Settings live in `src/main/resources`; tests in `src/test/java`; build output in `target`.
+- Organise code in packages by feature: `account`, `card`, `ledger`, `common`.
+- `./mvnw clean package` builds a self-contained jar that runs with `java -jar`.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why do the starters in pom.xml have no version numbers?',
+			options: ['Maven picks the newest', 'The Spring Boot parent pom chooses tested versions for them', 'Versions are optional in Maven'],
+			answer: 1,
+			explanation: 'Upgrading the parent upgrades everything together.',
+		},
+		{
+			question: 'You add a controller in the package com.example.cards. What happens?',
+			options: ['It works', 'Spring never finds it, so its endpoints give 404', 'The build fails'],
+			answer: 1,
+			explanation: 'Component scanning only covers dev.paydeck.api and the packages inside it.',
+		},
+		{
+			question: 'What does ./mvnw clean package produce?',
+			options: ['A zip of the source code', 'A jar with the app and all its dependencies inside', 'A Docker image'],
+			answer: 1,
+			explanation: 'It runs anywhere with java -jar.',
+		},
+	]}
+/>
+
+<MarkComplete />

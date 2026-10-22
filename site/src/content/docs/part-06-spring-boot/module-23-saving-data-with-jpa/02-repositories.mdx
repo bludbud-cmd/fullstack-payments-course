@@ -1,0 +1,220 @@
+---
+title: "23.2 Repositories"
+description: "Read and write entities with Spring Data repositories: built-in methods, queries made from method names, and @Transactional, which makes changes save themselves."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can query cards with repository methods you name yourself, and use transactions so that every change to a card is saved.
+
+## Why it matters
+
+Lesson 23.1 ended with a card that the API said was frozen while the database said it was active. Understanding why is the key to working with JPA, and to every money feature in Module 24, where a change that is only half saved would mean money appearing or disappearing.
+
+## The idea
+
+### Repositories
+
+A **repository** is an object that stores and finds entities, like a collection that happens to live in the database. `JpaRepository<Card, UUID>` (entity type, ID type) comes with methods such as:
+
+| Method | Does |
+| --- | --- |
+| `save(card)` | Inserts a new card, or updates an existing one |
+| `findById(id)` | `Optional<Card>`: the card, or empty |
+| `findAll()` | Every card, in no particular order |
+| `count()` | How many there are |
+| `deleteById(id)` | Removes one (PayDeck never does) |
+
+You can add your own, just by **naming** a method. Spring Data reads the name and writes the query:
+
+```java
+List<Card> findByStatusOrderByCreatedAt(CardStatus status);
+```
+
+becomes `select ... from cards where status = ? order by created_at`. The name is built from parts: `findBy`, then field names joined by `And`/`Or`, with words such as `ContainingIgnoreCase`, `GreaterThan`, `IsNull`, then optionally `OrderBy` and a field. If the name does not make sense (a field that does not exist, say), the app refuses to start and tells you.
+
+### Transactions and the persistence context
+
+The freeze bug comes from how Hibernate keeps track of objects:
+
+- While a **transaction** is open (Module 20's `BEGIN` ... `COMMIT`), Hibernate remembers every entity it has loaded, in the **persistence context**. When the transaction commits, it compares each one with how it was loaded and writes an `UPDATE` for anything that changed. This is called **dirty checking**. You never call `save` for changes.
+- Each repository method runs in its own short transaction, unless one is already open. So in lesson 23.1, `findById` opened a transaction, loaded the card, and committed straight away. `card.freeze()` then changed an object Hibernate was no longer watching, and nothing was written.
+
+The fix is to open one transaction around the whole request, with **`@Transactional`** on the controller method. Then the load, the change and the `UPDATE` all happen inside it, and either all of it is saved or, if an exception is thrown, none of it is (the transaction is **rolled back**). `@Transactional(readOnly = true)` is for methods that only read: it tells Hibernate to skip dirty checking, which is a little faster.
+
+## Worked example
+
+Give `CardRepository` two queries of its own:
+
+```java
+package dev.paydeck.api.card;
+
+import java.util.List;
+import java.util.UUID;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface CardRepository extends JpaRepository<Card, UUID> {
+
+    List<Card> findAllByOrderByCreatedAt();
+
+    List<Card> findByStatusOrderByCreatedAt(CardStatus status);
+}
+```
+
+`findAllByOrderByCreatedAt` is "find all, ordered by `createdAt`" (the `By` before `OrderBy` is required even with no condition). In `CardController`, use them in `list`, and add `@Transactional` to every method (import `org.springframework.transaction.annotation.Transactional`):
+
+```java
+@GetMapping
+@Transactional(readOnly = true)
+public List<CardResponse> list(@RequestParam(required = false) CardStatus status) {
+    List<Card> found = status == null
+            ? cards.findAllByOrderByCreatedAt()
+            : cards.findByStatusOrderByCreatedAt(status);
+    return found.stream().map(CardResponse::of).toList();
+}
+
+@GetMapping("/{id}")
+@Transactional(readOnly = true)
+public CardResponse get(@PathVariable UUID id) {
+    return CardResponse.of(find(id));
+}
+
+@PostMapping
+@Transactional
+public ResponseEntity<CardResponse> issue(@Valid @RequestBody IssueCardRequest request) {
+    ...
+}
+
+@PatchMapping("/{id}")
+@Transactional
+public CardResponse update(...) {
+    ...
+}
+
+@PostMapping("/{id}/freeze")
+@Transactional
+public CardResponse freeze(@PathVariable UUID id) {
+    ...
+}
+```
+
+and the same `@Transactional` on `unfreeze` and `cancel`. The `condition ? a : b` expression is Java's short "if/else" for choosing a value.
+
+Restart with `show-sql` on, and freeze the card from lesson 23.1 again (if it is still `ACTIVE` in the database):
+
+```sh
+curl -X POST localhost:8080/api/cards/52c0e819-8b66-47aa-ba8f-218111943c1f/freeze
+```
+
+The log now shows both statements, the second one at commit:
+
+```
+Hibernate: select c1_0.id,c1_0.created_at,c1_0.last4,c1_0.nickname,c1_0.spending_limit_cents,c1_0.status from cards c1_0 where c1_0.id=?
+Hibernate: update cards set created_at=?,last4=?,nickname=?,spending_limit_cents=?,status=? where id=?
+```
+
+and the database agrees:
+
+```
+ nickname  | status
+-----------+--------
+ Groceries | FROZEN
+```
+
+Your own query works too:
+
+```sh
+curl 'localhost:8080/api/cards?status=FROZEN'
+```
+
+```
+Hibernate: select c1_0.id,c1_0.created_at,c1_0.last4,c1_0.nickname,c1_0.spending_limit_cents,c1_0.status from cards c1_0 where c1_0.status=? order by c1_0.created_at
+```
+
+The filtering now happens in the database, which is much faster than loading every card and filtering in Java once there are millions.
+
+<Aside type="note" title="Why createdAt lost three digits">
+When a card is first issued, `createdAt` shows nine decimal places (nanoseconds, from Java). Read back from the database it shows six (microseconds), because that is what PostgreSQL stores. Both are the same moment to within a millionth of a second.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: search by nickname">
+Add `GET /api/cards/search?q=gro` that returns every card whose nickname contains the text, ignoring upper and lower case, sorted by nickname. Write the query only as a repository method name. Check the SQL Hibernate generates. What does the endpoint answer when `q` is missing?
+
+<Fragment slot="hint">The name is built from `findBy` + `Nickname` + `ContainingIgnoreCase` + `OrderBy` + `Nickname`. `@RequestParam` without `required = false` makes the parameter required.</Fragment>
+<Fragment slot="solution">
+
+```java
+List<Card> findByNicknameContainingIgnoreCaseOrderByNickname(String text);
+```
+
+```java
+@GetMapping("/search")
+@Transactional(readOnly = true)
+public List<CardResponse> search(@RequestParam String q) {
+    return cards.findByNicknameContainingIgnoreCaseOrderByNickname(q).stream().map(CardResponse::of).toList();
+}
+```
+
+With cards called Groceries, Travel, Food shop and Groceries 2, `?q=gro` returns `["Groceries","Groceries 2"]`, and the log shows:
+
+```
+Hibernate: select ... from cards c1_0 where upper(c1_0.nickname) like upper(?) escape '\' order by c1_0.nickname
+```
+
+That is Module 20's `LIKE` with `%` around the text, written for you. Without `q`, the answer is `400 Bad Request`: a required parameter is missing. Spring chose `/search` over `/{id}` because a fixed path always wins over a pattern. You will not need this endpoint later, so remove it when you are done.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Changes are not saved">
+The method that changes an entity is missing `@Transactional`, so Hibernate stopped watching the object before you changed it. Put `@Transactional` on the method that loads **and** changes it.
+</Aside>
+
+<Aside type="caution" title="No property 'nicknam' found for type 'Card'">
+A typo in a query method name. The app refuses to start, which is better than a wrong query, and the message even ends `Did you mean 'nickname'`. Field names in method names must match the entity's fields exactly (with a capital first letter).
+</Aside>
+
+<Aside type="caution" title="Calling save after every change">
+Not wrong, but not needed inside a transaction: dirty checking saves changes anyway. PayDeck calls `save` only for new entities.
+</Aside>
+
+## Recap
+
+- `JpaRepository<Entity, Id>` gives you `save`, `findById`, `findAll` and more, with no code.
+- Method names such as `findByStatusOrderByCreatedAt` become queries.
+- Inside a transaction, Hibernate tracks loaded entities and writes their changes at commit (dirty checking).
+- Put `@Transactional` on each method that changes data, and `@Transactional(readOnly = true)` on ones that only read. An exception rolls everything back.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why did freezing a card not reach the database in lesson 23.1?',
+			options: ['Hibernate was broken', 'The card was changed after the transaction that loaded it had ended', 'Freezing needs a save call'],
+			answer: 1,
+			explanation: 'Dirty checking only works while the transaction that loaded the entity is still open.',
+		},
+		{
+			question: 'What does List<Card> findByStatusOrderByCreatedAt(CardStatus status) do?',
+			options: ['Nothing until you write its body', 'Spring Data writes a query from its name', 'Sorts cards in Java'],
+			answer: 1,
+			explanation: 'The query runs in the database: where status = ? order by created_at.',
+		},
+		{
+			question: 'A @Transactional method changes two cards, then throws an exception. What is saved?',
+			options: ['The first change', 'Both changes', 'Neither'],
+			answer: 2,
+			explanation: 'The transaction is rolled back: all or nothing.',
+		},
+	]}
+/>
+
+<MarkComplete />

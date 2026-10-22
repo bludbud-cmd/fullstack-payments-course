@@ -1,0 +1,190 @@
+---
+title: "22.3 Validation"
+description: "Refuse bad input at the door: put rules such as @NotBlank, @Size and @Positive on request records and switch them on with @Valid."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can describe what valid input looks like with annotations, and have Spring refuse anything else with `400 Bad Request` before your code runs.
+
+## Why it matters
+
+Lesson 22.1 ended with a card called `null`. Clients send bad data all the time: a bug in the app, an empty text box, someone typing `-5` into a limit, or a person poking at your API on purpose. Every value that comes in must be checked before it is trusted. Writing `if` statements for every field in every endpoint would be long and easy to forget; **Bean Validation** lets you write each rule once, as an annotation, right next to the field.
+
+## The idea
+
+The Validation starter you chose in Initializr adds **Jakarta Bean Validation**. You put **constraints** on record components:
+
+| Annotation | Rule |
+| --- | --- |
+| `@NotNull` | Must be present (not `null`). |
+| `@NotBlank` | Text must be present and contain something other than spaces. |
+| `@Size(min = 1, max = 50)` | Text length (or list size) within the range. `null` passes. |
+| `@Positive` | Number greater than 0. `null` passes. |
+| `@Min(1)`, `@Max(10000000)` | Number at least / at most this. |
+| `@Email` | Looks like an email address. |
+| `@Pattern(regexp = "...")` | Text matches a pattern. |
+
+Notice that most rules let `null` pass. That is deliberate: "optional, but if present, must be positive" is `@Positive` alone; "required and positive" is `@NotNull @Positive`.
+
+The rules do nothing until you ask Spring to check them, by putting **`@Valid`** before `@RequestBody`. If any rule fails, Spring answers `400` and your method is never called.
+
+This is the API's half of a pair. In Module 13 the app checked forms as people typed, which is friendlier; the API checks again because it cannot trust that every request came from your app.
+
+## Worked example
+
+Add the rules to the two request records in `CardController`:
+
+```java
+public record IssueCardRequest(
+        @NotBlank @Size(max = 50) String nickname,
+        @Positive Long spendingLimitCents) {
+}
+
+/**
+ * Only the fields that are sent change. To remove a spending limit, send
+ * {@code "removeSpendingLimit": true}.
+ */
+public record UpdateCardRequest(
+        @Size(min = 1, max = 50) String nickname,
+        @Positive Long spendingLimitCents,
+        Boolean removeSpendingLimit) {
+}
+```
+
+The 50 matches the `VARCHAR(50)` the database will have in Module 23. For updates, the nickname is optional, so it has no `@NotBlank`, but if it is sent it must not be empty.
+
+Switch the checks on in the two methods that take a body, and tidy up the nickname while you are there:
+
+```java
+@PostMapping
+public ResponseEntity<CardResponse> issue(@Valid @RequestBody IssueCardRequest request) {
+    Card card = cards.save(Card.issue(request.nickname().strip(), request.spendingLimitCents()));
+    return ResponseEntity.created(URI.create("/api/cards/" + card.getId())).body(CardResponse.of(card));
+}
+
+@PatchMapping("/{id}")
+public ResponseEntity<CardResponse> update(@PathVariable UUID id, @Valid @RequestBody UpdateCardRequest request) {
+    return ResponseEntity.of(cards.findById(id).map(card -> {
+        if (request.nickname() != null) {
+            card.rename(request.nickname().strip());
+        }
+        ...
+```
+
+`strip()` removes spaces from both ends, so `"  Groceries  "` is saved as `"Groceries"`. The new imports are:
+
+```java
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.Size;
+```
+
+Restart and send bad data:
+
+```sh
+curl -i -X POST localhost:8080/api/cards -H 'Content-Type: application/json' -d '{"nickname": "  "}'
+curl -i -X POST localhost:8080/api/cards -H 'Content-Type: application/json' -d '{"nickname": "Groceries", "spendingLimitCents": -5}'
+```
+
+Both answer:
+
+```
+HTTP/1.1 400
+Content-Type: application/json
+
+{"timestamp":"2026-10-21T23:39:23.596Z","status":400,"error":"Bad Request","path":"/api/cards"}
+```
+
+The request was refused, which is right, but the response does not say **why**. The reason is only in the API's log, as a long `WARN` line:
+
+```
+... WARN ... : Resolved [org.springframework.web.bind.MethodArgumentNotValidException: Validation failed for argument [0] in public ... CardController.issue(...): [Field error in object 'issueCardRequest' on field 'nickname': rejected value [  ]; ... default message [must not be blank]]
+```
+
+`must not be blank` is exactly what the app needs to show under the text box. The next lesson puts it in the response. A valid request still works, and the spaces are gone:
+
+```sh
+curl -X POST localhost:8080/api/cards -H 'Content-Type: application/json' -d '{"nickname": "  Groceries  ", "spendingLimitCents": 20000}'
+```
+
+```
+{"id":"68dd61ea-0499-4efa-b503-db9e3645990f","nickname":"Groceries","last4":"8207","status":"ACTIVE","spendingLimitCents":20000,"createdAt":"2026-10-21T23:39:23.667104253Z"}
+```
+
+## Try it
+
+<Exercise title="Try it: a sensible maximum">
+A virtual card with a $1,000,000,000 limit makes no sense. Make the API refuse any `spendingLimitCents` above $100,000.00, both when issuing and when updating. Check that 10000000 is accepted and 10000001 is refused.
+
+<Fragment slot="hint">$100,000.00 is 10,000,000 cents. `@Max` takes a `long`; underscores in numbers, like `10_000_000`, are allowed and easier to read.</Fragment>
+<Fragment slot="solution">
+
+```java
+public record IssueCardRequest(
+        @NotBlank @Size(max = 50) String nickname,
+        @Positive @Max(10_000_000) Long spendingLimitCents) {
+}
+
+public record UpdateCardRequest(
+        @Size(min = 1, max = 50) String nickname,
+        @Positive @Max(10_000_000) Long spendingLimitCents,
+        Boolean removeSpendingLimit) {
+}
+```
+
+with `import jakarta.validation.constraints.Max;`. 10000000 gives `201`; 10000001 gives `400`, and the log says `must be less than or equal to 10000000`. Constraints combine: every one must pass. Keep this rule; PayDeck's money endpoints in Module 24 use the same maximum.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="The rules are ignored">
+You forgot `@Valid` before `@RequestBody`. Without it the annotations are just decoration.
+</Aside>
+
+<Aside type="caution" title="@Size lets null through">
+`@Size(max = 50)` alone accepts a missing nickname. When a field is required, add `@NotBlank` (for text) or `@NotNull` (for anything else).
+</Aside>
+
+<Aside type="caution" title="Validating only in the app">
+Checks in the app make a nicer experience, but anyone can send requests to your API with curl. The API must check everything itself.
+</Aside>
+
+## Recap
+
+- Constraints such as `@NotBlank`, `@Size`, `@Positive` and `@Max` go on request record components.
+- `@Valid` before `@RequestBody` switches them on; a failure answers `400` without calling your method.
+- Most constraints accept `null`; add `@NotNull` or `@NotBlank` to make a field required.
+- The default `400` response does not yet say what was wrong; lesson 22.4 fixes that.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which rule means "optional, but if sent, must be more than 0"?',
+			options: ['@NotNull @Positive', '@Positive', '@Min(0)'],
+			answer: 1,
+			explanation: '@Positive lets null pass; add @NotNull to make it required.',
+		},
+		{
+			question: 'You added @NotBlank but empty nicknames still get through. What is missing?',
+			options: ['@Valid on the @RequestBody parameter', 'A database', '@NotNull'],
+			answer: 0,
+			explanation: 'Without @Valid, Spring never checks the rules.',
+		},
+		{
+			question: 'Why check input in the API when the app already checks it?',
+			options: ['The app might be out of date, buggy, or not the one sending the request', 'It is faster', 'Spring requires it'],
+			answer: 0,
+			explanation: 'An API must never trust its callers.',
+		},
+	]}
+/>
+
+<MarkComplete />

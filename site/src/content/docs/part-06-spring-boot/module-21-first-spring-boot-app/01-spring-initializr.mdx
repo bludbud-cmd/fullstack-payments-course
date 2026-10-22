@@ -1,0 +1,239 @@
+---
+title: "21.1 Spring Initializr"
+description: "Create the PayDeck API project with Spring Initializr, run it with the Maven wrapper, and answer your first request."
+sidebar:
+  order: 1
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you have created the PayDeck API project, started it on your Mac, and sent it a request.
+
+## Why it matters
+
+In Module 19 a tiny Node program answered HTTP requests. A real payments backend needs much more: a web server, JSON conversion, validation, a database, security, tests. Writing all of that yourself would take years. **Spring Boot** is a Java framework that gives you all of it, already working together, so you write only what is special about PayDeck. It is one of the most used backend frameworks in the world, and the standard at many banks and payment companies.
+
+From this module to Module 25 you build the PayDeck API yourself, one piece at a time. The finished version is in the course repository's `api` folder; by the end of Module 25 yours will closely match it.
+
+## The idea
+
+- A **framework** is a library that runs your code, rather than the other way round. You write a class that says "answer `GET /hello` like this", and Spring Boot takes care of listening on a port, reading the request and writing the response.
+- **Spring** is the framework; **Spring Boot** is the part that sets Spring up for you with sensible defaults, so a new project runs with no configuration at all.
+- A **starter** is a dependency that brings in everything for one job. `spring-boot-starter-webmvc` brings a web server (Tomcat), JSON support (Jackson, which you met in Module 18) and Spring's web tools.
+- **Spring Initializr** ([start.spring.io](https://start.spring.io)) is a website that generates a new, empty Spring Boot project with the starters you pick.
+
+## Worked example
+
+<Steps>
+
+1. **Open [start.spring.io](https://start.spring.io)** and fill in the form:
+
+   | Setting | Choose |
+   | --- | --- |
+   | Project | Maven |
+   | Language | Java |
+   | Spring Boot | The newest **4.1.x** that does not say SNAPSHOT or M (milestone) |
+   | Group | `dev.paydeck` |
+   | Artifact | `paydeck-api` |
+   | Name | `PayDeck` |
+   | Description | `The PayDeck API` |
+   | Package name | `dev.paydeck.api` |
+   | Packaging | Jar |
+   | Configuration (if shown) | Properties |
+   | Java | 25 |
+
+   The **Name** decides the main class's name: `PayDeck` gives `PayDeckApplication`.
+
+2. **Add dependencies.** Click **Add Dependencies** and add these three:
+   - **Spring Web**: build web APIs.
+   - **Validation**: check incoming data (Module 22).
+   - **Spring Boot Actuator**: health checks and other tools for running the app (this module's project).
+
+3. **Click Generate.** A file `paydeck-api.zip` downloads. Double-click it to unzip, and move the `paydeck-api` folder into `~/Projects/course/`.
+
+4. **Check the Spring Boot version.** Open the folder in VS Code and look near the top of `pom.xml`:
+
+   ```xml
+   <parent>
+       <groupId>org.springframework.boot</groupId>
+       <artifactId>spring-boot-starter-parent</artifactId>
+       <version>4.1.1</version>
+       <relativePath/>
+   </parent>
+   ```
+
+   The course was written with 4.1.1. If yours says a later 4.1 version, change it to `4.1.1` so your output matches the lessons exactly.
+
+5. **Run it.** In Terminal:
+
+   ```sh
+   cd ~/Projects/course/paydeck-api
+   ./mvnw spring-boot:run
+   ```
+
+   `./mvnw` is the **Maven wrapper**: a small script in the project that downloads the right Maven version the first time, so the project builds the same way on every computer. The first run downloads a lot and takes a few minutes. Then you see Spring's banner and a few log lines:
+
+   ```
+     .   ____          _            __ _ _
+    /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+   ( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+    \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+     '  |____| .__|_| |_|_| |_\__, | / / / /
+    =========|_|==============|___/=/_/_/_/
+
+    :: Spring Boot ::                (v4.1.1)
+
+   ... INFO ... : Starting PayDeckApplication using Java 25.0.5 with PID 4374 (...)
+   ... INFO ... : No active profile set, falling back to 1 default profile: "default"
+   ... INFO ... : Tomcat initialized with port 8080 (http)
+   ... INFO ... : Exposing 1 endpoint beneath base path '/actuator'
+   ... INFO ... : Tomcat started on port 8080 (http) with context path '/'
+   ... INFO ... : Started PayDeckApplication in 4.544 seconds (process running for 5.129)
+   ```
+
+   **Started PayDeckApplication** means it is running and listening on port 8080. It keeps running until you stop it.
+
+6. **Ask it something.** In a second Terminal tab (Cmd+T):
+
+   ```sh
+   curl -i localhost:8080/actuator/health
+   ```
+
+   ```
+   HTTP/1.1 200
+   Content-Type: application/vnd.spring-boot.actuator.v3+json
+   ...
+
+   {"groups":["liveness","readiness"],"status":"UP"}
+   ```
+
+   You wrote no code, and the API already answers a health check. That came from the Actuator starter. Try a path that does not exist:
+
+   ```sh
+   curl -i localhost:8080/hello
+   ```
+
+   ```
+   HTTP/1.1 404
+   Content-Type: application/json
+   ...
+
+   {"timestamp":"2026-10-21T23:25:51.463Z","status":404,"error":"Not Found","path":"/hello"}
+   ```
+
+   Even the error is proper JSON with the right status code.
+
+7. **Stop it** with **Ctrl+C** in the first tab.
+
+</Steps>
+
+### Your first endpoint
+
+Create `src/main/java/dev/paydeck/api/HelloController.java`, next to `PayDeckApplication.java`:
+
+```java
+package dev.paydeck.api;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class HelloController {
+
+    @GetMapping("/hello")
+    public String hello() {
+        return "Hello from PayDeck";
+    }
+}
+```
+
+- `@RestController` is an **annotation**: a label, starting with `@`, that tells Spring something about the class. This one says "this class answers HTTP requests". (You have already used `@Test` and `@Override`.)
+- `@GetMapping("/hello")` says "call this method for `GET /hello`". Whatever the method returns becomes the response body.
+
+Start the app again with `./mvnw spring-boot:run` and try it:
+
+```sh
+curl localhost:8080/hello
+```
+
+```
+Hello from PayDeck
+```
+
+Notice what you did **not** write: no `main` loop, no port, no parsing. Spring found your class because it is in the `dev.paydeck.api` package, created it, and connected the method to the path.
+
+<Aside type="tip" title="Restarting">
+Spring Boot does not notice code changes while it runs. After changing code, press Ctrl+C and run `./mvnw spring-boot:run` again. Pressing the up arrow in Terminal brings the last command back.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: a second endpoint">
+Add a method to `HelloController` that answers `GET /hello/team` with `Hello from the PayDeck team`. Restart, and check both endpoints with curl. Then use `curl -i -X POST localhost:8080/hello`: what status comes back, and why?
+
+<Fragment slot="hint">A class can have several methods, each with its own `@GetMapping`.</Fragment>
+<Fragment slot="solution">
+
+```java
+@GetMapping("/hello/team")
+public String helloTeam() {
+    return "Hello from the PayDeck team";
+}
+```
+
+`POST /hello` returns **405 Method Not Allowed**: the path exists, but only for `GET`. Spring adds an `Allow: GET` header to say which methods would work, exactly what you learned in lesson 19.3.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="zsh: permission denied: ./mvnw">
+The wrapper script lost its "may run" permission, which happens if the zip was unpacked by some other tool. Fix it once with `chmod +x mvnw`.
+</Aside>
+
+<Aside type="caution" title="The JAVA_HOME environment variable is not defined correctly">
+The wrapper cannot find Java. Check `java -version` says 25, and that the `export JAVA_HOME=...` line from Module 15 is in your `~/.zshrc`. Open a new Terminal tab after changing it.
+</Aside>
+
+<Aside type="caution" title="Web server failed to start. Port 8080 was already in use.">
+Another copy of the app (or another program) is already on port 8080. Look for a Terminal tab still running it and press Ctrl+C there. `lsof -i :8080` shows what is using the port.
+</Aside>
+
+<Aside type="caution" title="The new endpoint gives 404">
+Either the app was not restarted, or the controller is outside the `dev.paydeck.api` package. Spring only looks for classes in the main class's package and the packages inside it.
+</Aside>
+
+## Recap
+
+- Spring Boot is a framework: you write the parts special to your app, and it runs them.
+- Spring Initializr generates a new project with the starters you choose.
+- `./mvnw spring-boot:run` starts the app; Ctrl+C stops it; restart after every change.
+- `@RestController` plus `@GetMapping("/path")` turns a method into an endpoint.
+
+<Quiz
+	questions={[
+		{
+			question: 'What does the Maven wrapper (./mvnw) do?',
+			options: ['Wraps your code in a jar', 'Downloads and runs the right Maven version for this project', 'Starts the database'],
+			answer: 1,
+			explanation: 'Everyone building the project uses the same Maven, with nothing to install by hand.',
+		},
+		{
+			question: 'Where did /actuator/health come from?',
+			options: ['You wrote it', 'The Actuator starter added it', 'Tomcat always has it'],
+			answer: 1,
+			explanation: 'Starters bring working features, not just libraries.',
+		},
+		{
+			question: 'You changed a controller but curl still shows the old answer. Why?',
+			options: ['curl caches answers', 'The running app was not restarted', 'Java needs a reboot'],
+			answer: 1,
+			explanation: 'Stop with Ctrl+C and run ./mvnw spring-boot:run again.',
+		},
+	]}
+/>
+
+<MarkComplete />
