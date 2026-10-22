@@ -1,0 +1,192 @@
+---
+title: "Mini-project: accounts and cards API on PostgreSQL"
+description: "Check that PayDeck's accounts and cards now live in PostgreSQL: data that survives restarts, hidden system accounts, an updated try-it file, a SQL report and a test run that needs the database."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+PayDeck now keeps its accounts and cards in PostgreSQL, in tables your own migration created. In this project you make sure it all holds together, the way you would before showing it to anyone: you prove the data lasts, prove the rules hold, update the try-it file for the new URLs, and write the kind of report someone running PayDeck would ask for.
+
+## The tasks
+
+1. **Try-it file.** Rename `http/cards.http` to `http/paydeck.http` and rewrite it for the new URLs: open an account, read it, issue two cards under it (one with a limit, one without), list the account's cards, then rename, freeze, unfreeze and cancel one card. Add one request for each of these errors: a currency PayDeck does not support (`400`), an account that does not exist (`404`), and a cancelled card that cannot be renamed (`422`).
+2. **System accounts are invisible.** Show, with two requests, that the API acts as if the USD system account `00000000-0000-0000-0000-000000000840` does not exist: reading it answers `404`, and issuing a card for it answers `404`.
+3. **Data survives a restart.** Freeze a card, stop the API, start it again, and list the account's cards. The card must still be `FROZEN`.
+4. **A report in SQL.** In psql, list every customer account with its owner's name, its currency, how many `ACTIVE` cards it has and how many cards in total. Accounts with no cards must appear, with `0`.
+5. **Tests need the database.** Stop the database (`docker compose stop`) and run `./mvnw test`. Read why it fails. Start the database again (`docker compose start`) and run the tests until all 7 pass.
+6. Commit.
+
+<Exercise title="Build it">
+Do the six tasks.
+
+<Fragment slot="hint">For task 4, you need every account, even those without a match in `cards`: that is a `LEFT JOIN` from `accounts`. To count only some rows inside a group, PostgreSQL has `count(c.id) FILTER (WHERE c.status = 'ACTIVE')`. Counting `c.id` instead of `*` gives `0` for an account with no cards, because the joined `c.id` is `NULL`.</Fragment>
+<Fragment slot="hint2">For task 5, look for `Caused by` near the end of the error, or search the output for `5432`.</Fragment>
+<Fragment slot="solution">
+
+`http/paydeck.http`:
+
+```http
+@baseUrl = http://localhost:8080
+
+### Open an account
+# @name account
+POST {{baseUrl}}/api/accounts
+Content-Type: application/json
+
+{
+  "ownerName": "Ana Silva",
+  "currency": "USD"
+}
+
+### Read it
+GET {{baseUrl}}/api/accounts/{{account.response.body.$.id}}
+
+### Issue a card with a limit
+# @name groceries
+POST {{baseUrl}}/api/accounts/{{account.response.body.$.id}}/cards
+Content-Type: application/json
+
+{
+  "nickname": "Groceries",
+  "spendingLimitCents": 20000
+}
+
+### Issue a card without a limit
+# @name online
+POST {{baseUrl}}/api/accounts/{{account.response.body.$.id}}/cards
+Content-Type: application/json
+
+{
+  "nickname": "Online"
+}
+
+### The account's cards, oldest first
+GET {{baseUrl}}/api/accounts/{{account.response.body.$.id}}/cards
+
+### Rename a card
+PATCH {{baseUrl}}/api/cards/{{online.response.body.$.id}}
+Content-Type: application/json
+
+{
+  "nickname": "Online shopping"
+}
+
+### Freeze it
+POST {{baseUrl}}/api/cards/{{online.response.body.$.id}}/freeze
+
+### Unfreeze it
+POST {{baseUrl}}/api/cards/{{online.response.body.$.id}}/unfreeze
+
+### Cancel it (204)
+DELETE {{baseUrl}}/api/cards/{{online.response.body.$.id}}
+
+### Error 400: a currency PayDeck does not support
+POST {{baseUrl}}/api/accounts
+Content-Type: application/json
+
+{
+  "ownerName": "Kenji Sato",
+  "currency": "JPY"
+}
+
+### Error 404: no such account
+GET {{baseUrl}}/api/accounts/00000000-0000-0000-0000-000000000000
+
+### Error 422: a cancelled card cannot be renamed
+PATCH {{baseUrl}}/api/cards/{{online.response.body.$.id}}
+Content-Type: application/json
+
+{
+  "nickname": "Again"
+}
+
+### The USD system account is hidden (404)
+GET {{baseUrl}}/api/accounts/00000000-0000-0000-0000-000000000840
+
+### ...and cannot have cards (404)
+POST {{baseUrl}}/api/accounts/00000000-0000-0000-0000-000000000840/cards
+Content-Type: application/json
+
+{
+  "nickname": "Sneaky"
+}
+```
+
+The two system account requests answer:
+
+```
+HTTP/1.1 404
+Content-Type: application/problem+json
+
+{"detail":"Account 00000000-0000-0000-0000-000000000840 was not found","instance":"/api/accounts/00000000-0000-0000-0000-000000000840","status":404,"title":"Not found"}
+```
+
+```
+HTTP/1.1 404
+Content-Type: application/problem+json
+
+{"detail":"Account 00000000-0000-0000-0000-000000000840 was not found","instance":"/api/accounts/00000000-0000-0000-0000-000000000840/cards","status":404,"title":"Not found"}
+```
+
+The row is in the database, but `.filter(a -> a.getKind() == AccountKind.CUSTOMER)` makes the API treat it as missing. Answering `404` rather than `403 Forbidden` is deliberate: it does not even admit that the account exists.
+
+For task 3, after freezing the `Online` card and restarting, the list still shows it frozen:
+
+```json
+[{"id":"4247dd8c-2d95-4312-a6f8-6862403d6cf9","accountId":"4e5831ca-61d5-45e7-b451-5726d7b68095","nickname":"Groceries","last4":"2904","status":"ACTIVE","spendingLimitCents":20000,"createdAt":"2026-10-22T00:00:20.061640Z"},
+ {"id":"f14bf35c-8113-4571-8412-c527ce41d2c2","accountId":"4e5831ca-61d5-45e7-b451-5726d7b68095","nickname":"Online","last4":"2815","status":"FROZEN","spendingLimitCents":null,"createdAt":"2026-10-22T00:00:20.092803Z"}]
+```
+
+In Module 22 a restart emptied everything. Now the API is just a doorway; the data lives in PostgreSQL's Docker volume.
+
+Task 4:
+
+```sql
+SELECT a.owner_name,
+       a.currency,
+       count(c.id) FILTER (WHERE c.status = 'ACTIVE') AS active_cards,
+       count(c.id) AS all_cards
+FROM accounts a
+LEFT JOIN cards c ON c.account_id = a.id
+WHERE a.kind = 'CUSTOMER'
+GROUP BY a.id, a.owner_name, a.currency
+ORDER BY a.owner_name;
+```
+
+```
+ owner_name | currency | active_cards | all_cards
+------------+----------+--------------+-----------
+ Ana Silva  | USD      |            1 |         2
+ Ben Okafor | EUR      |            0 |         0
+(2 rows)
+```
+
+`GROUP BY a.id` (not only the name) keeps two customers with the same name apart.
+
+Task 5, with the database stopped:
+
+```
+[ERROR] Tests run: 7, Failures: 0, Errors: 1, Skipped: 0
+```
+
+The one error is `PayDeckApplicationTests.contextLoads`: `Failed to load ApplicationContext`, and further down, `Connection to localhost:5432 refused`. That test starts the whole app, and the whole app now needs PostgreSQL (Flyway runs at start-up). `CardTest` and the greeting tests do not start Spring, so they still pass. With the database started again:
+
+```
+[INFO] Tests run: 7, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
+What to notice:
+
+- **Tests that depend on your laptop are fragile.** They fail when you forget to start Docker, and they read and write your practice data. Module 25 fixes both: each test run starts its own throwaway PostgreSQL.
+- **Rules in two places.** The API refuses a system account, and the database refuses a second system account per currency. Each protects against things the other cannot see.
+- **The four system accounts are waiting.** No customer can see them yet, but in Module 24 every top-up moves money from one of them into a customer's account.
+</Fragment>
+</Exercise>
+
+<MarkComplete />

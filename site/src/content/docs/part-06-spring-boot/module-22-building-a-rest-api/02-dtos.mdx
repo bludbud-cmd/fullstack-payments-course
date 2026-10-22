@@ -1,0 +1,338 @@
+---
+title: "22.2 DTOs"
+description: "Separate what the API sends and accepts from how PayDeck stores things: request and response records, mapping between them, and partial updates with PATCH."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can define exactly what each endpoint accepts and returns with request and response records, and add a `PATCH` endpoint that changes only the fields that were sent.
+
+## Why it matters
+
+The JSON your API sends is a promise. The PayDeck app reads `nickname`, `last4` and `status`, and will break if they change. But the `Card` class is going to change a lot: in Module 23 it becomes a database entity, and it will gain fields and methods that the app has no business seeing. If the JSON is produced straight from `Card`, every change inside PayDeck leaks out to the app. The fix is to give the API its own small classes.
+
+## The idea
+
+A **DTO** (data transfer object) is a simple object whose only job is to carry data in or out of the API. In Java, records are ideal DTOs.
+
+- A **request DTO** lists exactly the fields a client may send. Anything else in the JSON is ignored, so nobody can sneak in `"status": "ACTIVE"` to unfreeze a card, or choose their own `id`.
+- A **response DTO** lists exactly the fields the client gets, in a fixed order, whatever happens inside `Card`.
+- The controller **maps** between them and the real class (the **domain object**). A small `static of(Card card)` method on the response record keeps the mapping in one place.
+
+```
+JSON request  ->  IssueCardRequest  ->  Card  ->  CardResponse  ->  JSON response
+               (what may come in)   (the truth)  (what goes out)
+```
+
+### PATCH and missing fields
+
+`PATCH` means "change just these fields". With a record, a field missing from the JSON becomes `null`, so the controller can treat `null` as "leave it alone". That leaves one problem: how do you say "remove the spending limit", when `null` already means "not sent"? PayDeck uses a separate flag, `"removeSpendingLimit": true`. Many real APIs solve it the same way.
+
+## Worked example
+
+### See the leak
+
+To see the problem, add this harmless-looking helper to `Card`:
+
+```java
+public boolean isFrozen() {
+    return status == CardStatus.FROZEN;
+}
+```
+
+Restart and issue a card:
+
+```
+{"createdAt":"2026-10-21T23:37:52.838918171Z","frozen":false,"id":"3efcb3c9-0e5d-461b-963a-5e45185a40df","last4":"5739","nickname":"Groceries","status":"ACTIVE"}
+```
+
+A new field, `frozen`, appeared in the API, because Jackson treats `isFrozen()` as a getter. Nobody decided to publish it. Delete the method again.
+
+### Add DTOs
+
+First give `Card` a spending limit and a way to rename it. Replace `Card.java` with:
+
+```java
+package dev.paydeck.api.card;
+
+import java.security.SecureRandom;
+import java.time.Instant;
+import java.util.UUID;
+
+/**
+ * A virtual card. We only keep the last four digits; a full card number
+ * never reaches PayDeck.
+ */
+public class Card {
+
+    private static final SecureRandom RANDOM = new SecureRandom();
+
+    private final UUID id;
+    private String nickname;
+    private final String last4;
+    private CardStatus status;
+    /** The most one payment can be, or {@code null} for no limit. */
+    private Long spendingLimitCents;
+    private final Instant createdAt;
+
+    private Card(String nickname, Long spendingLimitCents) {
+        this.id = UUID.randomUUID();
+        this.nickname = nickname;
+        this.last4 = String.format("%04d", RANDOM.nextInt(10_000));
+        this.status = CardStatus.ACTIVE;
+        this.spendingLimitCents = spendingLimitCents;
+        this.createdAt = Instant.now();
+    }
+
+    public static Card issue(String nickname, Long spendingLimitCents) {
+        return new Card(nickname, spendingLimitCents);
+    }
+
+    public void rename(String nickname) {
+        this.nickname = nickname;
+    }
+
+    public void setSpendingLimit(Long spendingLimitCents) {
+        this.spendingLimitCents = spendingLimitCents;
+    }
+
+    public void freeze() {
+        status = CardStatus.FROZEN;
+    }
+
+    public UUID getId() {
+        return id;
+    }
+
+    public String getNickname() {
+        return nickname;
+    }
+
+    public String getLast4() {
+        return last4;
+    }
+
+    public CardStatus getStatus() {
+        return status;
+    }
+
+    public Long getSpendingLimitCents() {
+        return spendingLimitCents;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+}
+```
+
+`Long` with a capital L, unlike `long`, can be `null`: "no limit". Then replace `CardController.java`:
+
+```java
+package dev.paydeck.api.card;
+
+import java.net.URI;
+import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
+
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/cards")
+public class CardController {
+
+    public record IssueCardRequest(String nickname, Long spendingLimitCents) {
+    }
+
+    /**
+     * Only the fields that are sent change. To remove a spending limit, send
+     * {@code "removeSpendingLimit": true}.
+     */
+    public record UpdateCardRequest(String nickname, Long spendingLimitCents, Boolean removeSpendingLimit) {
+    }
+
+    public record CardResponse(
+            UUID id, String nickname, String last4, CardStatus status, Long spendingLimitCents, Instant createdAt) {
+
+        static CardResponse of(Card card) {
+            return new CardResponse(card.getId(), card.getNickname(), card.getLast4(), card.getStatus(),
+                    card.getSpendingLimitCents(), card.getCreatedAt());
+        }
+    }
+
+    private final CardStore cards;
+
+    public CardController(CardStore cards) {
+        this.cards = cards;
+    }
+
+    @GetMapping
+    public List<CardResponse> list(@RequestParam(required = false) CardStatus status) {
+        return cards.findAll().stream()
+                .filter(card -> status == null || card.getStatus() == status)
+                .map(CardResponse::of)
+                .toList();
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<CardResponse> get(@PathVariable UUID id) {
+        return ResponseEntity.of(cards.findById(id).map(CardResponse::of));
+    }
+
+    @PostMapping
+    public ResponseEntity<CardResponse> issue(@RequestBody IssueCardRequest request) {
+        Card card = cards.save(Card.issue(request.nickname(), request.spendingLimitCents()));
+        return ResponseEntity.created(URI.create("/api/cards/" + card.getId())).body(CardResponse.of(card));
+    }
+
+    @PatchMapping("/{id}")
+    public ResponseEntity<CardResponse> update(@PathVariable UUID id, @RequestBody UpdateCardRequest request) {
+        return ResponseEntity.of(cards.findById(id).map(card -> {
+            if (request.nickname() != null) {
+                card.rename(request.nickname());
+            }
+            if (Boolean.TRUE.equals(request.removeSpendingLimit())) {
+                card.setSpendingLimit(null);
+            } else if (request.spendingLimitCents() != null) {
+                card.setSpendingLimit(request.spendingLimitCents());
+            }
+            return CardResponse.of(card);
+        }));
+    }
+
+    @PostMapping("/{id}/freeze")
+    public ResponseEntity<CardResponse> freeze(@PathVariable UUID id) {
+        return ResponseEntity.of(cards.findById(id).map(card -> {
+            card.freeze();
+            return CardResponse.of(card);
+        }));
+    }
+}
+```
+
+- The DTOs are records nested inside the controller, because only this controller uses them. Their full names are `CardController.IssueCardRequest` and so on.
+- `.map(CardResponse::of)` is a **method reference**: shorthand for `.map(card -> CardResponse.of(card))`.
+- `Boolean.TRUE.equals(x)` is true only when `x` is `true`; it is false for both `false` and `null`, and, unlike `if (x)`, it cannot crash on `null`.
+
+Restart and try it:
+
+```sh
+curl -X POST localhost:8080/api/cards -H 'Content-Type: application/json' -d '{"nickname": "Groceries", "spendingLimitCents": 20000}'
+```
+
+```
+{"id":"33799dbc-6d04-402c-8bdf-3bf6b0636d5f","nickname":"Groceries","last4":"6379","status":"ACTIVE","spendingLimitCents":20000,"createdAt":"2026-10-21T23:38:59.467915788Z"}
+```
+
+The fields now come in the order of the record, with `id` first. Now three partial updates, one after another (use your own ID):
+
+```sh
+curl -X PATCH localhost:8080/api/cards/33799dbc-6d04-402c-8bdf-3bf6b0636d5f -H 'Content-Type: application/json' -d '{"nickname": "Food"}'
+curl -X PATCH localhost:8080/api/cards/33799dbc-6d04-402c-8bdf-3bf6b0636d5f -H 'Content-Type: application/json' -d '{"removeSpendingLimit": true}'
+curl -X PATCH localhost:8080/api/cards/33799dbc-6d04-402c-8bdf-3bf6b0636d5f -H 'Content-Type: application/json' -d '{"spendingLimitCents": 15000}'
+```
+
+```
+{"id":"33799dbc-...","nickname":"Food","last4":"6379","status":"ACTIVE","spendingLimitCents":20000,...}
+{"id":"33799dbc-...","nickname":"Food","last4":"6379","status":"ACTIVE","spendingLimitCents":null,...}
+{"id":"33799dbc-...","nickname":"Food","last4":"6379","status":"ACTIVE","spendingLimitCents":15000,...}
+```
+
+Each request changed only what it named. Finally, try to cheat:
+
+```sh
+curl -X POST localhost:8080/api/cards -H 'Content-Type: application/json' -d '{"nickname": "Sneaky", "status": "FROZEN", "id": "00000000-0000-0000-0000-000000000001"}'
+```
+
+```
+{"id":"1c152445-1b6f-4236-a296-527267d066c6","nickname":"Sneaky","last4":"5366","status":"ACTIVE","spendingLimitCents":null,"createdAt":"2026-10-21T23:38:59.618880754Z"}
+```
+
+`status` and `id` are not in `IssueCardRequest`, so they were ignored. The card got a real ID and started `ACTIVE`.
+
+## Try it
+
+<Exercise title="Try it: the response, without the noise">
+The app's card list only needs each card's `id`, `nickname`, `last4` and `status`. Add a second response record, `CardSummary`, with just those four, and a new endpoint `GET /api/cards/summaries` that returns them. Why might an API offer a smaller version like this?
+
+<Fragment slot="hint">Copy the pattern of `CardResponse`, including a `static CardSummary of(Card card)` method, and map with `.map(CardSummary::of)`.</Fragment>
+<Fragment slot="solution">
+
+```java
+public record CardSummary(UUID id, String nickname, String last4, CardStatus status) {
+
+    static CardSummary of(Card card) {
+        return new CardSummary(card.getId(), card.getNickname(), card.getLast4(), card.getStatus());
+    }
+}
+
+@GetMapping("/summaries")
+public List<CardSummary> summaries() {
+    return cards.findAll().stream().map(CardSummary::of).toList();
+}
+```
+
+The same `Card` can be shown in several shapes, each made for one screen. Smaller responses travel faster over a phone's network and reveal less. You do not need this endpoint later, so delete it once it works.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Cannot map `null` into type `boolean`">
+With `boolean removeSpendingLimit` (small b) in the record, a `PATCH` that leaves the field out fails with `400`, and this message in the log: Jackson 3 refuses to turn "missing" into `false`. Use `Boolean` (capital B) for optional true/false fields, and check it with `Boolean.TRUE.equals(...)`.
+</Aside>
+
+<Aside type="caution" title="Returning the domain object">
+Returning `Card` (or, from Module 23, a database entity) from a controller publishes every getter, now and in future. Always return a response record.
+</Aside>
+
+<Aside type="caution" title="Using a primitive for an optional number">
+`long spendingLimitCents` can never be `null`, so "no limit" and "field not sent" become impossible to tell apart. Use `Long` when a number is optional.
+</Aside>
+
+## Recap
+
+- A DTO carries data in or out of the API; records make good DTOs.
+- Request DTOs decide what clients may send; extra JSON fields are ignored.
+- Response DTOs decide what clients get, whatever happens inside your classes.
+- A `static of(...)` method on the response record keeps the mapping in one place.
+- For `PATCH`, `null` means "not sent"; use an explicit flag to clear a value.
+
+<Quiz
+	questions={[
+		{
+			question: 'A client sends {"nickname": "X", "status": "ACTIVE"} to issue a card, but IssueCardRequest has no status. What happens to status?',
+			options: ['The card is created ACTIVE because the client said so', 'It is ignored; the card starts in whatever state Card.issue chooses', 'The request fails'],
+			answer: 1,
+			explanation: 'Only the fields in the request record are read.',
+		},
+		{
+			question: 'Why does UpdateCardRequest have removeSpendingLimit?',
+			options: ['Because null already means "not sent", so it cannot also mean "remove"', 'JSON has no null', 'It is required by PATCH'],
+			answer: 0,
+			explanation: 'A separate flag makes "remove the limit" unambiguous.',
+		},
+		{
+			question: 'Why use Long rather than long for spendingLimitCents?',
+			options: ['Long holds bigger numbers', 'Long can be null, meaning no limit', 'Jackson cannot read long'],
+			answer: 1,
+			explanation: 'Primitive types always have a value.',
+		},
+	]}
+/>
+
+<MarkComplete />

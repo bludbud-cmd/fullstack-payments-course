@@ -1,0 +1,283 @@
+---
+title: "21.4 Configuration and profiles"
+description: "Keep settings out of code: write application.yml, read your own settings into a record with @ConfigurationProperties, override them with environment variables, and switch groups of settings with profiles."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can move settings out of your code into `application.yml`, read them in Java, change them without rebuilding, and keep separate settings for your Mac and for the internet.
+
+## Why it matters
+
+The same PayDeck API will run on your Mac, inside tests, and on a server in Part 10. Each place needs different settings: a different database address, different passwords, different limits. Settings written into the code would mean a different build for each place, and passwords committed to Git for anyone to read. Spring Boot reads settings from outside the code, and lets each place override them.
+
+## The idea
+
+### application.yml
+
+Settings are **properties**: names with dots, such as `server.port`, and values. Spring Boot reads them from `src/main/resources/application.properties` or `application.yml`. The two formats hold the same thing:
+
+```properties
+spring.application.name=paydeck-api
+server.port=8080
+```
+
+```yaml
+spring:
+  application:
+    name: paydeck-api
+server:
+  port: 8080
+```
+
+**YAML** (`.yml`) writes each part of the name on its own line and shows nesting by **indenting with spaces** (two per level). It is easier to read once there are many settings sharing a beginning, so PayDeck uses it. Hundreds of properties are built in: `server.port` changes the port, `spring.application.name` names the app in logs. You can add your own, too.
+
+### Reading your own settings
+
+The neatest way is a record marked `@ConfigurationProperties`. Its components are filled from the properties that share its prefix. `default-card-limit-cents` in YAML fills `defaultCardLimitCents` in Java: Spring matches the names ignoring dashes and case.
+
+### Overriding without rebuilding
+
+Spring reads properties from many places, and some win over others. The three you will use, strongest first:
+
+1. **Command-line arguments**, such as `--server.port=9090`.
+2. **Environment variables**: settings given to a program when it starts. Spring turns `PAYDECK_DEFAULT_CARD_LIMIT_CENTS` into `paydeck.default-card-limit-cents` (capitals, and `_` for both `.` and `-`).
+3. **application.yml** inside the jar.
+
+So `application.yml` holds sensible defaults for your Mac, and a server overrides what it needs, without a new build. Passwords and secret keys are only ever given this way, never written in files that go into Git (Part 8 does this for real).
+
+### Profiles
+
+A **profile** is a named group of settings. `application-production.yml` is only read when the `production` profile is active, and its values win over `application.yml`. PayDeck's real API has exactly this file for when it runs on the internet.
+
+## Worked example
+
+<Aside type="note" title="Starting from">
+This continues from lesson 21.3, with `CardPreviewController` and `ClockConfig` in place.
+</Aside>
+
+**1. Switch to YAML.** Delete `src/main/resources/application.properties` and create `application.yml` in the same folder:
+
+```yaml
+spring:
+  application:
+    name: paydeck-api
+
+paydeck:
+  environment: local
+  default-card-limit-cents: 50000
+```
+
+The `paydeck:` settings are PayDeck's own: a name for where it runs, and the spending limit a new card gets ($500.00, in cents).
+
+Then run `./mvnw clean` once. Maven copies resources into `target` but never deletes old ones, so the old `application.properties` would still be read until `target` is cleaned.
+
+**2. A record for the settings.** Create `src/main/java/dev/paydeck/api/PayDeckProperties.java`:
+
+```java
+package dev.paydeck.api;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+
+/** PayDeck's own settings: everything under "paydeck:" in application.yml. */
+@ConfigurationProperties(prefix = "paydeck")
+public record PayDeckProperties(String environment, long defaultCardLimitCents) {
+}
+```
+
+And tell Spring to look for such records by adding `@ConfigurationPropertiesScan` to the main class:
+
+```java
+package dev.paydeck.api;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
+
+@SpringBootApplication
+@ConfigurationPropertiesScan
+public class PayDeckApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(PayDeckApplication.class, args);
+    }
+
+}
+```
+
+`PayDeckProperties` is now a bean like any other, filled from the settings.
+
+**3. Use it.** Inject it into `CardPreviewController` and show the limit:
+
+```java
+package dev.paydeck.api.card;
+
+import java.time.Clock;
+import java.time.Instant;
+
+import dev.paydeck.api.PayDeckProperties;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class CardPreviewController {
+
+    public record CardPreview(String nickname, String last4, long spendingLimitCents, Instant createdAt) {
+    }
+
+    private final Last4Generator last4Generator;
+    private final Clock clock;
+    private final PayDeckProperties properties;
+
+    public CardPreviewController(Last4Generator last4Generator, Clock clock, PayDeckProperties properties) {
+        this.last4Generator = last4Generator;
+        this.clock = clock;
+        this.properties = properties;
+    }
+
+    @GetMapping("/api/cards/preview")
+    public CardPreview preview() {
+        return new CardPreview("New card", last4Generator.next(), properties.defaultCardLimitCents(), clock.instant());
+    }
+}
+```
+
+The test from lesson 21.3 now needs a third argument. Change its `new CardPreviewController(...)` line to:
+
+```java
+var controller = new CardPreviewController(alwaysSame, Clock.fixed(noon, ZoneOffset.UTC),
+        new PayDeckProperties("test", 50000));
+```
+
+and add `import dev.paydeck.api.PayDeckProperties;`. In a test you simply make the settings you want.
+
+Restart and check:
+
+```sh
+curl localhost:8080/api/cards/preview
+```
+
+```
+{"nickname":"New card","last4":"5180","spendingLimitCents":50000,"createdAt":"2026-10-21T23:28:41.180251910Z"}
+```
+
+**4. Override it with an environment variable.** Stop the app, then start it with a variable in front of the command (this sets it for that one command only):
+
+```sh
+PAYDECK_DEFAULT_CARD_LIMIT_CENTS=20000 ./mvnw spring-boot:run
+```
+
+```
+{"nickname":"New card","last4":"2472","spendingLimitCents":20000,"createdAt":"2026-10-21T23:28:52.426620275Z"}
+```
+
+Same code, same `application.yml`, different setting.
+
+**5. Add a profile.** Create `src/main/resources/application-production.yml`:
+
+```yaml
+spring:
+  main:
+    banner-mode: off
+
+paydeck:
+  environment: production
+```
+
+Servers write logs to files that people search, and the banner is just noise there, so production switches it off. Run with the profile:
+
+```sh
+./mvnw spring-boot:run -Dspring-boot.run.profiles=production
+```
+
+There is no banner this time, and the second log line has changed:
+
+```
+... INFO ... : The following 1 profile is active: "production"
+```
+
+Without a profile it said `No active profile set, falling back to 1 default profile: "default"`. Settings not in the profile file, such as `default-card-limit-cents`, still come from `application.yml`. On a server you would set the environment variable `SPRING_PROFILES_ACTIVE=production` instead; both do the same.
+
+Commit your work:
+
+```sh
+git add .
+git commit -m "Add settings and a production profile"
+```
+
+## Try it
+
+<Exercise title="Try it: a different port">
+Without changing any file, start the API on port 9090, then check that `curl localhost:9090/hello` works and `curl localhost:8080/hello` does not. Then do it a second way. Which built-in property is it?
+
+<Fragment slot="hint">The property is `server.port`. Turn it into an environment variable name by the rules above, or pass it as an argument with `-Dspring-boot.run.arguments=...`.</Fragment>
+<Fragment slot="solution">
+
+```sh
+SERVER_PORT=9090 ./mvnw spring-boot:run
+```
+
+or
+
+```sh
+./mvnw spring-boot:run -Dspring-boot.run.arguments=--server.port=9090
+```
+
+The log says `Tomcat started on port 9090 (http)`, and `curl localhost:8080/hello` now fails with `Failed to connect to localhost port 8080`. With the packaged jar from lesson 21.2 the argument is simpler: `java -jar target/paydeck-api-0.0.1-SNAPSHOT.jar --server.port=9090`.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="found character '\t(TAB)' that cannot start any token">
+YAML does not allow tabs for indenting. Spring stops at start-up and names the line and column. Indent with two spaces per level; VS Code does this automatically in `.yml` files.
+</Aside>
+
+<Aside type="caution" title="A setting quietly comes out as 0 or null">
+A misspelled property name is not an error: Spring just leaves that record component empty. `defaultCardLimitCents` silently became `0` while the YAML still said `default-card-limt-cents`. Check spelling and indentation, and which prefix the record has.
+</Aside>
+
+<Aside type="caution" title="The old setting is still used after renaming a file">
+After deleting or renaming anything in `src/main/resources`, run `./mvnw clean` so the stale copy in `target` is removed.
+</Aside>
+
+<Aside type="caution" title="Secrets in application.yml">
+Anything in `application.yml` ends up in Git and inside the jar. Real passwords and keys come from environment variables on the machine that runs the app.
+</Aside>
+
+## Recap
+
+- Settings live in `application.yml`, nested with two-space indents.
+- A `@ConfigurationProperties(prefix = "paydeck")` record reads your own settings; `@ConfigurationPropertiesScan` finds it.
+- Environment variables such as `PAYDECK_DEFAULT_CARD_LIMIT_CENTS` override the file without a rebuild.
+- `application-<profile>.yml` adds settings when that profile is active: `-Dspring-boot.run.profiles=...` or `SPRING_PROFILES_ACTIVE`.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which environment variable sets paydeck.default-card-limit-cents?',
+			options: ['paydeck.default-card-limit-cents', 'PAYDECK_DEFAULT_CARD_LIMIT_CENTS', 'PayDeckDefaultCardLimitCents'],
+			answer: 1,
+			explanation: 'Capitals, with underscores for dots and dashes.',
+		},
+		{
+			question: 'The production profile is active. Where does a setting that application-production.yml does not mention come from?',
+			options: ['Nowhere: it is empty', 'application.yml', 'An error stops the app'],
+			answer: 1,
+			explanation: 'Profile files add to and override application.yml; they do not replace it.',
+		},
+		{
+			question: 'Where should a database password for the live server go?',
+			options: ['application.yml', 'application-production.yml', 'An environment variable on the server'],
+			answer: 2,
+			explanation: 'Files go into Git; environment variables stay on the machine.',
+		},
+	]}
+/>
+
+<MarkComplete />

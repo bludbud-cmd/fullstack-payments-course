@@ -1,0 +1,311 @@
+---
+title: "25.3 Testing payments that run at the same time"
+description: "Turn the race and deadlock demos from Module 24 into automated tests with a thread pool and a starting gate, and watch them catch the bugs when the locks are removed."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson PayDeck has tests that fire many transfers at the same instant, and prove that no account is ever overspent and that transfers in opposite directions never deadlock.
+
+## Why it matters
+
+In Module 24 you found two serious bugs, the overspend race and the deadlock, with shell scripts and your own eyes. Both were fixed by a line or two: a lock, and an order. Both lines look harmless, and someone tidying the code next year could remove either one. Every other test would still pass, because tests that send one request at a time never meet a race. Only a test that does what the script did, many requests at once, protects those lines.
+
+## The idea
+
+### Threads
+
+A **thread** is one line of work inside a program. Your tests so far ran on one thread, one step after another. To send twenty transfers at the same time, you need twenty threads, each calling `transfer`.
+
+Java's tool for this is an **`ExecutorService`**, a pool of threads that runs the tasks you `submit`:
+
+```java
+try (ExecutorService pool = Executors.newFixedThreadPool(20)) {
+    Future<Boolean> result = pool.submit(() -> { ...; return true; });
+    result.get(); // waits for that task, and gives its answer (or its exception)
+}
+```
+
+`submit` returns a **`Future`**: a promise of a result that is not there yet (like a JavaScript `Promise` from Module 8). `get()` waits for it. The `try (...)` makes sure the pool is shut down at the end, waiting for any tasks still running.
+
+### A starting gate
+
+Creating twenty threads takes time; the first might finish before the last has started, and then nothing is concurrent. So every task first waits at a **`CountDownLatch`**, a gate that opens when its count reaches zero:
+
+```java
+CountDownLatch start = new CountDownLatch(1);
+// in each task:   start.await();       wait at the gate
+// after submitting all of them:  start.countDown();   open it
+```
+
+All twenty threads are released at once, the closest a test can get to "twenty taps in the same instant".
+
+### Calling the service directly
+
+These tests call `MoneyMovementService` directly rather than through MockMvc. The race lives in the service and the database, so that is where to aim; it also means the test can count `BusinessRuleException`s without reading HTTP responses. The accounts and the first top-up are still created through the API helpers from `ApiTestSupport`.
+
+## Worked example
+
+Create `src/test/java/dev/paydeck/api/money/ConcurrentTransfersTest.java`:
+
+```java
+package dev.paydeck.api.money;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
+import dev.paydeck.api.ApiTestSupport;
+import dev.paydeck.api.common.BusinessRuleException;
+import dev.paydeck.api.ledger.LedgerService;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+
+/** Many payments hitting one account at the same moment must never overspend it. */
+class ConcurrentTransfersTest extends ApiTestSupport {
+
+    @Autowired
+    MoneyMovementService money;
+
+    @Autowired
+    LedgerService ledger;
+
+    @Test
+    void simultaneousTransfersNeverOverspend() throws Exception {
+        UUID from = openAccount("Asha", "USD");
+        UUID to = openAccount("Ben", "USD");
+        topUp(from, 1_000);
+
+        int attempts = 20;
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<Boolean>> results = new ArrayList<>();
+        try (ExecutorService pool = Executors.newFixedThreadPool(attempts)) {
+            for (int i = 0; i < attempts; i++) {
+                results.add(pool.submit(() -> {
+                    start.await();
+                    try {
+                        money.transfer(from, to, 100, "Coffee", UUID.randomUUID().toString());
+                        return true;
+                    } catch (BusinessRuleException insufficientFunds) {
+                        return false;
+                    }
+                }));
+            }
+            start.countDown();
+            int succeeded = 0;
+            for (Future<Boolean> result : results) {
+                if (result.get()) {
+                    succeeded++;
+                }
+            }
+            assertThat(succeeded).isEqualTo(10);
+        }
+
+        assertThat(ledger.balanceOf(from)).isZero();
+        assertThat(ledger.balanceOf(to)).isEqualTo(1_000);
+    }
+
+    @Test
+    void transfersInOppositeDirectionsDoNotDeadlock() throws Exception {
+        UUID a = openAccount("Asha", "USD");
+        UUID b = openAccount("Ben", "USD");
+        topUp(a, 5_000);
+        topUp(b, 5_000);
+
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<?>> results = new ArrayList<>();
+        try (ExecutorService pool = Executors.newFixedThreadPool(10)) {
+            for (int i = 0; i < 10; i++) {
+                boolean aToB = i % 2 == 0;
+                results.add(pool.submit(() -> {
+                    start.await();
+                    money.transfer(aToB ? a : b, aToB ? b : a, 100, "Split bill", UUID.randomUUID().toString());
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (Future<?> result : results) {
+                result.get();
+            }
+        }
+
+        assertThat(ledger.balanceOf(a) + ledger.balanceOf(b)).isEqualTo(10_000);
+    }
+}
+```
+
+Reading the first test:
+
+- Asha has $10.00; twenty threads each try to send $1.00, all released together.
+- Each task returns `true` if its transfer went through, and `false` if it was refused with a `BusinessRuleException` (here that can only be `INSUFFICIENT_FUNDS`). Any *other* exception is a real failure: `get()` rethrows it, wrapped in an `ExecutionException`, and the test fails.
+- Exactly ten must succeed, Asha must end at 0, and Ben at $10.00.
+
+The second test alternates directions (`i % 2 == 0` is true for even `i`), so five transfers go each way. It has no `catch`: a deadlock surfaces as an exception from `get()` and fails the test. The final check is the double-entry rule in small: money moved, but none appeared or vanished.
+
+`openAccount`, `topUp`, `ledger` and `money` are used inside the tasks' lambdas. Java allows that because the variables never change after they are set (they are "effectively final").
+
+Run it:
+
+```sh
+./mvnw test -Dtest=ConcurrentTransfersTest
+```
+
+```
+[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 16.65 s -- in dev.paydeck.api.money.ConcurrentTransfersTest
+[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
+### Prove the tests can fail
+
+Now play the person tidying up next year. In `MoneyMovementService.lockCustomerAccount`, change `accounts.findByIdForUpdate(id)` to `accounts.findById(id)`, and run the test again:
+
+```
+[ERROR]   ConcurrentTransfersTest.simultaneousTransfersNeverOverspend:56
+expected: 10
+ but was: 11
+[ERROR] Tests run: 2, Failures: 1, Errors: 0, Skipped: 0
+[INFO] BUILD FAILURE
+```
+
+Eleven transfers succeeded; the race is back, and the test caught it. (Your number may differ.) Put the lock back. Then break the *order* instead: replace `boolean fromFirst = fromId.compareTo(toId) < 0;` with `boolean fromFirst = true;`, so transfers always lock their own `from` account first:
+
+```
+[ERROR]   ConcurrentTransfersTest.transfersInOppositeDirectionsDoNotDeadlock:83 ? Execution org.springframework.dao.CannotAcquireLockException: JDBC exception executing SQL [ERROR: deadlock detected
+```
+
+Exactly the deadlock from lesson 24.4, now caught automatically. Restore the line, and run the whole suite to make sure everything is green again.
+
+<Aside type="note" title="Tests that usually catch a bug">
+A race does not happen on every run, so a concurrency test can, rarely, pass even with the lock missing. Twenty threads against a $10.00 balance make the race very likely, which is why the test is built that way. A test like this that passes is strong evidence; one that fails, even once, is proof of a bug. Never "fix" an occasionally failing concurrency test by running it again.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: ten taps, one key">
+Lesson 24.5's exercise sent ten copies of one top-up, with one key, at once. Write `tenCopiesOfOneTopUpMoveMoneyOnce` in a new test class `IdempotentTopUpTest` (in `money`, extending `ApiTestSupport`): ten threads call `money.topUp(account, 1_000, "Tapped ten times", key)` with the same `key`. Exactly one result must have `replayed()` false, and the balance must be `1_000`. Then check that it fails without the lock.
+
+<Fragment slot="hint">Copy the shape of `simultaneousTransfersNeverOverspend`, with `List<Future<MovementResult>>`, and make the key once, before the loop.</Fragment>
+<Fragment slot="solution">
+
+```java
+package dev.paydeck.api.money;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
+import dev.paydeck.api.ApiTestSupport;
+import dev.paydeck.api.ledger.LedgerService;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+
+class IdempotentTopUpTest extends ApiTestSupport {
+
+    @Autowired
+    MoneyMovementService money;
+
+    @Autowired
+    LedgerService ledger;
+
+    @Test
+    void tenCopiesOfOneTopUpMoveMoneyOnce() throws Exception {
+        UUID account = openAccount("Asha", "USD");
+        String key = UUID.randomUUID().toString();
+
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<MovementResult>> results = new ArrayList<>();
+        try (ExecutorService pool = Executors.newFixedThreadPool(10)) {
+            for (int i = 0; i < 10; i++) {
+                results.add(pool.submit(() -> {
+                    start.await();
+                    return money.topUp(account, 1_000, "Tapped ten times", key);
+                }));
+            }
+            start.countDown();
+            int recorded = 0;
+            for (Future<MovementResult> result : results) {
+                if (!result.get().replayed()) {
+                    recorded++;
+                }
+            }
+            assertThat(recorded).isEqualTo(1);
+        }
+
+        assertThat(ledger.balanceOf(account)).isEqualTo(1_000);
+    }
+}
+```
+
+It passes. With `findById` instead of `findByIdForUpdate`, several copies check the key before any has saved it, and the database's `UNIQUE` constraint stops the second insert:
+
+```
+[ERROR]   IdempotentTopUpTest.tenCopiesOfOneTopUpMoveMoneyOnce:43 ? Execution org.springframework.dao.DataIntegrityViolationException: could not execute statement [ERROR: duplicate key value violates unique constraint "ledger_transactions_idempotency_key_key"
+```
+
+No money moved twice even then, thanks to the constraint, but customers would see `409` errors for a perfectly normal retry. The lock is what makes retries smooth. Restore it.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Forgetting the latch">
+Without `start.await()`, threads begin as soon as they are created, often one after another, and the test passes even with the bug. Always release them together.
+</Aside>
+
+<Aside type="caution" title="Never calling get()">
+An exception inside a task is kept inside its `Future`. If you never call `get()`, the test never sees it and passes. Call `get()` on every result.
+</Aside>
+
+<Aside type="caution" title="@Transactional on a concurrency test">
+It would wrap the test in one transaction, which the worker threads cannot see, so the accounts the test created would not exist for them. These tests must let each transfer commit for real.
+</Aside>
+
+## Recap
+
+- An `ExecutorService` runs tasks on a pool of threads; `submit` returns a `Future`, whose `get()` gives the result or rethrows the failure.
+- A `CountDownLatch` releases all threads at once, so the work really happens together.
+- Concurrency tests protect the lines that every other test would miss: locks and lock order.
+- Break the code on purpose to see each test fail; a failing concurrency test always means a real bug.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why does each task wait on start.await() before transferring?',
+			options: ['To slow the test down', 'So all threads start at the same moment and really race', 'Because transfer needs it'],
+			answer: 1,
+			explanation: 'Without the gate, early threads may finish before later ones begin.',
+		},
+		{
+			question: 'A transfer task throws CannotAcquireLockException. Where does the test see it?',
+			options: ['Nowhere', 'When it calls get() on that task\'s Future', 'In the console only'],
+			answer: 1,
+			explanation: 'get() rethrows the task\'s exception wrapped in an ExecutionException.',
+		},
+		{
+			question: 'A concurrency test passes once with the lock removed. What does that prove?',
+			options: ['The lock is not needed', 'Nothing: the race just did not happen on that run', 'The test is broken'],
+			answer: 1,
+			explanation: 'Races are a matter of timing. Only a failure is proof.',
+		},
+	]}
+/>
+
+<MarkComplete />

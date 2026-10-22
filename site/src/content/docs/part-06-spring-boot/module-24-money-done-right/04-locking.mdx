@@ -1,0 +1,281 @@
+---
+title: "24.4 Locking when two payments hit one account"
+description: "Watch twenty transfers at once spend money that is not there, fix it with row locks, then watch transfers in opposite directions deadlock and fix that by always locking in the same order."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson PayDeck's transfers are safe when many arrive at the same moment: no account can be overspent, and two accounts paying each other cannot freeze the system.
+
+## Why it matters
+
+Your transfer checks the balance, then records the payment. That is correct when requests come one at a time. In a real payment system they do not: a card is tapped twice, a phone retries, a shop charges a subscription while the owner sends money to a friend. If two requests both check the balance *before* either has recorded anything, both see enough money, and both go through. This bug class, a **race condition**, has cost real companies real money, and it never shows up when you test by hand.
+
+## The idea
+
+### Seeing the race
+
+Picture an account with $10.00 and two transfers of $10.00 arriving together:
+
+| Time | Request 1 | Request 2 |
+| --- | --- | --- |
+| 1 | balance? 1000 | |
+| 2 | | balance? 1000 |
+| 3 | 1000 ≥ 1000, record −1000 | |
+| 4 | | 1000 ≥ 1000, record −1000 |
+| 5 | commit | commit |
+
+Both checks were true when they ran. The account ends at −1000. Transactions do not prevent this: by default PostgreSQL lets each transaction read the latest *committed* data (the isolation level called **read committed**), and at times 1 and 2 nothing had been committed yet.
+
+### Row locks
+
+The fix is to make the second request **wait** until the first has finished. `SELECT ... FOR UPDATE` reads a row and **locks** it until the transaction ends. Any other transaction that asks for the same lock waits, and only then reads the row, now with the first payment committed. Plain `SELECT`s are not blocked, so showing a balance stays fast.
+
+PayDeck locks the **account row** at the start of every money movement, before checking anything. All payments from one account then form a queue, one after the other, while payments on other accounts carry on in parallel. This is called **pessimistic locking**: assume a clash will happen and prevent it.
+
+### Deadlocks
+
+Locks bring a new danger. Ana sends Ben money at the same moment Ben sends Ana money:
+
+| Time | Ana → Ben | Ben → Ana |
+| --- | --- | --- |
+| 1 | lock Ana | |
+| 2 | | lock Ben |
+| 3 | lock Ben: wait for Ben → Ana | |
+| 4 | | lock Ana: wait for Ana → Ben |
+
+Each waits for the other, forever. That is a **deadlock**. PostgreSQL notices after about a second and kills one of the two transactions with an error. The cure is simple: **always take locks in the same order**. If every transfer locks the account with the smaller ID first, both transfers above start with the same account, the second waits at time 2, and there is no cycle.
+
+## Worked example
+
+### Prove the race
+
+Add a script that sends twenty $1.00 transfers at the same time. Create `scripts/race.sh` in the project:
+
+```sh
+#!/bin/sh
+# Sends 20 transfers of 100 cents from account $1 to account $2, all at the same time,
+# and counts the answers by status code.
+seq 20 | xargs -P 20 -I{} curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/api/transfers \
+  -H 'Content-Type: application/json' \
+  -d "{\"fromAccountId\":\"$1\",\"toAccountId\":\"$2\",\"amountCents\":100,\"description\":\"Race {}\"}" | sort | uniq -c
+```
+
+`seq 20` prints the numbers 1 to 20. `xargs -P 20` runs a `curl` for each, **20 at a time**, putting the number where `{}` is. Each `curl` prints only the status code (`-w '%{http_code}\n'`), and `sort | uniq -c` counts them. `$1` and `$2` are the two IDs you give the script. Make it runnable with `chmod +x scripts/race.sh`.
+
+Open a new USD account, Dan's, top it up with exactly $10.00 (`"amountCents": 1000`), and race him against Chloe:
+
+```sh
+scripts/race.sh <Dan's id> <Chloe's id>
+```
+
+```
+  14 201
+   6 422
+```
+
+Fourteen transfers of $1.00 from an account holding $10.00. Dan's balance:
+
+```
+{"ownerName":"Dan Race","balanceCents":-400}
+```
+
+PayDeck just lent Dan $4.00 that nobody agreed to. Your numbers will differ from run to run, which is typical of races, but you will almost certainly see more than 10 successes.
+
+### Lock the account
+
+Add a locking query to `AccountRepository`:
+
+```java
+package dev.paydeck.api.account;
+
+import java.util.Optional;
+import java.util.UUID;
+
+import dev.paydeck.api.money.SupportedCurrency;
+import jakarta.persistence.LockModeType;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Query;
+
+public interface AccountRepository extends JpaRepository<Account, UUID> {
+
+    /**
+     * Loads an account and locks its row until the current database transaction
+     * ends ({@code SELECT ... FOR UPDATE}). Two payments from the same account
+     * then run one after the other instead of both spending the same money.
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select a from Account a where a.id = :id")
+    Optional<Account> findByIdForUpdate(UUID id);
+
+    Optional<Account> findByKindAndCurrency(AccountKind kind, SupportedCurrency currency);
+}
+```
+
+`@Lock(PESSIMISTIC_WRITE)` adds the lock to the query. It needs an explicit `@Query`, because `findByIdForUpdate` is not a name Spring Data understands on its own.
+
+In `MoneyMovementService`, rename `customerAccount` to `lockCustomerAccount` and use the new query:
+
+```java
+private Account lockCustomerAccount(UUID id) {
+    return accounts.findByIdForUpdate(id)
+            .filter(account -> account.getKind() == AccountKind.CUSTOMER)
+            .orElseThrow(() -> new NotFoundException("Account", id));
+}
+```
+
+and call it in `topUp` (`Account account = lockCustomerAccount(accountId);`) and in `transfer`:
+
+```java
+Account from = lockCustomerAccount(fromId);
+Account to = lockCustomerAccount(toId);
+```
+
+The lock is taken **before** the balance check, which is the whole point. It is held until `transfer`'s transaction commits or rolls back, which is why the transaction from lesson 24.3 must wrap everything. Top-ups lock too: they do not check a balance, but lesson 24.5 needs them queued as well.
+
+Restart with `show-sql`, make a new $10.00 Dan, and race again:
+
+```
+  10 201
+  10 422
+```
+
+```
+{"ownerName":"Dan Race","balanceCents":0}
+```
+
+Exactly ten, every time. The log shows the lock:
+
+```
+Hibernate: select a1_0.id,a1_0.created_at,a1_0.currency,a1_0.kind,a1_0.owner_name from accounts a1_0 where a1_0.id=? for no key update of a1_0
+```
+
+`FOR NO KEY UPDATE` is PostgreSQL's slightly gentler `FOR UPDATE`: it blocks other payments on the account but still lets new ledger entries point at it through their foreign key.
+
+### Prove the deadlock
+
+Make two more USD accounts, Eve and Finn, and top up each with $100.00. Now race in **both directions at once**: the `&` runs the first command in the background so the second starts immediately, and `wait` waits for both.
+
+```sh
+scripts/race.sh <Eve's id> <Finn's id> & scripts/race.sh <Finn's id> <Eve's id>; wait
+```
+
+```
+   1 201
+  19 500
+   2 201
+  18 500
+```
+
+37 of 40 transfers failed, and the log is full of:
+
+```
+ERROR: deadlock detected
+  Detail: Process 184 waits for ExclusiveLock on tuple (0,11) of relation 16394 of database 16384; blocked by process 182.
+Process 182 waits for ShareLock on transaction 820; blocked by process 178.
+...
+org.springframework.dao.CannotAcquireLockException: JDBC exception executing SQL [ERROR: deadlock detected
+```
+
+No money was lost (each failed transfer rolled back completely), but customers saw errors for perfectly good payments.
+
+### Lock in order
+
+Replace the two lock lines in `transfer`:
+
+```java
+// Always lock in the same order. If two transfers between A and B run at
+// once, in opposite directions, neither can end up waiting for the other forever.
+boolean fromFirst = fromId.compareTo(toId) < 0;
+Account first = lockCustomerAccount(fromFirst ? fromId : toId);
+Account second = lockCustomerAccount(fromFirst ? toId : fromId);
+Account from = fromFirst ? first : second;
+Account to = fromFirst ? second : first;
+```
+
+`compareTo` puts any two UUIDs in a fixed order (it is negative when `fromId` comes first). Whichever direction the money goes, the account that comes first is locked first. Restart and run both directions again:
+
+```
+  20 201
+  20 201
+```
+
+All 40 succeed, with no deadlocks, and Eve's and Finn's balances still add up to $200.00. Run the one-way race once more too: still exactly ten.
+
+## Try it
+
+<Exercise title="Try it: hold a lock by hand">
+See a lock with your own eyes. In psql, start a transaction and lock Eve's account row:
+
+```sql
+BEGIN;
+SELECT owner_name FROM accounts WHERE id = 'paste-eves-id-here' FOR NO KEY UPDATE;
+```
+
+Leave psql open. In another terminal, send a $1.00 transfer from Eve to Finn. What happens? In a third terminal, `GET` Eve's account. Then type `COMMIT;` in psql and watch the second terminal.
+
+<Fragment slot="hint">A lock lasts until its transaction ends, whoever holds it: the API or you in psql.</Fragment>
+<Fragment slot="solution">
+
+The transfer's `curl` **hangs**: the API's `select ... for no key update` is waiting for your lock. The `GET` answers immediately, because a plain `SELECT` never waits for row locks. As soon as you `COMMIT`, the transfer completes with `201`. Measured with `curl -w '%{time_total}'` while psql held the lock for about eight seconds:
+
+```
+201 after 7.135635s
+200 after 0.012459s
+```
+
+This is also why transactions must stay short: while one holds a lock, every other payment on that account waits behind it. If you forget an open `BEGIN` in psql, payments on that account stop until you close it.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Checking first, locking later">
+`balanceOf` then `findByIdForUpdate` is still a race: the check ran before the queue. Lock first, then read and check.
+</Aside>
+
+<Aside type="caution" title="Locking without a transaction">
+A lock ends with its transaction. Without `@Transactional` around the whole operation, the lock would be released straight after the `SELECT`, protecting nothing. (`MANDATORY` on `record` catches this for you.)
+</Aside>
+
+<Aside type="caution" title="Testing concurrency by hand">
+Clicking twice in a row is not "at the same time". Race conditions only show up with real parallel requests, like the script, and Module 25 turns them into an automated test.
+</Aside>
+
+## Recap
+
+- A race condition: two requests check, then act, and both checks pass before either acts.
+- `@Lock(PESSIMISTIC_WRITE)` turns a query into `SELECT ... FOR NO KEY UPDATE`, which makes others wait until the transaction ends.
+- Lock the account before checking its balance, inside the transaction.
+- Locking two rows in different orders can deadlock. Always lock in a fixed order, such as by ID.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why did 14 transfers of $1.00 succeed from a $10.00 account?',
+			options: ['The balance query was wrong', 'Several requests checked the balance before any of them had recorded its payment', 'PostgreSQL lost some entries'],
+			answer: 1,
+			explanation: 'Each check was true when it ran; they just ran too early. That is a race condition.',
+		},
+		{
+			question: 'Transfer A locks Ana then Ben; transfer B locks Ben then Ana. Both run at once. What can happen?',
+			options: ['Nothing special', 'A deadlock: each waits for the lock the other holds', 'Both transfers are applied twice'],
+			answer: 1,
+			explanation: 'PostgreSQL detects it and kills one. Locking in a fixed order prevents it.',
+		},
+		{
+			question: 'While a transfer holds a lock on Ana\'s account, someone reads her balance with a plain SELECT. What happens?',
+			options: ['They wait for the lock', 'They read immediately, seeing the last committed data', 'They get an error'],
+			answer: 1,
+			explanation: 'Row locks only block other lockers and writers, not plain reads.',
+		},
+	]}
+/>
+
+<MarkComplete />

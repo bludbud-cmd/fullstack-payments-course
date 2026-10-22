@@ -1,0 +1,226 @@
+---
+title: "22.5 API documentation with OpenAPI"
+description: "Generate an OpenAPI description of the PayDeck API from your code with springdoc, browse and try it in Swagger UI at /docs, and improve it with a few annotations."
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson the PayDeck API describes itself: a web page lists every endpoint, what it accepts and what it returns, and lets you try each one from the browser.
+
+## Why it matters
+
+Whoever builds the app (in Part 7, that is you) needs to know every endpoint, every field and every rule. Documentation written by hand is always out of date by next week. **OpenAPI** is a standard format for describing HTTP APIs, and tools can generate it straight from your controllers and DTOs, so the documentation changes when the code does. Other tools read OpenAPI too: they can generate client code, mock servers and tests.
+
+## The idea
+
+- **OpenAPI** is a JSON (or YAML) document listing an API's **paths**, the operations on each, their parameters, request bodies, responses and **schemas** (the shapes of the JSON).
+- **springdoc-openapi** is a library that looks at your Spring controllers when the app starts and builds that document. It even reads your validation annotations: `@Size(max = 50)` becomes `"maxLength": 50`.
+- **Swagger UI** is a web page that displays an OpenAPI document and lets you send requests from it. springdoc includes it.
+
+## Worked example
+
+**1. Add the dependency.** springdoc is not part of Spring Boot, so it needs its own version. In `pom.xml`, add a property next to `java.version`:
+
+```xml
+<properties>
+    <java.version>25</java.version>
+    <springdoc.version>3.1.1</springdoc.version>
+</properties>
+```
+
+and this dependency, after `spring-boot-starter-webmvc`:
+
+```xml
+<dependency>
+    <groupId>org.springdoc</groupId>
+    <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+    <version>${springdoc.version}</version>
+</dependency>
+```
+
+`${springdoc.version}` refers to the property, which keeps version numbers together at the top of the file. Use exactly 3.1.1: springdoc's 3.x versions are the ones made for Spring Boot 4.
+
+**2. Give the page a short address.** In `application.yml`, at the top level (no indent), add:
+
+```yaml
+springdoc:
+  swagger-ui:
+    path: /docs
+```
+
+**3. Name the API.** Add an annotation to `PayDeckApplication`:
+
+```java
+package dev.paydeck.api;
+
+import io.swagger.v3.oas.annotations.OpenAPIDefinition;
+import io.swagger.v3.oas.annotations.info.Info;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
+
+@OpenAPIDefinition(info = @Info(title = "PayDeck API", description = "Accounts, virtual cards and payments"))
+@SpringBootApplication
+@ConfigurationPropertiesScan
+public class PayDeckApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(PayDeckApplication.class, args);
+    }
+
+}
+```
+
+**4. Look at it.** Restart, then open [localhost:8080/docs](http://localhost:8080/docs) in your browser. It forwards you to `/swagger-ui/index.html`, which shows:
+
+- the title **PayDeck API** and its description;
+- a section **card-controller** listing each endpoint, coloured by method: `GET /api/cards`, `POST /api/cards`, `PATCH /api/cards/{id}`, `POST /api/cards/{id}/freeze` and the rest;
+- at the bottom, **Schemas**: `IssueCardRequest`, `UpdateCardRequest`, `CardResponse`.
+
+Click **POST /api/cards**, then **Try it out**. Edit the example body to `{"nickname": "Docs card", "spendingLimitCents": 5000}` and click **Execute**. The page shows the equivalent curl command, the status `201`, the response body and its headers. Expand the **IssueCardRequest** schema: `nickname` is marked required (from `@NotBlank`) with a maximum length of 50 (from `@Size`).
+
+**5. The document itself** is at `/v3/api-docs`. Ask `jq` for the interesting parts:
+
+```sh
+curl -s localhost:8080/v3/api-docs | jq '{openapi, info, paths: (.paths | keys)}'
+```
+
+```json
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "PayDeck API",
+    "description": "Accounts, virtual cards and payments"
+  },
+  "paths": [
+    "/api/cards",
+    "/api/cards/{id}",
+    "/api/cards/{id}/freeze",
+    "/api/status",
+    "/hello"
+  ]
+}
+```
+
+```sh
+curl -s localhost:8080/v3/api-docs | jq '.components.schemas.IssueCardRequest'
+```
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "nickname": {
+      "type": "string",
+      "maxLength": 50,
+      "minLength": 0
+    },
+    "spendingLimitCents": {
+      "type": "integer",
+      "format": "int64",
+      "exclusiveMinimum": 0,
+      "maximum": 10000000
+    }
+  },
+  "required": [
+    "nickname"
+  ]
+}
+```
+
+Your validation rules became documentation without any extra work. (`maximum` appears if you added `@Max` in lesson 22.3.)
+
+## Try it
+
+<Exercise title="Try it: friendlier names">
+"card-controller" is a Java name, not a word for people. Make the section show as **Cards** with the description "Issue and manage virtual cards", and give the freeze endpoint the summary "Freeze a card" and the description "Blocks an active card until it is unfrozen." Check the result in Swagger UI and with `jq`.
+
+<Fragment slot="hint">`@Tag(name = ..., description = ...)` goes on the controller class; `@Operation(summary = ..., description = ...)` goes on a method. Both are in `io.swagger.v3.oas.annotations` (`.tags.Tag` and `.Operation`).</Fragment>
+<Fragment slot="solution">
+
+```java
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
+...
+
+@Tag(name = "Cards", description = "Issue and manage virtual cards")
+@RestController
+@RequestMapping("/api/cards")
+public class CardController {
+    ...
+
+    @Operation(summary = "Freeze a card", description = "Blocks an active card until it is unfrozen.")
+    @PostMapping("/{id}/freeze")
+    public CardResponse freeze(@PathVariable UUID id) {
+        ...
+```
+
+```sh
+curl -s localhost:8080/v3/api-docs | jq '.paths["/api/cards/{id}/freeze"].post | {tags, summary, description, operationId}'
+```
+
+```json
+{
+  "tags": [
+    "Cards"
+  ],
+  "summary": "Freeze a card",
+  "description": "Blocks an active card until it is unfrozen.",
+  "operationId": "freeze"
+}
+```
+
+The `operationId` is the Java method's name. Code generators use it to name functions, which is one more reason to name methods well.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="/docs gives 404">
+Check that the `springdoc:` block in `application.yml` is not indented under another block, and that you restarted. `/swagger-ui/index.html` works even without the setting.
+</Aside>
+
+<Aside type="caution" title="NoSuchMethodError or ClassNotFoundException at start-up">
+The springdoc version does not match Spring Boot. springdoc 2.x is for Spring Boot 3; for Spring Boot 4 use 3.x.
+</Aside>
+
+<Aside type="caution" title="Documenting in the wrong place">
+Describe each field's rules with validation annotations, not in prose: then the rule is enforced **and** documented, and the two can never disagree.
+</Aside>
+
+## Recap
+
+- OpenAPI is a standard, machine-readable description of an HTTP API.
+- springdoc builds it from your controllers, DTOs and validation rules at `/v3/api-docs`.
+- Swagger UI at `/docs` lets people read the API and try every endpoint in the browser.
+- `@OpenAPIDefinition`, `@Tag` and `@Operation` add titles and descriptions where the code alone is not enough.
+
+<Quiz
+	questions={[
+		{
+			question: 'Where does springdoc learn that nickname is at most 50 characters?',
+			options: ['From a comment', 'From the @Size(max = 50) annotation', 'From the database'],
+			answer: 1,
+			explanation: 'Validation annotations are read into the schema.',
+		},
+		{
+			question: 'What is /v3/api-docs?',
+			options: ['A web page for people', 'The OpenAPI document as JSON, for tools', 'Version 3 of PayDeck'],
+			answer: 1,
+			explanation: 'Swagger UI at /docs is the page for people; it reads this document.',
+		},
+		{
+			question: 'Why generate documentation from code rather than write it by hand?',
+			options: ['It is prettier', 'It changes when the code changes, so it stays correct', 'Hand-written documentation is not allowed'],
+			answer: 1,
+			explanation: 'Generated documentation cannot drift away from the real API.',
+		},
+	]}
+/>
+
+<MarkComplete />

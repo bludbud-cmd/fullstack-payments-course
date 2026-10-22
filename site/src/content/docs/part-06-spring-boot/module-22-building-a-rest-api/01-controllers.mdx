@@ -1,0 +1,326 @@
+---
+title: "22.1 Controllers"
+description: "Write a REST controller for PayDeck's cards: map GET and POST requests to methods, read path variables, query parameters and JSON bodies, and answer with the right status codes."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can write a controller that lists, reads, creates and changes cards, using path variables, query parameters, JSON bodies and proper status codes.
+
+## Why it matters
+
+In Module 19 you used an API from the outside: `GET /cards`, `POST /cards` with a JSON body, `201 Created` with a `Location` header. Now you build one. A **controller** is where HTTP meets Java: it turns each request into a method call, and each method's result into a response. Every feature of PayDeck, from freezing a card to sending money, starts in a controller.
+
+## The idea
+
+```java
+@RestController
+@RequestMapping("/api/cards")
+public class CardController {
+
+    @GetMapping("/{id}")
+    public ResponseEntity<Card> get(@PathVariable UUID id) { ... }
+}
+```
+
+- **`@RequestMapping("/api/cards")`** on the class is the start of every path in it.
+- **`@GetMapping`, `@PostMapping`, `@PatchMapping`, `@DeleteMapping`** connect a method to an HTTP method and the rest of the path. `@GetMapping` with no path means the class's path itself.
+- **`@PathVariable UUID id`** reads `{id}` from the path. Spring converts the text into the parameter's type; if it cannot (`/api/cards/42` is not a UUID), it answers `400 Bad Request` without calling your method.
+- **`@RequestParam`** reads a query parameter, such as `?status=FROZEN`. `required = false` makes it optional (it is then `null` when missing).
+- **`@RequestBody`** turns the JSON body into a Java object, using Jackson. A record is perfect for this.
+- **Return values** become the response body as JSON. To choose the status code and headers too, return a **`ResponseEntity`**: `ResponseEntity.created(uri).body(x)` is `201` with a `Location` header; `ResponseEntity.of(optional)` is `200` with the value, or `404` if the `Optional` is empty.
+
+A **UUID** (universally unique identifier) is a 128-bit random ID such as `818678de-bb6c-4611-b583-099012db401e`. Unlike 1, 2, 3, nobody can guess the next one, so PayDeck uses them for everything.
+
+## Worked example
+
+<Aside type="note" title="Starting from">
+This continues from the Module 21 project. First tidy up the practice code: delete `CardPreviewController.java` and `Last4Generator.java` from the `card` package, and `CardPreviewControllerTest.java` from the tests. A real card will make its own digits.
+</Aside>
+
+You will keep cards in memory for this module; Module 23 moves them into PostgreSQL. In the `card` package, create three files.
+
+`CardStatus.java`, the states a card can be in:
+
+```java
+package dev.paydeck.api.card;
+
+public enum CardStatus {
+    /** Can be used to pay. */
+    ACTIVE,
+    /** Temporarily blocked by its owner. Can be unfrozen. */
+    FROZEN,
+    /** Permanently closed. Cannot be changed again. */
+    CANCELLED
+}
+```
+
+`Card.java`, the card itself:
+
+```java
+package dev.paydeck.api.card;
+
+import java.security.SecureRandom;
+import java.time.Instant;
+import java.util.UUID;
+
+/**
+ * A virtual card. We only keep the last four digits; a full card number
+ * never reaches PayDeck.
+ */
+public class Card {
+
+    private static final SecureRandom RANDOM = new SecureRandom();
+
+    private final UUID id;
+    private final String nickname;
+    private final String last4;
+    private CardStatus status;
+    private final Instant createdAt;
+
+    private Card(String nickname) {
+        this.id = UUID.randomUUID();
+        this.nickname = nickname;
+        this.last4 = String.format("%04d", RANDOM.nextInt(10_000));
+        this.status = CardStatus.ACTIVE;
+        this.createdAt = Instant.now();
+    }
+
+    public static Card issue(String nickname) {
+        return new Card(nickname);
+    }
+
+    public void freeze() {
+        status = CardStatus.FROZEN;
+    }
+
+    public UUID getId() {
+        return id;
+    }
+
+    public String getNickname() {
+        return nickname;
+    }
+
+    public String getLast4() {
+        return last4;
+    }
+
+    public CardStatus getStatus() {
+        return status;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+}
+```
+
+The constructor is private; `Card.issue(...)` is the only way to make one. A **static factory method** like this has a name that says what is happening (a card is issued) and guarantees every new card starts `ACTIVE` with fresh digits.
+
+`CardStore.java`, which keeps the cards:
+
+```java
+package dev.paydeck.api.card;
+
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.springframework.stereotype.Component;
+
+/** Keeps cards in memory, until Module 23 puts them in PostgreSQL. */
+@Component
+public class CardStore {
+
+    private final Map<UUID, Card> cards = new ConcurrentHashMap<>();
+
+    public Card save(Card card) {
+        cards.put(card.getId(), card);
+        return card;
+    }
+
+    public Optional<Card> findById(UUID id) {
+        return Optional.ofNullable(cards.get(id));
+    }
+
+    public List<Card> findAll() {
+        return cards.values().stream()
+                .sorted(Comparator.comparing(Card::getCreatedAt))
+                .toList();
+    }
+}
+```
+
+`ConcurrentHashMap` is a `Map` that is safe when several requests use it at the same moment, which they will. The method names `save`, `findById` and `findAll` are chosen on purpose: they are the names Spring's database tools use, so swapping this class for a database in Module 23 will barely touch the controller.
+
+Now the controller, `CardController.java`:
+
+```java
+package dev.paydeck.api.card;
+
+import java.net.URI;
+import java.util.List;
+import java.util.UUID;
+
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/cards")
+public class CardController {
+
+    public record NewCard(String nickname) {
+    }
+
+    private final CardStore cards;
+
+    public CardController(CardStore cards) {
+        this.cards = cards;
+    }
+
+    @GetMapping
+    public List<Card> list(@RequestParam(required = false) CardStatus status) {
+        return cards.findAll().stream()
+                .filter(card -> status == null || card.getStatus() == status)
+                .toList();
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<Card> get(@PathVariable UUID id) {
+        return ResponseEntity.of(cards.findById(id));
+    }
+
+    @PostMapping
+    public ResponseEntity<Card> issue(@RequestBody NewCard request) {
+        Card card = cards.save(Card.issue(request.nickname()));
+        return ResponseEntity.created(URI.create("/api/cards/" + card.getId())).body(card);
+    }
+
+    @PostMapping("/{id}/freeze")
+    public ResponseEntity<Card> freeze(@PathVariable UUID id) {
+        return ResponseEntity.of(cards.findById(id).map(card -> {
+            card.freeze();
+            return card;
+        }));
+    }
+}
+```
+
+`POST /api/cards/{id}/freeze` is an **action**: freezing is not simply "set a field", so it gets its own path, as many real card APIs do. `Optional.map(...)` runs the code only if the card was found; otherwise the `Optional` stays empty and `ResponseEntity.of` answers `404`.
+
+Restart, then issue two cards:
+
+```sh
+curl -i -X POST localhost:8080/api/cards -H 'Content-Type: application/json' -d '{"nickname": "Groceries"}'
+```
+
+```
+HTTP/1.1 201
+Location: /api/cards/818678de-bb6c-4611-b583-099012db401e
+Content-Type: application/json
+
+{"createdAt":"2026-10-21T23:37:28.534839284Z","id":"818678de-bb6c-4611-b583-099012db401e","last4":"9041","nickname":"Groceries","status":"ACTIVE"}
+```
+
+Jackson wrote one JSON field for every getter: `getNickname()` became `nickname`. Issue a second called `Travel`, then list them, and freeze the Travel card using its own ID:
+
+```sh
+curl localhost:8080/api/cards
+curl -X POST localhost:8080/api/cards/5c89718a-8f11-4fb9-8462-0936726ed33b/freeze
+curl 'localhost:8080/api/cards?status=FROZEN'
+```
+
+```
+[{"createdAt":"2026-10-21T23:37:28.593385218Z","id":"5c89718a-8f11-4fb9-8462-0936726ed33b","last4":"5367","nickname":"Travel","status":"FROZEN"}]
+```
+
+The quotes around the last URL stop zsh from treating `?` as a wildcard. And the mistakes, each caught before your code runs:
+
+| Request | Status | Why |
+| --- | --- | --- |
+| `GET /api/cards/00000000-0000-0000-0000-000000000000` | 404 | A valid UUID, but no such card. Empty body. |
+| `GET /api/cards/42` | 400 | `42` is not a UUID. |
+| `GET /api/cards?status=frozen` | 400 | Enum names must match exactly: `FROZEN`. |
+| `POST` without `Content-Type: application/json` | 415 | Spring does not know how to read the body. |
+| `POST` with `{"nickname": "Oops",}` | 400 | Not valid JSON (the trailing comma). |
+
+<Aside type="caution" title="Restart means empty">
+The cards live in the running program's memory, so every restart starts with none. That is fine for now; Module 23 fixes it for good.
+</Aside>
+
+## Try it
+
+<Exercise title="Try it: an empty nickname">
+Send `POST /api/cards` with the body `{}`. What comes back? Is that a card you would want in a bank's database? Write down what you think should happen; the next two lessons fix it.
+
+<Fragment slot="solution">
+
+```
+HTTP/1.1 201
+{"createdAt":"2026-10-21T23:37:28.803074Z","id":"e4cb3ea7-208d-4abe-8191-7bb8ffbe719f","last4":"2111","nickname":null,"status":"ACTIVE"}
+```
+
+A missing field in JSON simply becomes `null` in the record, and the controller trusts it, so you now own a card with no name. The API should refuse this with `400 Bad Request` and say which field is wrong. Lesson 22.3 adds those checks, and lesson 22.4 makes the error message helpful.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Ambiguous mapping. Cannot map 'cardController' method">
+Two methods have the same HTTP method and path, so Spring cannot choose between them, and the app refuses to start. The rest of the message names both methods. Change the path of one.
+</Aside>
+
+<Aside type="caution" title="The method parameter is always null">
+You forgot `@RequestBody` (the JSON is ignored) or `@PathVariable`. Without the annotation, Spring does not know where the value comes from.
+</Aside>
+
+<Aside type="caution" title="zsh: no matches found">
+A URL containing `?` without quotes. Write `curl 'localhost:8080/api/cards?status=FROZEN'`.
+</Aside>
+
+## Recap
+
+- `@RestController` plus `@RequestMapping` on the class, and `@GetMapping`/`@PostMapping`/... on methods, map requests to code.
+- `@PathVariable`, `@RequestParam` and `@RequestBody` read the parts of a request; Spring converts types and answers `400` when it cannot.
+- Return an object for `200` with JSON; return a `ResponseEntity` to choose the status: `created(...)` for `201`, `of(optional)` for `200` or `404`.
+- Actions that are more than "set a field", such as freezing, get their own `POST` path.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which annotation reads ?status=FROZEN?',
+			options: ['@PathVariable', '@RequestParam', '@RequestBody'],
+			answer: 1,
+			explanation: 'Query parameters come from @RequestParam; path parts from @PathVariable.',
+		},
+		{
+			question: 'What does ResponseEntity.of(cards.findById(id)) answer when there is no such card?',
+			options: ['200 with null', '404 Not Found', '500 Internal Server Error'],
+			answer: 1,
+			explanation: 'An empty Optional becomes a 404.',
+		},
+		{
+			question: 'Why does GET /api/cards/42 answer 400 rather than 404?',
+			options: ['42 is too small', '42 cannot be converted to a UUID, so the request itself is wrong', 'Card 42 was deleted'],
+			answer: 1,
+			explanation: '404 means a valid ID that does not exist; 400 means the request is malformed.',
+		},
+	]}
+/>
+
+<MarkComplete />

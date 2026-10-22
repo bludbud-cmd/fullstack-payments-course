@@ -1,0 +1,328 @@
+---
+title: "25.1 Service and controller tests"
+description: "Test the ledger's rules with plain JUnit in milliseconds, and test MoneyController's HTTP behaviour with MockMvc and Mockito mocks, without a database."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can write fast tests for PayDeck's rules without Spring, and tests for a controller's HTTP behaviour with **MockMvc**, where the services behind it are replaced by **mocks**.
+
+## Why it matters
+
+So far you have checked PayDeck by hand, with curl and scripts. That proved it works *today*. Next week you will change something, and the only way to know you broke nothing would be to repeat every check. Automated tests repeat them for you, in seconds, every time. For an app that moves money, they are not optional: no serious payment company ships code without them.
+
+## The idea
+
+### Three sizes of test
+
+| Kind | What it starts | Speed | Catches |
+| --- | --- | --- | --- |
+| **Unit test** | One class, no Spring | Milliseconds | Mistakes in rules and calculations |
+| **Slice test** | One layer of Spring, such as the web layer | About a second | Wrong status codes, JSON, validation, error handling |
+| **Integration test** | The whole app and a real database | Seconds | Everything working together: SQL, transactions, locks |
+
+You want many of the first kind, because they are fast and point straight at the problem, and enough of the others to prove the pieces fit. `CardTest` from Module 22 is already a unit test. This lesson adds another, and a slice test; lesson 25.2 adds integration tests.
+
+### Mocks
+
+A controller test should test the *controller*: does it read the request, call the service, and turn the result into the right response? It should not care whether the service talks to a database. So you replace the service with a **mock**: a fake object, made by a library called **Mockito**, that does nothing until you tell it what to answer.
+
+```java
+when(money.topUp(account, 500, "Pocket money", "key-1"))
+        .thenReturn(new MovementResult(transaction, false));
+```
+
+reads "when `topUp` is called with exactly these values, return this". Called with anything else, a mock returns `null` (or 0, or false). You can also check afterwards how it was called, for example `verifyNoInteractions(money)`: "nobody called it at all".
+
+### MockMvc
+
+**MockMvc** sends fake HTTP requests straight into Spring's web layer, without a real server or network, and lets you check the response:
+
+```java
+mvc.perform(post("/api/accounts/{id}/top-ups", account)
+                .header("Idempotency-Key", "key-1")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json))
+        .andExpect(status().isCreated())
+        .andExpect(jsonPath("$.amountCents").value(500));
+```
+
+`jsonPath("$.amountCents")` points into the response JSON: `$` is the whole document, `.amountCents` a field of it (like `jq '.amountCents'` from Module 19, spelled differently).
+
+**`@WebMvcTest(MoneyController.class)`** starts only the web layer: that controller, `ApiExceptionHandler`, JSON and validation. No repositories, no database. Every bean the controller needs must then be provided, which is where **`@MockitoBean`** comes in: it puts a mock into Spring in place of the real bean.
+
+## Worked example
+
+### A unit test for the ledger
+
+`LedgerService.checkBalanced` is `static` and package-private, so a test in the same package can call it directly. Create `src/test/java/dev/paydeck/api/ledger/LedgerServiceTest.java`:
+
+```java
+package dev.paydeck.api.ledger;
+
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import java.util.List;
+import java.util.UUID;
+
+import org.junit.jupiter.api.Test;
+
+class LedgerServiceTest {
+
+    private final UUID alice = UUID.randomUUID();
+    private final UUID bob = UUID.randomUUID();
+
+    @Test
+    void acceptsPostingsThatAddUpToZero() {
+        assertThatCode(() -> LedgerService.checkBalanced(
+                List.of(new Posting(alice, -500), new Posting(bob, 500))))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void rejectsPostingsThatWouldCreateMoney() {
+        assertThatThrownBy(() -> LedgerService.checkBalanced(
+                List.of(new Posting(alice, -500), new Posting(bob, 600))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("add up to 100");
+    }
+
+    @Test
+    void rejectsASinglePosting() {
+        assertThatThrownBy(() -> LedgerService.checkBalanced(List.of(new Posting(alice, 0))))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void rejectsZeroPostings() {
+        assertThatThrownBy(() -> LedgerService.checkBalanced(
+                List.of(new Posting(alice, 0), new Posting(bob, 0))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("cannot be zero");
+    }
+}
+```
+
+`assertThatCode(...).doesNotThrowAnyException()` is the opposite of `assertThatThrownBy`. These four tests protect the most important rule in PayDeck, and run in about a hundredth of a second.
+
+### A slice test for MoneyController
+
+Create `src/test/java/dev/paydeck/api/money/MoneyControllerTest.java`:
+
+```java
+package dev.paydeck.api.money;
+
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import java.util.UUID;
+
+import dev.paydeck.api.account.AccountRepository;
+import dev.paydeck.api.common.BusinessRuleException;
+import dev.paydeck.api.ledger.LedgerService;
+import dev.paydeck.api.ledger.LedgerTransaction;
+import dev.paydeck.api.ledger.TransactionType;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.http.MediaType;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.ResultActions;
+
+/** Tests the HTTP side of MoneyController, with the services replaced by mocks. */
+@WebMvcTest(MoneyController.class)
+class MoneyControllerTest {
+
+    @Autowired
+    MockMvc mvc;
+
+    @MockitoBean
+    MoneyMovementService money;
+
+    @MockitoBean
+    AccountRepository accounts;
+
+    @MockitoBean
+    LedgerService ledger;
+
+    private final UUID account = UUID.randomUUID();
+
+    @Test
+    void aNewTopUpAnswers201() throws Exception {
+        LedgerTransaction transaction = transaction("Pocket money");
+        when(money.topUp(account, 500, "Pocket money", "key-1")).thenReturn(new MovementResult(transaction, false));
+
+        topUp("key-1", """
+                {"amountCents": 500, "description": "  Pocket money  "}
+                """)
+                .andExpect(status().isCreated())
+                .andExpect(header().string("Idempotent-Replayed", "false"))
+                .andExpect(jsonPath("$.type").value("TOP_UP"))
+                .andExpect(jsonPath("$.amountCents").value(500));
+    }
+
+    @Test
+    void aReplayedTopUpAnswers200() throws Exception {
+        LedgerTransaction transaction = transaction("Pocket money");
+        when(money.topUp(account, 500, "Pocket money", "key-1")).thenReturn(new MovementResult(transaction, true));
+
+        topUp("key-1", """
+                {"amountCents": 500, "description": "Pocket money"}
+                """)
+                .andExpect(status().isOk())
+                .andExpect(header().string("Idempotent-Replayed", "true"));
+    }
+
+    @Test
+    void anInvalidAmountNeverReachesTheService() throws Exception {
+        topUp("key-1", """
+                {"amountCents": 0, "description": "Nothing"}
+                """)
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fields.amountCents").value("must be greater than 0"));
+
+        verifyNoInteractions(money);
+    }
+
+    @Test
+    void aBrokenRuleBecomes422() throws Exception {
+        when(money.topUp(account, 500, "Pocket money", "key-1"))
+                .thenThrow(new BusinessRuleException("EXAMPLE_RULE", "An example rule was broken"));
+
+        topUp("key-1", """
+                {"amountCents": 500, "description": "Pocket money"}
+                """)
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.code").value("EXAMPLE_RULE"));
+    }
+
+    private ResultActions topUp(String key, String json) throws Exception {
+        return mvc.perform(post("/api/accounts/{id}/top-ups", account)
+                .header("Idempotency-Key", key)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json));
+    }
+
+    private static LedgerTransaction transaction(String description) {
+        LedgerTransaction transaction = mock(LedgerTransaction.class);
+        when(transaction.getId()).thenReturn(UUID.randomUUID());
+        when(transaction.getType()).thenReturn(TransactionType.TOP_UP);
+        when(transaction.getDescription()).thenReturn(description);
+        return transaction;
+    }
+}
+```
+
+Things to notice:
+
+- **All three of `MoneyController`'s dependencies** are `@MockitoBean`s, even though most tests only use `money`. Without them, Spring could not create the controller.
+- **`LedgerTransaction` is mocked too.** Its constructor is only visible inside the `ledger` package (on purpose, lesson 24.2), so a test in `money` cannot build a real one. `mock(...)` makes a fake whose getters return what you choose.
+- **The first test sends `"  Pocket money  "`** but stubs `topUp` with `"Pocket money"`. It passes only because the controller strips the spaces, so this test also checks that.
+- **`aBrokenRuleBecomes422`** uses an invented rule. The test is about how the controller and `ApiExceptionHandler` treat *any* `BusinessRuleException`; the real rules are tested elsewhere.
+- **`"""` text blocks** (from the Module 24 project) keep JSON readable inside Java.
+
+Run just these two classes:
+
+```sh
+./mvnw test -Dtest='LedgerServiceTest,MoneyControllerTest'
+```
+
+```
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 4.984 s -- in dev.paydeck.api.money.MoneyControllerTest
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.085 s -- in dev.paydeck.api.ledger.LedgerServiceTest
+[INFO] Tests run: 8, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
+They pass with your local PostgreSQL stopped (`docker compose stop`): neither starts a database. The controller test takes a few seconds, almost all of it starting Spring's web layer.
+
+You may also see this line; it is a harmless notice from Mockito about future Java versions:
+
+```
+Mockito is currently self-attaching to enable the inline-mock-maker. This will no longer work in future releases of the JDK.
+```
+
+## Try it
+
+<Exercise title="Try it: break it on purpose">
+A test you have never seen fail might not be testing anything. In `MoneyController.topUp`, remove `.strip()` from `request.description().strip()`, and run `MoneyControllerTest`. Which test fails, and why does the error say what it says? Put `.strip()` back.
+
+<Fragment slot="hint">With the spaces kept, the controller calls `topUp` with `"  Pocket money  "`. What does a mock return for a call it was not told about?</Fragment>
+<Fragment slot="solution">
+
+`aNewTopUpAnswers201` fails:
+
+```
+[ERROR]   MoneyControllerTest.aNewTopUpAnswers201:49->topUp:94 ? Servlet Request processing failed: java.lang.NullPointerException: Cannot invoke "dev.paydeck.api.money.MovementResult.transaction()" because "result" is null
+```
+
+The mock was told what to return for `"Pocket money"`. Called with `"  Pocket money  "`, it returned the default, `null`, and the controller crashed using it. The other three tests still pass: two send no spaces, one never reaches the service. That is what you want from tests: one specific failure that points at one specific behaviour.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="UnfinishedStubbingException">
+You called a method that itself uses `when(...)` *inside* another `when(...)`, for example `when(money.topUp(...)).thenReturn(new MovementResult(transaction("x"), false))`, where `transaction` stubs a mock. Mockito gets confused:
+
+```
+org.mockito.exceptions.misusing.UnfinishedStubbingException:
+Unfinished stubbing detected here:
+-> at dev.paydeck.api.money.MoneyControllerTest.aNewTopUpAnswers201(MoneyControllerTest.java:46)
+```
+
+Build the mock first, in its own line, then stub with it. That is why the tests above have a `LedgerTransaction transaction = ...` line.
+</Aside>
+
+<Aside type="caution" title="No qualifying bean of type 'dev.paydeck.api.ledger.LedgerService' available">
+A `@WebMvcTest` does not create services or repositories. Every constructor parameter of the controller needs a `@MockitoBean`.
+</Aside>
+
+<Aside type="caution" title="Mocking everything">
+A test where every collaborator is a mock only proves that your code calls the mocks. Mocks are for drawing a line around one layer. Whether SQL, transactions and locks work can only be shown with a real database, which is the next lesson.
+</Aside>
+
+## Recap
+
+- Unit tests check one class without Spring, in milliseconds. Use them for rules.
+- `@WebMvcTest` starts only the web layer; MockMvc sends fake requests to it.
+- `@MockitoBean` replaces a bean with a mock; `when(...).thenReturn(...)` and `thenThrow(...)` tell it what to do; `verifyNoInteractions` checks it was not used.
+- A mock answers `null` to calls it was not told about.
+- Watch every new test fail once, by breaking the code on purpose.
+
+<Quiz
+	questions={[
+		{
+			question: 'What does @WebMvcTest(MoneyController.class) start?',
+			options: ['The whole app and the database', 'Only the web layer: that controller, the exception handler, JSON and validation', 'Nothing; it is a plain unit test'],
+			answer: 1,
+			explanation: 'Services and repositories are not created, so they must be provided as mocks.',
+		},
+		{
+			question: 'A mock was told when(money.topUp(id, 500, "A", "k")).thenReturn(r). The code calls topUp(id, 600, "A", "k"). What does it get?',
+			options: ['r', 'null', 'An exception'],
+			answer: 1,
+			explanation: 'The arguments do not match the stubbing, so the mock returns its default value.',
+		},
+		{
+			question: 'Why does anInvalidAmountNeverReachesTheService end with verifyNoInteractions(money)?',
+			options: ['To clean up', 'To prove validation stopped the request before any money logic ran', 'Mockito requires it'],
+			answer: 1,
+			explanation: 'A 400 alone would not show that the service was never called.',
+		},
+	]}
+/>
+
+<MarkComplete />

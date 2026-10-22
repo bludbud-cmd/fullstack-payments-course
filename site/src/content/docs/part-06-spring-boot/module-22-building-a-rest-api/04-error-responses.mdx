@@ -1,0 +1,312 @@
+---
+title: "22.4 Error responses"
+description: "Make every error explain itself: throw exceptions for missing things and broken rules, and turn them into standard problem-details responses in one @RestControllerAdvice."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson every error from the cards API has the right status code and a body that says what went wrong, in the standard problem-details format.
+
+## Why it matters
+
+When a payment fails, "Something went wrong" is the worst possible message. Was the card frozen? Was the amount wrong? Is the server down? The app can only show a helpful message if the API sends one. And the app's code needs something it can check reliably, such as `"code": "CARD_NOT_ACTIVE"`, rather than guessing from English text. Good error responses are a big part of what makes an API pleasant to build on.
+
+## The idea
+
+### Problem details
+
+**Problem details** (RFC 9457, an internet standard) is a common JSON shape for errors, sent with the content type `application/problem+json`:
+
+```json
+{
+  "status": 422,
+  "title": "Request not allowed",
+  "detail": "Only an active card can be frozen",
+  "instance": "/api/cards/55d06f0f-.../freeze",
+  "code": "CARD_NOT_ACTIVE"
+}
+```
+
+`title` is a short summary of the kind of problem, `detail` explains this occurrence, and `instance` is the path that failed. You may add your own fields, such as `code`. Spring has a class for it: `ProblemDetail`.
+
+### Which status?
+
+| Status | When | PayDeck example |
+| --- | --- | --- |
+| 400 Bad Request | The request is malformed or a field is invalid | A blank nickname |
+| 404 Not Found | The thing named does not exist | An unknown card ID |
+| 409 Conflict | It clashes with something else that happened | The same payment sent twice (Module 24) |
+| 422 Unprocessable Content | Well formed, but breaks a business rule | Freezing a card that is already frozen |
+
+A **business rule** is a rule of the domain itself, not of the request's format: a frozen card cannot be frozen again; you cannot spend more than you have. Those rules belong in the domain class (`Card`), not in the controller, so they hold no matter which endpoint changes the card.
+
+### Exceptions as the signal
+
+The domain code **throws an exception** when something is wrong (Module 17), and one central class turns each kind of exception into a response. **`@RestControllerAdvice`** marks that class; its **`@ExceptionHandler`** methods each handle one exception type, for every controller at once.
+
+## Worked example
+
+Create two exceptions in the `common` package.
+
+`NotFoundException.java`:
+
+```java
+package dev.paydeck.api.common;
+
+/** Thrown when a request names something that does not exist. Becomes a 404. */
+public class NotFoundException extends RuntimeException {
+
+    public NotFoundException(String thing, Object id) {
+        super(thing + " " + id + " was not found");
+    }
+}
+```
+
+`BusinessRuleException.java`:
+
+```java
+package dev.paydeck.api.common;
+
+/**
+ * Thrown when a request is well formed but breaks a rule, such as spending
+ * more than the balance. Becomes a 422 with a machine-readable {@code code}.
+ */
+public class BusinessRuleException extends RuntimeException {
+
+    private final String code;
+
+    public BusinessRuleException(String code, String message) {
+        super(message);
+        this.code = code;
+    }
+
+    public String getCode() {
+        return code;
+    }
+}
+```
+
+Both extend `RuntimeException`, so methods do not need `throws` clauses. Now the handler, `common/ApiExceptionHandler.java`:
+
+```java
+package dev.paydeck.api.common;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ProblemDetail;
+import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+
+/**
+ * Turns exceptions into error responses in the standard "problem details"
+ * format (RFC 9457), so the app can always show a helpful message.
+ */
+@RestControllerAdvice
+public class ApiExceptionHandler {
+
+    @ExceptionHandler(NotFoundException.class)
+    ProblemDetail notFound(NotFoundException e) {
+        return problem(HttpStatus.NOT_FOUND, "Not found", e.getMessage());
+    }
+
+    @ExceptionHandler(BusinessRuleException.class)
+    ProblemDetail ruleBroken(BusinessRuleException e) {
+        ProblemDetail problem = problem(HttpStatus.UNPROCESSABLE_CONTENT, "Request not allowed", e.getMessage());
+        problem.setProperty("code", e.getCode());
+        return problem;
+    }
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    ProblemDetail invalidBody(MethodArgumentNotValidException e) {
+        Map<String, String> fields = new LinkedHashMap<>();
+        e.getBindingResult().getFieldErrors()
+                .forEach(error -> fields.putIfAbsent(error.getField(), error.getDefaultMessage()));
+        ProblemDetail problem = problem(HttpStatus.BAD_REQUEST, "Invalid request", "Some fields are not valid");
+        problem.setProperty("fields", fields);
+        return problem;
+    }
+
+    private static ProblemDetail problem(HttpStatus status, String title, String detail) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(status, detail);
+        problem.setTitle(title);
+        return problem;
+    }
+}
+```
+
+- `MethodArgumentNotValidException` is what `@Valid` throws. Its handler collects each failed field and its message into a map. `putIfAbsent` keeps the first message per field, and `LinkedHashMap` keeps the fields in order.
+- `HttpStatus.UNPROCESSABLE_CONTENT` is 422.
+
+Next, the rule. In `Card.java`, make `freeze` refuse a card that is not active, and import the exception:
+
+```java
+import dev.paydeck.api.common.BusinessRuleException;
+```
+
+```java
+public void freeze() {
+    if (status != CardStatus.ACTIVE) {
+        throw new BusinessRuleException("CARD_NOT_ACTIVE", "Only an active card can be frozen");
+    }
+    status = CardStatus.FROZEN;
+}
+```
+
+Finally, simplify the controller: instead of wrapping everything in `ResponseEntity.of(...)`, a helper finds the card or throws. Replace the `get`, `update` and `freeze` methods with these, and add the `find` helper at the end of the class:
+
+```java
+@GetMapping("/{id}")
+public CardResponse get(@PathVariable UUID id) {
+    return CardResponse.of(find(id));
+}
+
+@PatchMapping("/{id}")
+public CardResponse update(@PathVariable UUID id, @Valid @RequestBody UpdateCardRequest request) {
+    Card card = find(id);
+    if (request.nickname() != null) {
+        card.rename(request.nickname().strip());
+    }
+    if (Boolean.TRUE.equals(request.removeSpendingLimit())) {
+        card.setSpendingLimit(null);
+    } else if (request.spendingLimitCents() != null) {
+        card.setSpendingLimit(request.spendingLimitCents());
+    }
+    return CardResponse.of(card);
+}
+
+@PostMapping("/{id}/freeze")
+public CardResponse freeze(@PathVariable UUID id) {
+    Card card = find(id);
+    card.freeze();
+    return CardResponse.of(card);
+}
+
+private Card find(UUID id) {
+    return cards.findById(id).orElseThrow(() -> new NotFoundException("Card", id));
+}
+```
+
+and add `import dev.paydeck.api.common.NotFoundException;`. `orElseThrow` returns the card, or throws the exception the lambda makes. The methods now read like the story they tell: find the card, freeze it, return it. Every failure path is handled elsewhere.
+
+Restart and try every kind of error:
+
+```sh
+curl -i -X POST localhost:8080/api/cards -H 'Content-Type: application/json' -d '{"nickname": "  ", "spendingLimitCents": -5}'
+```
+
+```
+HTTP/1.1 400
+Content-Type: application/problem+json
+
+{"detail":"Some fields are not valid","instance":"/api/cards","status":400,"title":"Invalid request","fields":{"nickname":"must not be blank","spendingLimitCents":"must be greater than 0"}}
+```
+
+Both problems at once, by field name: the app can put each message under its own text box.
+
+```sh
+curl -i localhost:8080/api/cards/00000000-0000-0000-0000-000000000000
+```
+
+```
+HTTP/1.1 404
+Content-Type: application/problem+json
+
+{"detail":"Card 00000000-0000-0000-0000-000000000000 was not found","instance":"/api/cards/00000000-0000-0000-0000-000000000000","status":404,"title":"Not found"}
+```
+
+Issue a card, then freeze it twice:
+
+```
+HTTP/1.1 200
+{"id":"55d06f0f-e646-4819-8760-292871de235d","nickname":"Travel","last4":"5529","status":"FROZEN",...}
+
+HTTP/1.1 422
+Content-Type: application/problem+json
+
+{"detail":"Only an active card can be frozen","instance":"/api/cards/55d06f0f-e646-4819-8760-292871de235d/freeze","status":422,"title":"Request not allowed","code":"CARD_NOT_ACTIVE"}
+```
+
+Commit: `git add .` and `git commit -m "Validate requests and explain errors"`.
+
+## Try it
+
+<Exercise title="Try it: read the errors like the app will">
+Using `jq` from Module 19, write one curl command that tries to freeze the frozen card again and prints **only** the `code` field. Then one that sends an empty nickname in a `PATCH` and prints only the message for `nickname`.
+
+<Fragment slot="hint">`jq -r '.code'` prints a field without quotes. Fields inside fields are reached with dots: `.fields.nickname`. Use `curl -s` so curl's progress output does not get in the way.</Fragment>
+<Fragment slot="solution">
+
+```sh
+curl -s -X POST localhost:8080/api/cards/55d06f0f-e646-4819-8760-292871de235d/freeze | jq -r '.code'
+```
+
+```
+CARD_NOT_ACTIVE
+```
+
+```sh
+curl -s -X PATCH localhost:8080/api/cards/55d06f0f-e646-4819-8760-292871de235d \
+  -H 'Content-Type: application/json' -d '{"nickname": ""}' | jq -r '.fields.nickname'
+```
+
+```
+size must be between 1 and 50
+```
+
+In Part 7, the app does the same in TypeScript: it checks `code` to decide what to do, and shows `detail` or the field messages to the person.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Throwing a plain RuntimeException">
+An exception with no handler becomes `500 Internal Server Error`, which tells the app nothing and looks like a crash. Throw `NotFoundException` or `BusinessRuleException` (or add a handler for your new type).
+</Aside>
+
+<Aside type="caution" title="Putting rules in the controller">
+`if (card.getStatus() != ACTIVE)` in the controller protects that one endpoint only. In `Card.freeze()` it protects every path that freezes a card, including ones you write in a year.
+</Aside>
+
+<Aside type="caution" title="Leaking internals in error messages">
+Never put stack traces, SQL or other people's data in `detail`. Say what the caller did wrong and nothing more.
+</Aside>
+
+## Recap
+
+- Errors use the problem-details format: `status`, `title`, `detail`, `instance`, plus your own fields such as `code` or `fields`.
+- `400` for malformed input, `404` for missing things, `409` for clashes, `422` for broken business rules.
+- Domain classes throw exceptions; one `@RestControllerAdvice` turns them into responses for every controller.
+- A machine-readable `code` lets the app react; `detail` and `fields` give people a readable reason.
+
+<Quiz
+	questions={[
+		{
+			question: 'Freezing an already-frozen card should answer:',
+			options: ['400 Bad Request', '404 Not Found', '422 Unprocessable Content'],
+			answer: 2,
+			explanation: 'The request is well formed, but it breaks a business rule.',
+		},
+		{
+			question: 'Where should the rule "only an active card can be frozen" live?',
+			options: ['In the controller', 'In Card.freeze()', 'In the app'],
+			answer: 1,
+			explanation: 'In the domain class, it protects every code path.',
+		},
+		{
+			question: 'Why include "code": "CARD_NOT_ACTIVE" as well as a detail message?',
+			options: ['Codes are shorter', 'Code can check a fixed code reliably; messages are for people and may change', 'The standard requires it'],
+			answer: 1,
+			explanation: 'Apps should never parse English text to decide what to do.',
+		},
+	]}
+/>
+
+<MarkComplete />

@@ -1,0 +1,428 @@
+---
+title: "24.5 Idempotency keys"
+description: "Make top-ups and transfers safe to retry: the client sends a unique Idempotency-Key, and PayDeck answers a repeat with the original result instead of moving money twice."
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson every top-up and transfer requires an `Idempotency-Key` header, and sending the same request twice moves money only once.
+
+## Why it matters
+
+Ana taps "Send $50" on the train. The request reaches PayDeck and the money moves, but the tunnel swallows the answer. Her phone sees a timeout. Did it work? The app cannot know, so it does the sensible thing and tries again. Without protection, Ben gets $100. Networks fail like this every day, on every phone, and the answer is never "tell users not to retry". Stripe, PayPal and every bank API solve it the same way, and so will PayDeck.
+
+## The idea
+
+### Idempotent means "repeatable"
+
+An operation is **idempotent** when doing it twice has the same effect as doing it once. `GET` is (reading twice changes nothing), `PUT` and `DELETE` are meant to be (Module 19), but `POST /api/transfers` is not: each one moves money.
+
+To make it idempotent, the client gives each **intended** payment a unique name, an **idempotency key**, usually a fresh UUID, and sends it in a header:
+
+```
+Idempotency-Key: 7f3c9a12-5b8e-4d21-9f6a-2c4e8b1d0a37
+```
+
+A retry of the same payment sends the **same** key. PayDeck stores the key with the ledger transaction (that is what the `UNIQUE` `idempotency_key` column from lesson 24.2 is for). When a request arrives:
+
+- **New key:** do the work, store the key with it, answer `201 Created`.
+- **Known key, same request:** do nothing, and answer with the original transaction: `200 OK` with the header `Idempotent-Replayed: true`. The phone gets the answer it missed.
+- **Known key, different request:** a bug in the client, which reused a key. Refuse with `409 Conflict`.
+
+### The fingerprint
+
+To tell "same request" from "different request", PayDeck stores a **fingerprint** of each request: a **SHA-256 hash** of its type, accounts, amount and description. A hash turns any text into a fixed-length code (64 hex characters for SHA-256); the same text always gives the same code, and any change, even one cent, gives a completely different one. Comparing two fingerprints is comparing two requests.
+
+### Why locking comes first
+
+The check "have I seen this key?" is a check-then-act, just like the balance check in lesson 24.4. Two copies of one request arriving together could both find no key. That is why PayDeck locks the account **before** looking up the key: the copies queue up, and the second one finds the key the first one committed. And if two requests somehow still race (say, the same key sent for two *different* accounts, which lock different rows), the `UNIQUE` constraint in the database refuses the second insert as a last line of defence.
+
+## Worked example
+
+### The service
+
+Add a small record for "a transaction, and whether it was replayed", `money/MovementResult.java`:
+
+```java
+package dev.paydeck.api.money;
+
+import dev.paydeck.api.ledger.LedgerTransaction;
+
+/** A recorded movement of money, and whether it was recorded just now or by an earlier identical request. */
+public record MovementResult(LedgerTransaction transaction, boolean replayed) {
+}
+```
+
+A query for the key in `LedgerTransactionRepository`:
+
+```java
+Optional<LedgerTransaction> findByIdempotencyKey(String idempotencyKey);
+```
+
+and in `LedgerService` (with `import java.util.Optional;`):
+
+```java
+@Transactional(readOnly = true)
+public Optional<LedgerTransaction> findByIdempotencyKey(String idempotencyKey) {
+    return transactions.findByIdempotencyKey(idempotencyKey);
+}
+```
+
+A new exception, `common/IdempotencyConflictException.java`:
+
+```java
+package dev.paydeck.api.common;
+
+/** Thrown when an Idempotency-Key is reused for a different request. Becomes a 409. */
+public class IdempotencyConflictException extends RuntimeException {
+
+    public IdempotencyConflictException(String key) {
+        super("Idempotency-Key " + key + " was already used for a different request");
+    }
+}
+```
+
+Now the whole of `MoneyMovementService`. Both methods take the key, follow the same recipe, and return a `MovementResult`. The placeholders from lesson 24.2 are gone:
+
+```java
+package dev.paydeck.api.money;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+import dev.paydeck.api.account.Account;
+import dev.paydeck.api.account.AccountKind;
+import dev.paydeck.api.account.AccountRepository;
+import dev.paydeck.api.common.BusinessRuleException;
+import dev.paydeck.api.common.IdempotencyConflictException;
+import dev.paydeck.api.common.NotFoundException;
+import dev.paydeck.api.ledger.LedgerService;
+import dev.paydeck.api.ledger.LedgerTransaction;
+import dev.paydeck.api.ledger.Posting;
+import dev.paydeck.api.ledger.TransactionType;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+/**
+ * Tops up and transfers money. Each method follows the same recipe:
+ * lock the accounts, check the idempotency key, check the rules, then record
+ * one balanced ledger transaction. All of it happens in one database
+ * transaction, so it either happens completely or not at all.
+ */
+@Service
+public class MoneyMovementService {
+
+    private final AccountRepository accounts;
+    private final LedgerService ledger;
+
+    public MoneyMovementService(AccountRepository accounts, LedgerService ledger) {
+        this.accounts = accounts;
+        this.ledger = ledger;
+    }
+
+    @Transactional
+    public MovementResult topUp(UUID accountId, long amountCents, String description, String idempotencyKey) {
+        String fingerprint = fingerprint(TransactionType.TOP_UP, accountId, amountCents, description);
+        Account account = lockCustomerAccount(accountId);
+
+        Optional<MovementResult> replay = replay(idempotencyKey, fingerprint);
+        if (replay.isPresent()) {
+            return replay.get();
+        }
+
+        Account outsideWorld = accounts.findByKindAndCurrency(AccountKind.SYSTEM, account.getCurrency())
+                .orElseThrow(() -> new IllegalStateException("No system account for " + account.getCurrency()));
+        LedgerTransaction transaction = ledger.record(TransactionType.TOP_UP, description, idempotencyKey, fingerprint,
+                List.of(new Posting(outsideWorld.getId(), -amountCents), new Posting(account.getId(), amountCents)));
+        return new MovementResult(transaction, false);
+    }
+
+    @Transactional
+    public MovementResult transfer(UUID fromId, UUID toId, long amountCents, String description,
+                                   String idempotencyKey) {
+        if (fromId.equals(toId)) {
+            throw new BusinessRuleException("SAME_ACCOUNT", "You cannot transfer money to the same account");
+        }
+        String fingerprint = fingerprint(TransactionType.TRANSFER, fromId, toId, amountCents, description);
+
+        // Always lock in the same order. If two transfers between A and B run at
+        // once, in opposite directions, neither can end up waiting for the other forever.
+        boolean fromFirst = fromId.compareTo(toId) < 0;
+        Account first = lockCustomerAccount(fromFirst ? fromId : toId);
+        Account second = lockCustomerAccount(fromFirst ? toId : fromId);
+        Account from = fromFirst ? first : second;
+        Account to = fromFirst ? second : first;
+
+        Optional<MovementResult> replay = replay(idempotencyKey, fingerprint);
+        if (replay.isPresent()) {
+            return replay.get();
+        }
+
+        if (from.getCurrency() != to.getCurrency()) {
+            throw new BusinessRuleException("CURRENCY_MISMATCH",
+                    "Both accounts must use the same currency (" + from.getCurrency() + " and " + to.getCurrency() + ")");
+        }
+        if (ledger.balanceOf(from.getId()) < amountCents) {
+            throw new BusinessRuleException("INSUFFICIENT_FUNDS", "There is not enough money in the account");
+        }
+
+        LedgerTransaction transaction = ledger.record(TransactionType.TRANSFER, description, idempotencyKey,
+                fingerprint, List.of(new Posting(from.getId(), -amountCents), new Posting(to.getId(), amountCents)));
+        return new MovementResult(transaction, false);
+    }
+
+    private Account lockCustomerAccount(UUID id) {
+        return accounts.findByIdForUpdate(id)
+                .filter(account -> account.getKind() == AccountKind.CUSTOMER)
+                .orElseThrow(() -> new NotFoundException("Account", id));
+    }
+
+    /** If this key was used before, returns the earlier result, or refuses if the request was different. */
+    private Optional<MovementResult> replay(String idempotencyKey, String fingerprint) {
+        return ledger.findByIdempotencyKey(idempotencyKey).map(earlier -> {
+            if (!earlier.getRequestFingerprint().equals(fingerprint)) {
+                throw new IdempotencyConflictException(idempotencyKey);
+            }
+            return new MovementResult(earlier, true);
+        });
+    }
+
+    /** A short summary of the request, used to spot a key being reused for a different request. */
+    static String fingerprint(Object... parts) {
+        StringBuilder text = new StringBuilder();
+        for (Object part : parts) {
+            text.append(part).append('\u001f');
+        }
+        try {
+            byte[] hash = MessageDigest.getInstance("SHA-256").digest(text.toString().getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(hash);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+}
+```
+
+The order inside `transfer` matters, and is worth reading twice:
+
+1. **Lock**, so that copies of the same request queue up.
+2. **Replay check**, *before* the rules. A retry of a transfer that already happened must get the original answer, not `INSUFFICIENT_FUNDS` because the first copy spent the money.
+3. **Rules**, then **record**.
+
+In `fingerprint`, `Object... parts` accepts any number of values. They are joined with `'\u001f'`, an invisible "unit separator" character that nobody types, so `("ab", "c")` and `("a", "bc")` cannot produce the same text. `HexFormat` turns the 32 bytes of the hash into 64 hex characters, exactly the size of the `request_fingerprint` column.
+
+### The controller
+
+`MoneyController` reads the header with **`@RequestHeader`**, and validates it like a field. Replace the two endpoints and the `created` helper:
+
+```java
+@PostMapping("/api/accounts/{accountId}/top-ups")
+public ResponseEntity<TransactionResponse> topUp(
+        @PathVariable UUID accountId,
+        @RequestHeader("Idempotency-Key") @Size(min = 1, max = 100) String idempotencyKey,
+        @Valid @RequestBody TopUpRequest request) {
+    MovementResult result = money.topUp(accountId, request.amountCents(), request.description().strip(),
+            idempotencyKey);
+    return respond(result, request.amountCents());
+}
+
+@PostMapping("/api/transfers")
+public ResponseEntity<TransactionResponse> transfer(
+        @RequestHeader("Idempotency-Key") @Size(min = 1, max = 100) String idempotencyKey,
+        @Valid @RequestBody TransferRequest request) {
+    MovementResult result = money.transfer(request.fromAccountId(), request.toAccountId(),
+            request.amountCents(), request.description().strip(), idempotencyKey);
+    return respond(result, request.amountCents());
+}
+
+/** A repeated request gets the original answer with 200 instead of 201, and a header saying so. */
+private static ResponseEntity<TransactionResponse> respond(MovementResult result, long amountCents) {
+    LedgerTransaction transaction = result.transaction();
+    TransactionResponse body = new TransactionResponse(transaction.getId(), transaction.getType(),
+            transaction.getDescription(), amountCents, transaction.getCreatedAt());
+    return ResponseEntity.status(result.replayed() ? HttpStatus.OK : HttpStatus.CREATED)
+            .header("Idempotent-Replayed", String.valueOf(result.replayed()))
+            .body(body);
+}
+```
+
+Add `import org.springframework.web.bind.annotation.RequestHeader;`. The `100` matches the column's `VARCHAR(100)`.
+
+### The error handler
+
+Four new kinds of error need a clear answer. Add these to `ApiExceptionHandler`, with their imports (`org.springframework.dao.DataIntegrityViolationException`, `org.springframework.validation.method.ParameterErrors`, `org.springframework.web.bind.MissingRequestHeaderException` and `org.springframework.web.method.annotation.HandlerMethodValidationException`):
+
+```java
+@ExceptionHandler(IdempotencyConflictException.class)
+ProblemDetail idempotencyConflict(IdempotencyConflictException e) {
+    return problem(HttpStatus.CONFLICT, "Idempotency key reused", e.getMessage());
+}
+
+/** Two requests raced to do the same thing, for example both using one Idempotency-Key. */
+@ExceptionHandler(DataIntegrityViolationException.class)
+ProblemDetail conflict(DataIntegrityViolationException e) {
+    return problem(HttpStatus.CONFLICT, "Conflict",
+            "Another request changed the same data at the same time. Please try again.");
+}
+
+@ExceptionHandler(MissingRequestHeaderException.class)
+ProblemDetail missingHeader(MissingRequestHeaderException e) {
+    return problem(HttpStatus.BAD_REQUEST, "Missing header",
+            "The " + e.getHeaderName() + " header is required");
+}
+```
+
+and, after `invalidBody`:
+
+```java
+/** Same as above, for controllers that also validate headers or path variables. */
+@ExceptionHandler(HandlerMethodValidationException.class)
+ProblemDetail invalidParameters(HandlerMethodValidationException e) {
+    Map<String, String> fields = new LinkedHashMap<>();
+    e.getParameterValidationResults().forEach(result -> {
+        if (result instanceof ParameterErrors errors) {
+            errors.getFieldErrors()
+                    .forEach(error -> fields.putIfAbsent(error.getField(), error.getDefaultMessage()));
+        } else {
+            result.getResolvableErrors().forEach(error -> fields.putIfAbsent(
+                    result.getMethodParameter().getParameterName(), error.getDefaultMessage()));
+        }
+    });
+    ProblemDetail problem = problem(HttpStatus.BAD_REQUEST, "Invalid request", "Some fields are not valid");
+    problem.setProperty("fields", fields);
+    return problem;
+}
+```
+
+Why a second validation handler? `@Valid @RequestBody` errors arrive as `MethodArgumentNotValidException`, as before. But once a method also has a constraint *directly on a parameter*, like `@Size` on the header, Spring validates the whole method call at once, and reports problems as `HandlerMethodValidationException`, which lists results per parameter. `instanceof ParameterErrors errors` is Java's **pattern matching**: "if `result` is a `ParameterErrors`, call it `errors`". Body fields come out by field name, the header by parameter name, in the same `fields` shape the app already understands.
+
+### Run it
+
+Restart, and top up with a key:
+
+```sh
+curl -i -X POST localhost:8080/api/accounts/4e5831ca-61d5-45e7-b451-5726d7b68095/top-ups \
+  -H 'Content-Type: application/json' -H 'Idempotency-Key: 7f3c9a12-5b8e-4d21-9f6a-2c4e8b1d0a37' \
+  -d '{"amountCents": 2000, "description": "Top-up from card"}'
+```
+
+```
+HTTP/1.1 201
+Idempotent-Replayed: false
+
+{"id":"a6aa0d11-505f-4417-a73a-5196f7d4c645","type":"TOP_UP","description":"Top-up from card","amountCents":2000,"createdAt":"2026-10-22T00:17:58.644718382Z"}
+```
+
+Run **exactly the same command** again:
+
+```
+HTTP/1.1 200
+Idempotent-Replayed: true
+
+{"id":"a6aa0d11-505f-4417-a73a-5196f7d4c645","type":"TOP_UP","description":"Top-up from card","amountCents":2000,"createdAt":"2026-10-22T00:17:58.644718Z"}
+```
+
+The same transaction ID, and the balance went up by $20.00 only once. Change the amount to `3000` but keep the key:
+
+```
+HTTP/1.1 409
+{"detail":"Idempotency-Key 7f3c9a12-5b8e-4d21-9f6a-2c4e8b1d0a37 was already used for a different request","instance":"/api/accounts/4e5831ca-61d5-45e7-b451-5726d7b68095/top-ups","status":409,"title":"Idempotency key reused"}
+```
+
+Leave the header out, send it empty (`-H 'Idempotency-Key;'` is curl's way), or make it 101 characters long:
+
+```
+{"detail":"The Idempotency-Key header is required","instance":"/api/accounts/4e5831ca-61d5-45e7-b451-5726d7b68095/top-ups","status":400,"title":"Missing header"}
+{"detail":"Some fields are not valid","instance":"/api/accounts/4e5831ca-61d5-45e7-b451-5726d7b68095/top-ups","status":400,"title":"Invalid request","fields":{"idempotencyKey":"size must be between 1 and 100"}}
+{"detail":"Some fields are not valid","instance":"/api/accounts/4e5831ca-61d5-45e7-b451-5726d7b68095/top-ups","status":400,"title":"Invalid request","fields":{"idempotencyKey":"size must be between 1 and 100"}}
+```
+
+Update `scripts/race.sh` so each of its transfers has its own key: add `-H "Idempotency-Key: race-$$-{}"` to the `curl` (`$$` is the script's process number, different on every run, and `{}` the request number). The races from lesson 24.4 then behave exactly as before.
+
+## Try it
+
+<Exercise title="Try it: the impatient customer">
+Simulate a customer tapping "Top up $10.00" ten times in a row so fast that all ten requests arrive together, all carrying the same key (the app makes one key per tap of the *intent*, not per request). Write a one-line command with `seq` and `xargs -P` like `race.sh`, and count the status codes. Check the balance before and after.
+
+<Fragment slot="hint">Make one key first, outside the command: `K=$(uuidgen)`. Then use `"Idempotency-Key: $K"` in every `curl`.</Fragment>
+<Fragment slot="solution">
+
+```sh
+K=$(uuidgen)
+seq 10 | xargs -P 10 -I{} curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+  localhost:8080/api/accounts/4e5831ca-61d5-45e7-b451-5726d7b68095/top-ups \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $K" \
+  -d '{"amountCents": 1000, "description": "Tapped ten times"}' | sort | uniq -c
+```
+
+```
+   9 200
+   1 201
+```
+
+The balance went from `7050` to `8050`: one top-up of $10.00. One request did the work; the lock made the other nine wait, and each then found the key and replayed the result. Without the lock-before-check order, several could have slipped through the check together, and the `UNIQUE` constraint would have turned the losers into `409 Conflict`. That case does happen when the same key is sent for two *different* accounts at once (they lock different rows), and you can see it:
+
+```
+{"detail":"Another request changed the same data at the same time. Please try again.","instance":"/api/accounts/b351c0cd-9a21-4b1b-bc31-f89bc7d35fdd/top-ups","status":409,"title":"Conflict"}
+```
+
+No money moves twice in either case.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="A new key for each retry">
+Then every retry is a "new" payment, and the protection is gone. The key belongs to the customer's *intention* ("send Ben $50 now"): make it when they tap the button, and reuse it for every retry of that tap.
+</Aside>
+
+<Aside type="caution" title="Checking the rules before the key">
+A retry of a transfer that already spent the money would then fail with `INSUFFICIENT_FUNDS`, and the app would tell the customer their payment failed when it actually worked.
+</Aside>
+
+<Aside type="caution" title="Trusting the key alone">
+Without the fingerprint, a client bug that reused a key for a different payment would silently get the *old* payment back and think the new one happened. The `409` makes that bug loud.
+</Aside>
+
+## Recap
+
+- Networks fail after the work is done, so clients must be able to retry safely.
+- The client sends a unique `Idempotency-Key` per intended payment, and the same key on every retry.
+- PayDeck stores the key and a SHA-256 fingerprint of the request with the ledger transaction.
+- Repeat with the same request: the original answer, `200` and `Idempotent-Replayed: true`. Same key, different request: `409`.
+- Lock first, then check the key, then the rules. A `UNIQUE` constraint backs it all up.
+
+<Quiz
+	questions={[
+		{
+			question: 'A transfer succeeded but the phone never got the answer. It retries with the same key. What does PayDeck do?',
+			options: ['Moves the money again', 'Returns the original transaction with 200 and Idempotent-Replayed: true', 'Returns 409'],
+			answer: 1,
+			explanation: 'Same key, same fingerprint: a replay. The phone finally gets its answer.',
+		},
+		{
+			question: 'Why does transfer check the idempotency key before checking the balance?',
+			options: ['It is faster', 'A retry of a transfer that already happened would otherwise fail with INSUFFICIENT_FUNDS', 'The order does not matter'],
+			answer: 1,
+			explanation: 'The first copy may have spent the money, so the retry must be recognised before the rules run.',
+		},
+		{
+			question: 'What is the request fingerprint for?',
+			options: ['Encrypting the request', 'Spotting the same key being reused for a different request', 'Identifying the user'],
+			answer: 1,
+			explanation: 'Equal fingerprints mean identical requests; different ones mean a client bug, answered with 409.',
+		},
+	]}
+/>
+
+<MarkComplete />

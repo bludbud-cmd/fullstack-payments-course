@@ -1,0 +1,318 @@
+---
+title: "21.3 Dependency injection"
+description: "Let Spring create your objects and hand them to each other: beans, @Component, constructor injection and @Bean methods, and why this makes code easy to test."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can split work into small classes, let Spring create them and pass them to each other, and test a class by handing it pretend versions of what it needs.
+
+## Why it matters
+
+The PayDeck API will have dozens of classes that need each other: the card controller needs the card database code, the transfer service needs the ledger, nearly everything needs the current time. If every class created its own helpers with `new`, they would be welded together: you could never swap the real database for a test one, or the real clock for one stuck at 9 a.m. **Dependency injection** is how Spring solves this, and it is the single most important idea in Spring.
+
+## The idea
+
+A **dependency** is an object a class needs to do its job. **Injecting** it means the class does not create it; something else hands it over, usually through the constructor:
+
+```java
+// The class creates its own helper: welded together
+public class CardPreviewController {
+    private final Last4Generator generator = new Last4Generator();
+}
+
+// The helper is handed in: injected
+public class CardPreviewController {
+    private final Last4Generator generator;
+
+    public CardPreviewController(Last4Generator generator) {
+        this.generator = generator;
+    }
+}
+```
+
+In a Spring app, the something else is Spring itself:
+
+- Objects that Spring creates and manages are called **beans**. Spring keeps them all in the **application context**.
+- `@Component` on a class means "make one bean of this class". `@RestController` and `@Service` are special kinds of `@Component`.
+- When Spring creates a bean whose constructor has parameters, it looks in the context for beans of those types and passes them in. That is **constructor injection**.
+- Each bean is created **once** and shared by everyone who needs it. That is why beans should not keep changing data in their fields.
+
+For classes you did not write, such as Java's `Clock`, you cannot add `@Component`. Instead you write a method that creates the object, mark it `@Bean`, and put it in a class marked `@Configuration`.
+
+## Worked example
+
+PayDeck will need to make up the last four digits for each new card. Create the package `card` (a folder `src/main/java/dev/paydeck/api/card`) and in it `Last4Generator.java`:
+
+```java
+package dev.paydeck.api.card;
+
+import java.security.SecureRandom;
+
+import org.springframework.stereotype.Component;
+
+/** Makes up the last four digits for a new virtual card. */
+@Component
+public class Last4Generator {
+
+    private final SecureRandom random = new SecureRandom();
+
+    public String next() {
+        return String.format("%04d", random.nextInt(10_000));
+    }
+}
+```
+
+`SecureRandom` is a random number generator that cannot be predicted, which matters for anything to do with cards. `%04d` pads the number to four digits, so 42 becomes `0042`.
+
+Now a clock. Create the package `common` and in it `ClockConfig.java`:
+
+```java
+package dev.paydeck.api.common;
+
+import java.time.Clock;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class ClockConfig {
+
+    @Bean
+    public Clock clock() {
+        return Clock.systemUTC();
+    }
+}
+```
+
+A `Clock` tells the time. `Instant.now()` asks the computer directly; `clock.instant()` asks whichever clock you were given, which is what makes time testable. PayDeck stores all times in UTC (the time zone with no offset) and lets the app show them in local time.
+
+Finally, a controller that uses both, in `card/CardPreviewController.java`:
+
+```java
+package dev.paydeck.api.card;
+
+import java.time.Clock;
+import java.time.Instant;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class CardPreviewController {
+
+    public record CardPreview(String nickname, String last4, Instant createdAt) {
+    }
+
+    private final Last4Generator last4Generator;
+    private final Clock clock;
+
+    public CardPreviewController(Last4Generator last4Generator, Clock clock) {
+        this.last4Generator = last4Generator;
+        this.clock = clock;
+    }
+
+    @GetMapping("/api/cards/preview")
+    public CardPreview preview() {
+        return new CardPreview("New card", last4Generator.next(), clock.instant());
+    }
+}
+```
+
+Returning a record makes Spring answer with JSON: each record component becomes a field. Restart and try it twice:
+
+```sh
+curl localhost:8080/api/cards/preview
+```
+
+```
+{"nickname":"New card","last4":"9986","createdAt":"2026-10-21T23:26:58.352883045Z"}
+{"nickname":"New card","last4":"3267","createdAt":"2026-10-21T23:26:58.453723208Z"}
+```
+
+Nowhere did you write `new Last4Generator()` or `new CardPreviewController(...)`. At start-up Spring saw that `CardPreviewController` needs a `Last4Generator` and a `Clock`, found one bean of each, and passed them in.
+
+### What happens when a bean is missing
+
+Delete the `@Component` line from `Last4Generator` and restart:
+
+```
+***************************
+APPLICATION FAILED TO START
+***************************
+
+Description:
+
+Parameter 0 of constructor in dev.paydeck.api.card.CardPreviewController required a bean of type 'dev.paydeck.api.card.Last4Generator' that could not be found.
+
+
+Action:
+
+Consider defining a bean of type 'dev.paydeck.api.card.Last4Generator' in your configuration.
+```
+
+Spring checks every dependency at start-up, so a missing one stops the app immediately with a clear message, instead of failing later in front of a user. Parameter 0 is the first constructor parameter. Put `@Component` back.
+
+### Why this is worth it: testing
+
+Because the controller is handed its dependencies, a test can hand it different ones. Create `src/test/java/dev/paydeck/api/card/CardPreviewControllerTest.java`:
+
+```java
+package dev.paydeck.api.card;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+
+import org.junit.jupiter.api.Test;
+
+class CardPreviewControllerTest {
+
+    @Test
+    void previewUsesTheGeneratorAndTheClock() {
+        Instant noon = Instant.parse("2026-10-21T12:00:00Z");
+        Last4Generator alwaysSame = new Last4Generator() {
+            @Override
+            public String next() {
+                return "1234";
+            }
+        };
+        var controller = new CardPreviewController(alwaysSame, Clock.fixed(noon, ZoneOffset.UTC));
+
+        var preview = controller.preview();
+
+        assertThat(preview.last4()).isEqualTo("1234");
+        assertThat(preview.createdAt()).isEqualTo(noon);
+    }
+}
+```
+
+- `new Last4Generator() { ... }` is an **anonymous class**: a one-off subclass, made on the spot, whose `next()` always returns `"1234"`. A stand-in like this is called a **fake**.
+- `Clock.fixed(...)` is a clock that is always noon.
+- `var` lets Java work out a local variable's type for you.
+
+This is a plain JUnit test: no Spring, no web server, so it runs in milliseconds. Run `./mvnw test`:
+
+```
+[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
+## Try it
+
+<Exercise title="Try it: a greeting that knows the time">
+Change `HelloController` so it answers `Good morning from PayDeck` before 12:00 UTC and `Good afternoon from PayDeck` from 12:00 on. Inject the `Clock`; do not call `LocalTime.now()` without it. Then write `HelloControllerTest` with two tests, one at 09:00 and one at 12:00, using fixed clocks.
+
+<Fragment slot="hint">`LocalTime.now(clock)` gives the time of day on that clock, and `.getHour()` gives the hour from 0 to 23.</Fragment>
+<Fragment slot="solution">
+
+```java
+package dev.paydeck.api;
+
+import java.time.Clock;
+import java.time.LocalTime;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class HelloController {
+
+    private final Clock clock;
+
+    public HelloController(Clock clock) {
+        this.clock = clock;
+    }
+
+    @GetMapping("/hello")
+    public String hello() {
+        LocalTime now = LocalTime.now(clock);
+        String partOfDay = now.getHour() < 12 ? "morning" : "afternoon";
+        return "Good " + partOfDay + " from PayDeck";
+    }
+}
+```
+
+```java
+package dev.paydeck.api;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+
+import org.junit.jupiter.api.Test;
+
+class HelloControllerTest {
+
+    @Test
+    void saysGoodMorningBeforeNoon() {
+        Clock nineAm = Clock.fixed(Instant.parse("2026-10-21T09:00:00Z"), ZoneOffset.UTC);
+        assertThat(new HelloController(nineAm).hello()).isEqualTo("Good morning from PayDeck");
+    }
+
+    @Test
+    void saysGoodAfternoonFromNoon() {
+        Clock noon = Clock.fixed(Instant.parse("2026-10-21T12:00:00Z"), ZoneOffset.UTC);
+        assertThat(new HelloController(noon).hello()).isEqualTo("Good afternoon from PayDeck");
+    }
+}
+```
+
+Without the injected clock, the test's answer would depend on when you ran it: a test that passes in the morning and fails in the afternoon. The 12:00 test checks the exact edge, where mistakes like `<=` hide.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="required a bean of type '...' that could not be found">
+The class is missing `@Component` (or `@Service`, `@RestController`), or it is outside the `dev.paydeck.api` packages, or, for a class you did not write, nobody declared a `@Bean` for it.
+</Aside>
+
+<Aside type="caution" title="Creating beans with new">
+`new CardPreviewController(...)` in your own main code makes a second object that Spring knows nothing about. Let Spring create beans; use `new` for them only in tests.
+</Aside>
+
+<Aside type="caution" title="Changing data in a bean's fields">
+There is only one of each bean, shared by every request, and requests run at the same time. A field like `private int count;` that requests change will be changed by many at once. Keep beans' fields `final` and store changing data in a database.
+</Aside>
+
+## Recap
+
+- A bean is an object Spring creates once and keeps in the application context.
+- `@Component` (and `@Service`, `@RestController`) make a bean from your class; a `@Bean` method in a `@Configuration` class makes one from anything.
+- Spring passes beans into constructors: constructor injection. Missing ones stop the app at start-up.
+- Injected dependencies can be replaced by fakes in tests, such as `Clock.fixed`.
+
+<Quiz
+	questions={[
+		{
+			question: 'What is a bean?',
+			options: ['Any Java object', 'An object Spring creates and manages', 'A Maven dependency'],
+			answer: 1,
+			explanation: 'Spring creates beans at start-up and passes them to each other.',
+		},
+		{
+			question: 'How do you make a bean from java.time.Clock, a class you cannot edit?',
+			options: ['Add @Component to it', 'Write a @Bean method that returns one, in a @Configuration class', 'Call new Clock() in the controller'],
+			answer: 1,
+			explanation: '@Bean methods are for objects you create yourself.',
+		},
+		{
+			question: 'Why inject a Clock instead of calling Instant.now() directly?',
+			options: ['It is faster', 'Tests can pass in a fixed clock and get the same result every time', 'Instant.now() is deprecated'],
+			answer: 1,
+			explanation: 'Injected dependencies can be swapped for fakes.',
+		},
+	]}
+/>
+
+<MarkComplete />

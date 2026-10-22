@@ -1,0 +1,215 @@
+---
+title: "24.1 Exact amounts with BigDecimal and cents"
+description: "See why double loses money, how BigDecimal and whole cents keep amounts exact, and why PayDeck stores every amount as a long number of cents."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can explain why money is never a `double`, use `BigDecimal` when you need decimals, and work with amounts as whole cents in a `long`, the way PayDeck does.
+
+## Why it matters
+
+This module makes PayDeck move real money between accounts. A payment app that is wrong by one cent is a broken payment app: customers notice, accountants notice, and regulators notice. Every one of those cents starts with how a number is stored.
+
+## The idea
+
+### double cannot count money
+
+You met this in Module 4: computers store `double` numbers in binary, and most decimal fractions, such as 0.1, have no exact binary form, just as ⅓ has no exact decimal form (0.333...). Each value is very slightly off, and the errors add up.
+
+Java has a quick way to try things out: **jshell**. Type `jshell` in the terminal and you can enter Java one line at a time and see each result. Type `/exit` to leave.
+
+```
+jshell> 0.1 + 0.2
+$1 ==> 0.30000000000000004
+
+jshell> double total = 0
+jshell> for (int i = 0; i < 10; i++) total += 0.10;
+jshell> total
+total ==> 0.9999999999999999
+
+jshell> total == 1.0
+$5 ==> false
+```
+
+Ten payments of 10 cents should make one dollar. With `double`, they do not.
+
+### Option 1: BigDecimal
+
+**`BigDecimal`** is Java's exact decimal number. It stores digits, not binary fractions, so `0.1` really is 0.1:
+
+```
+jshell> new BigDecimal("0.1").add(new BigDecimal("0.2"))
+$6 ==> 0.3
+```
+
+Two things to know about it:
+
+- **Create it from a string**, never from a `double`. A `double` is already wrong before `BigDecimal` sees it:
+
+  ```
+  jshell> new BigDecimal(0.1)
+  $7 ==> 0.1000000000000000055511151231257827021181583404541015625
+  ```
+
+- **Division needs a decision.** 10.00 ÷ 3 has no exact answer, so `BigDecimal` refuses until you say how many decimal places to keep and how to round:
+
+  ```
+  jshell> new BigDecimal("10.00").divide(new BigDecimal("3"))
+  |  Exception java.lang.ArithmeticException: Non-terminating decimal expansion; no exact representable decimal result.
+
+  jshell> new BigDecimal("10.00").divide(new BigDecimal("3"), 2, RoundingMode.HALF_EVEN)
+  $9 ==> 3.33
+  ```
+
+  `HALF_EVEN` (also called banker's rounding) rounds a 5 towards the even digit, so rounding errors balance out over many amounts instead of always going up.
+
+`BigDecimal` is the right tool for calculating with fractions of a cent, such as interest rates, fees of 2.9% or currency conversion. Its methods (`add`, `multiply`) are wordier than `+` and `*`, and it has one more trap: `equals` also compares the number of decimal places, so `2.50` and `2.5` are not "equal". Use `compareTo`:
+
+```
+jshell> new BigDecimal("2.50").equals(new BigDecimal("2.5"))
+$10 ==> false
+
+jshell> new BigDecimal("2.50").compareTo(new BigDecimal("2.5"))
+$11 ==> 0
+```
+
+### Option 2: whole cents
+
+The other way is to never have a fraction at all. $19.99 is **1999 cents**, a whole number. Whole numbers are exact in a computer, and `+`, `-` and `<` just work:
+
+```
+jshell> long price = 1999
+jshell> price * 3
+$13 ==> 5997
+```
+
+To show cents as an amount, `BigDecimal.valueOf(cents, 2)` puts the decimal point back two places from the right:
+
+```
+jshell> BigDecimal.valueOf(price * 3, 2)
+$14 ==> 59.97
+```
+
+A `long` holds up to 9,223,372,036,854,775,807 cents, about 92 quadrillion dollars, which is enough for any account. But if you ever went past it, Java would quietly wrap around to a huge negative number. `Math.addExact` throws instead:
+
+```
+jshell> Long.MAX_VALUE + 1
+$16 ==> -9223372036854775808
+
+jshell> Math.addExact(Long.MAX_VALUE, 1L)
+|  Exception java.lang.ArithmeticException: long overflow
+```
+
+### PayDeck's choice
+
+PayDeck stores and sends **every amount as a `long` number of cents** (in the smallest unit of the currency): in Java, in JSON (`"amountCents": 1999`), and in PostgreSQL (`BIGINT`). That is also what card networks and Stripe (Module 31) use. PayDeck only moves whole amounts, so it never needs fractions of a cent; the app turns cents into "$19.99" for display only, as your `formatMoney` function did in Module 6.
+
+Not every currency has 100 small units. Java knows each currency's decimal places:
+
+```
+jshell> Currency.getInstance("USD").getDefaultFractionDigits()
+$18 ==> 2
+jshell> Currency.getInstance("INR").getDefaultFractionDigits()
+$19 ==> 2
+jshell> Currency.getInstance("JPY").getDefaultFractionDigits()
+$20 ==> 0
+jshell> Currency.getInstance("BHD").getDefaultFractionDigits()
+$21 ==> 3
+```
+
+PayDeck's four currencies (USD, EUR, GBP and INR) all have two, so "cents" (and pence and paise) always means hundredths. That is one reason `SupportedCurrency` is a short, fixed list rather than every currency in the world.
+
+When a person types an amount, such as `19.99` in the app, turn it into cents exactly once, at the edge, and refuse anything with more than two decimal places:
+
+```
+jshell> new BigDecimal("19.99").movePointRight(2).longValueExact()
+$22 ==> 1999
+
+jshell> new BigDecimal("19.999").movePointRight(2).longValueExact()
+|  Exception java.lang.ArithmeticException: Rounding necessary
+```
+
+## Worked example
+
+Look at what you already have. `Card` stores `Long spendingLimitCents`, `IssueCardRequest` validates it with `@Positive` and `@Max(10_000_000)`, and the `cards` table has `spending_limit_cents BIGINT`. So a limit of $1,000.00 travels as `100000` everywhere, and `@Max(10_000_000)` means "at most $100,000.00". Nothing changes in the code in this lesson; from now on, every amount you add follows the same pattern:
+
+| Where | Type | Example for $25.50 |
+| --- | --- | --- |
+| Java field or variable | `long amountCents` | `2550` |
+| JSON | number, name ending in `Cents` | `"amountCents": 2550` |
+| PostgreSQL | `BIGINT amount_cents` | `2550` |
+| Screen | text, made only for display | `$25.50` |
+
+The `Cents` at the end of every name is deliberate: nobody can mistake `2550` for $2,550.
+
+## Try it
+
+<Exercise title="Try it: split a bill">
+Three friends split a $10.00 bill through PayDeck. Working in cents in jshell, work out what each person pays so that the three amounts add up to exactly 1000 cents. Then try the same with `double` and `10.00 / 3`, and add the three results back together.
+
+<Fragment slot="hint">`1000 / 3` with whole numbers drops the remainder, and `1000 % 3` is the remainder. Someone has to pay the leftover cent.</Fragment>
+<Fragment slot="solution">
+
+```
+jshell> 1000 / 3
+$24 ==> 333
+
+jshell> 1000 % 3
+$25 ==> 1
+```
+
+Two people pay 333 cents and one pays 334: 333 + 333 + 334 = 1000. With whole cents you are forced to decide who pays the extra cent, which is exactly the decision a real app has to make (most give it to the first or last person). With `double`, `10.00 / 3` is `3.3333333333333335`, and three of them add up to `10.0` only by luck of rounding; you have no cent-level control at all, and printing `$3.3333333333333335` is not an option.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Using double or float for an amount">
+Even once. A `double` in one method spreads errors to everything that uses its result. Search your code for `double` near the word "amount" or "balance".
+</Aside>
+
+<Aside type="caution" title="new BigDecimal(0.1)">
+Creates the inaccurate binary value. Use `new BigDecimal("0.1")` or `BigDecimal.valueOf(cents, 2)`.
+</Aside>
+
+<Aside type="caution" title="Mixing dollars and cents">
+A field called `amount` invites someone to send `25.50`. Name every amount `...Cents` and keep it a whole number.
+</Aside>
+
+## Recap
+
+- `double` cannot store most decimal amounts exactly, and the errors add up.
+- `BigDecimal` is exact: create it from strings, give division a scale and rounding mode, compare with `compareTo`.
+- PayDeck stores every amount as a `long` number of cents (the currency's smallest unit), in Java, JSON and SQL.
+- Convert to "$19.99" only for display, and from typed text only once, refusing extra decimals.
+
+<Quiz
+	questions={[
+		{
+			question: 'How does PayDeck store $12.30?',
+			options: ['12.3 as a double', '1230 as a long', '"12.30" as a String'],
+			answer: 1,
+			explanation: 'Whole cents are exact, and + and < work on them directly.',
+		},
+		{
+			question: 'What is wrong with new BigDecimal(0.1)?',
+			options: ['Nothing', 'The double 0.1 is already inexact, so the BigDecimal is too', 'BigDecimal cannot hold decimals'],
+			answer: 1,
+			explanation: 'Use new BigDecimal("0.1"), from a string.',
+		},
+		{
+			question: 'Why does PayDeck support only currencies with two decimal places?',
+			options: ['Stripe requires it', 'So "cents" always means hundredths everywhere in the code', 'PostgreSQL cannot store others'],
+			answer: 1,
+			explanation: 'JPY has no minor unit and BHD has three, so supporting them would mean handling the number of places per currency.',
+		},
+	]}
+/>
+
+<MarkComplete />

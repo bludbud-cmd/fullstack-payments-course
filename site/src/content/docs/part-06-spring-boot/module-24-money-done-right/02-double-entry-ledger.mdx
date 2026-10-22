@@ -1,0 +1,681 @@
+---
+title: "24.2 A double-entry ledger"
+description: "Record every movement of money as entries that add up to zero, work out balances from those entries, and build PayDeck's first money feature: top-ups."
+sidebar:
+  order: 2
+---
+
+import { Aside, FileTree } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson PayDeck records money in a double-entry ledger, works out each account's balance from it, and lets you top up an account through the API.
+
+## Why it matters
+
+The obvious way to store a balance is a `balance_cents` column that you add to and subtract from. It works until the day a customer asks "why is my balance $12 lower than I expected?" and all you have is a number. It also lets a single bug create money from nothing, and nobody would notice. Banks solved this more than 500 years ago with **double-entry bookkeeping**, and every serious payment system still uses it.
+
+## The idea
+
+### Entries, not balances
+
+You saw the idea in Module 1: instead of storing a balance, store every change, and add them up. PayDeck has two tables:
+
+- **`ledger_transactions`**: one row per movement of money ("Ana topped up $50.00").
+- **`ledger_entries`**: the lines of each transaction. Each entry says "this account, plus or minus this many cents".
+
+An account's balance is the sum of its entries. It is never stored, so it can never disagree with the history.
+
+### Double entry
+
+The rule that makes it *double* entry: **the entries of every transaction add up to zero.** Money is never created or destroyed; it only moves. If Ana sends Ben $10:
+
+| Account | Amount (cents) |
+| --- | --- |
+| Ana | −1000 |
+| Ben | +1000 |
+| **Total** | **0** |
+
+But when Ana tops up her account from her bank card, where does the money come from? From outside PayDeck. That is what the four `SYSTEM` accounts from lesson 23.4 are for. A top-up of $50.00:
+
+| Account | Amount (cents) |
+| --- | --- |
+| Outside world (USD) | −5000 |
+| Ana | +5000 |
+| **Total** | **0** |
+
+The "Outside world" account goes negative, and its balance is always minus the total of money that has come into PayDeck. Add up **every entry in the whole ledger** and you always get 0. If you ever do not, there is a bug, and you know immediately.
+
+## Worked example
+
+### The tables
+
+Create `src/main/resources/db/migration/V2__create_ledger.sql`:
+
+```sql
+-- Every movement of money is one ledger transaction made of two or more
+-- entries whose amounts add up to zero (double-entry bookkeeping).
+-- A balance is never stored: it is the sum of an account's entries.
+CREATE TABLE ledger_transactions (
+    id                   UUID PRIMARY KEY,
+    type                 VARCHAR(20)  NOT NULL CHECK (type IN ('TOP_UP', 'TRANSFER')),
+    description          VARCHAR(140) NOT NULL,
+    -- The same Idempotency-Key always means the same request, so a retry
+    -- can never move money twice.
+    idempotency_key      VARCHAR(100) NOT NULL UNIQUE,
+    request_fingerprint  VARCHAR(64)  NOT NULL,
+    created_at           TIMESTAMPTZ  NOT NULL
+);
+
+CREATE TABLE ledger_entries (
+    id              UUID PRIMARY KEY,
+    transaction_id  UUID    NOT NULL REFERENCES ledger_transactions (id),
+    account_id      UUID    NOT NULL REFERENCES accounts (id),
+    amount_cents    BIGINT  NOT NULL CHECK (amount_cents <> 0)
+);
+
+CREATE INDEX ledger_entries_account_id ON ledger_entries (account_id);
+CREATE INDEX ledger_entries_transaction_id ON ledger_entries (transaction_id);
+```
+
+`idempotency_key` and `request_fingerprint` stop a payment from happening twice when a phone retries a request. Lesson 24.5 explains them; they are here now because a migration, once applied, never changes. `<>` means "not equal": an entry of 0 cents is meaningless.
+
+Notice what is **not** there: no `UPDATE` will ever touch these tables. A ledger only grows. To undo a payment, you add a new transaction that moves the money back, so the history shows both.
+
+### The Java side
+
+Everything goes in a new `ledger` package:
+
+<FileTree>
+- src/main/java/dev/paydeck/api
+  - account/
+  - card/
+  - common/
+  - ledger
+    - LedgerEntry.java
+    - LedgerEntryRepository.java
+    - LedgerService.java
+    - LedgerTransaction.java
+    - LedgerTransactionRepository.java
+    - Posting.java
+    - TransactionType.java
+  - money/
+</FileTree>
+
+`TransactionType.java`:
+
+```java
+package dev.paydeck.api.ledger;
+
+public enum TransactionType {
+    /** Money comes in from outside PayDeck, for example from a card. */
+    TOP_UP,
+    /** Money moves from one PayDeck account to another. */
+    TRANSFER
+}
+```
+
+`Posting.java`, a small record for "this much to that account", used when asking the ledger to record something:
+
+```java
+package dev.paydeck.api.ledger;
+
+import java.util.UUID;
+
+/** A request to add {@code amountCents} (negative to take money away) to one account. */
+public record Posting(UUID accountId, long amountCents) {
+}
+```
+
+`LedgerTransaction.java`. It owns its entries: `@OneToMany(mappedBy = "transaction", cascade = CascadeType.PERSIST)` means "the entries point back at me through their `transaction` field, and when I am saved, save them too":
+
+```java
+package dev.paydeck.api.ledger;
+
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+
+import jakarta.persistence.CascadeType;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.OneToMany;
+import jakarta.persistence.Table;
+
+/** One movement of money, made of entries that always add up to zero. */
+@Entity
+@Table(name = "ledger_transactions")
+public class LedgerTransaction {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private UUID id;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private TransactionType type;
+
+    @Column(nullable = false)
+    private String description;
+
+    @Column(nullable = false, unique = true)
+    private String idempotencyKey;
+
+    @Column(nullable = false)
+    private String requestFingerprint;
+
+    @Column(nullable = false)
+    private Instant createdAt;
+
+    @OneToMany(mappedBy = "transaction", cascade = CascadeType.PERSIST)
+    private List<LedgerEntry> entries = new ArrayList<>();
+
+    protected LedgerTransaction() {
+        // For JPA
+    }
+
+    LedgerTransaction(TransactionType type, String description, String idempotencyKey, String requestFingerprint) {
+        this.type = type;
+        this.description = description;
+        this.idempotencyKey = idempotencyKey;
+        this.requestFingerprint = requestFingerprint;
+        this.createdAt = Instant.now();
+    }
+
+    void addEntry(UUID accountId, long amountCents) {
+        entries.add(new LedgerEntry(this, accountId, amountCents));
+    }
+
+    public UUID getId() {
+        return id;
+    }
+
+    public TransactionType getType() {
+        return type;
+    }
+
+    public String getDescription() {
+        return description;
+    }
+
+    public String getRequestFingerprint() {
+        return requestFingerprint;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+
+    public List<LedgerEntry> getEntries() {
+        return List.copyOf(entries);
+    }
+}
+```
+
+The constructor and `addEntry` have no `public`: only classes in the `ledger` package can use them. Code elsewhere cannot build a transaction by hand; it has to ask `LedgerService`, which checks the rules. `getEntries` hands out a copy, so nobody can add an entry to the list from outside either.
+
+`LedgerEntry.java`. This is the first `@ManyToOne` you write (lesson 23.3 explained why cards use a plain `accountId` instead): an entry belongs to one transaction, and is meaningless without it. Its account stays a plain ID, like a card's.
+
+```java
+package dev.paydeck.api.ledger;
+
+import java.util.UUID;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.FetchType;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
+import jakarta.persistence.Table;
+
+/** One line of a ledger transaction: money into (positive) or out of (negative) one account. */
+@Entity
+@Table(name = "ledger_entries")
+public class LedgerEntry {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private UUID id;
+
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "transaction_id")
+    private LedgerTransaction transaction;
+
+    @Column(nullable = false)
+    private UUID accountId;
+
+    @Column(nullable = false)
+    private long amountCents;
+
+    protected LedgerEntry() {
+        // For JPA
+    }
+
+    LedgerEntry(LedgerTransaction transaction, UUID accountId, long amountCents) {
+        this.transaction = transaction;
+        this.accountId = accountId;
+        this.amountCents = amountCents;
+    }
+
+    public UUID getAccountId() {
+        return accountId;
+    }
+
+    public long getAmountCents() {
+        return amountCents;
+    }
+}
+```
+
+The two repositories. The balance is a query with **`@Query`**, which lets you write the query yourself when a method name cannot say it. The language is **JPQL**: it looks like SQL but uses entity and field names (`LedgerEntry`, `amountCents`) instead of table and column names. `coalesce(..., 0)` turns "no entries" (`NULL`) into 0.
+
+```java
+package dev.paydeck.api.ledger;
+
+import java.util.UUID;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface LedgerTransactionRepository extends JpaRepository<LedgerTransaction, UUID> {
+}
+```
+
+```java
+package dev.paydeck.api.ledger;
+
+import java.util.UUID;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+
+public interface LedgerEntryRepository extends JpaRepository<LedgerEntry, UUID> {
+
+    @Query("select coalesce(sum(e.amountCents), 0) from LedgerEntry e where e.accountId = :accountId")
+    long sumByAccountId(UUID accountId);
+}
+```
+
+And `LedgerService.java`, the **only** place where money is recorded. It refuses anything that does not balance:
+
+```java
+package dev.paydeck.api.ledger;
+
+import java.util.List;
+import java.util.UUID;
+
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+/**
+ * The only way money moves in PayDeck. Every transaction must balance:
+ * whatever leaves one account arrives in another, so money is never created
+ * or lost by accident.
+ */
+@Service
+public class LedgerService {
+
+    private final LedgerTransactionRepository transactions;
+    private final LedgerEntryRepository entries;
+
+    public LedgerService(LedgerTransactionRepository transactions, LedgerEntryRepository entries) {
+        this.transactions = transactions;
+        this.entries = entries;
+    }
+
+    @Transactional
+    public LedgerTransaction record(TransactionType type, String description, String idempotencyKey,
+                                    String requestFingerprint, List<Posting> postings) {
+        checkBalanced(postings);
+        LedgerTransaction transaction = new LedgerTransaction(type, description, idempotencyKey, requestFingerprint);
+        postings.forEach(posting -> transaction.addEntry(posting.accountId(), posting.amountCents()));
+        return transactions.save(transaction);
+    }
+
+    static void checkBalanced(List<Posting> postings) {
+        if (postings.size() < 2) {
+            throw new IllegalArgumentException("A transaction needs at least two postings");
+        }
+        if (postings.stream().anyMatch(posting -> posting.amountCents() == 0)) {
+            throw new IllegalArgumentException("A posting cannot be zero");
+        }
+        long total = postings.stream().mapToLong(Posting::amountCents).reduce(0, Math::addExact);
+        if (total != 0) {
+            throw new IllegalArgumentException("Postings must add up to zero but add up to " + total);
+        }
+    }
+
+    @Transactional(readOnly = true)
+    public long balanceOf(UUID accountId) {
+        return entries.sumByAccountId(accountId);
+    }
+}
+```
+
+`@Service` is like `@Component` (Module 21): Spring creates one and injects it, and the name says "business logic lives here". `reduce(0, Math::addExact)` adds the amounts up, throwing on overflow instead of wrapping around (lesson 24.1). The check throws `IllegalArgumentException`, which becomes a `500`: an unbalanced transaction is never the customer's fault, it is a bug in PayDeck, and it must stop everything.
+
+### Top-ups
+
+The rest goes in the `money` package, next to `SupportedCurrency`. First, `AccountRepository` needs to find the outside-world account for a currency:
+
+```java
+package dev.paydeck.api.account;
+
+import java.util.Optional;
+import java.util.UUID;
+
+import dev.paydeck.api.money.SupportedCurrency;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface AccountRepository extends JpaRepository<Account, UUID> {
+
+    Optional<Account> findByKindAndCurrency(AccountKind kind, SupportedCurrency currency);
+}
+```
+
+`MoneyMovementService.java` decides *what* to record:
+
+```java
+package dev.paydeck.api.money;
+
+import java.util.List;
+import java.util.UUID;
+
+import dev.paydeck.api.account.Account;
+import dev.paydeck.api.account.AccountKind;
+import dev.paydeck.api.account.AccountRepository;
+import dev.paydeck.api.common.NotFoundException;
+import dev.paydeck.api.ledger.LedgerService;
+import dev.paydeck.api.ledger.LedgerTransaction;
+import dev.paydeck.api.ledger.Posting;
+import dev.paydeck.api.ledger.TransactionType;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+/** Tops up and transfers money, always as one balanced ledger transaction. */
+@Service
+public class MoneyMovementService {
+
+    private final AccountRepository accounts;
+    private final LedgerService ledger;
+
+    public MoneyMovementService(AccountRepository accounts, LedgerService ledger) {
+        this.accounts = accounts;
+        this.ledger = ledger;
+    }
+
+    @Transactional
+    public LedgerTransaction topUp(UUID accountId, long amountCents, String description) {
+        Account account = customerAccount(accountId);
+        Account outsideWorld = accounts.findByKindAndCurrency(AccountKind.SYSTEM, account.getCurrency())
+                .orElseThrow(() -> new IllegalStateException("No system account for " + account.getCurrency()));
+        // Lesson 24.5 replaces these two placeholders.
+        String idempotencyKey = UUID.randomUUID().toString();
+        String fingerprint = "-";
+        return ledger.record(TransactionType.TOP_UP, description, idempotencyKey, fingerprint,
+                List.of(new Posting(outsideWorld.getId(), -amountCents), new Posting(account.getId(), amountCents)));
+    }
+
+    private Account customerAccount(UUID id) {
+        return accounts.findById(id)
+                .filter(account -> account.getKind() == AccountKind.CUSTOMER)
+                .orElseThrow(() -> new NotFoundException("Account", id));
+    }
+}
+```
+
+In PayDeck's real app, a top-up comes from a bank card through Stripe (Module 31). Until then, this one simply believes the customer: it is a pretend top-up, which is exactly what you need to test everything else.
+
+`MoneyController.java` (with the same `@Max` limit as cards, $100,000.00):
+
+```java
+package dev.paydeck.api.money;
+
+import java.time.Instant;
+import java.util.UUID;
+
+import dev.paydeck.api.ledger.LedgerTransaction;
+import dev.paydeck.api.ledger.TransactionType;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.Size;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class MoneyController {
+
+    /** The most a single top-up or transfer can move: 100,000.00 in the account's currency. */
+    static final long MAX_AMOUNT_CENTS = 10_000_000;
+
+    public record TopUpRequest(
+            @Positive @Max(MAX_AMOUNT_CENTS) long amountCents,
+            @NotBlank @Size(max = 140) String description) {
+    }
+
+    public record TransactionResponse(
+            UUID id, TransactionType type, String description, long amountCents, Instant createdAt) {
+    }
+
+    private final MoneyMovementService money;
+
+    public MoneyController(MoneyMovementService money) {
+        this.money = money;
+    }
+
+    @PostMapping("/api/accounts/{accountId}/top-ups")
+    public ResponseEntity<TransactionResponse> topUp(@PathVariable UUID accountId,
+                                                     @Valid @RequestBody TopUpRequest request) {
+        LedgerTransaction transaction = money.topUp(accountId, request.amountCents(), request.description().strip());
+        return ResponseEntity.status(HttpStatus.CREATED).body(new TransactionResponse(transaction.getId(),
+                transaction.getType(), transaction.getDescription(), request.amountCents(), transaction.getCreatedAt()));
+    }
+}
+```
+
+Here `amountCents` is a `long`, not a `Long`, on purpose. A request with no amount at all is refused with a plain `400`, because Jackson will not put "nothing" into a `long` (lesson 22.2's `Boolean` problem, this time working for you). `@Positive` refuses `0` and negative amounts, so nobody can "top up" money out of an account.
+
+Finally, show the balance on an account. In `AccountController`, inject `LedgerService` and add `balanceCents` to the response:
+
+```java
+public record AccountResponse(
+        UUID id, String ownerName, SupportedCurrency currency, long balanceCents, Instant createdAt) {
+}
+
+private final AccountRepository accounts;
+private final LedgerService ledger;
+
+public AccountController(AccountRepository accounts, LedgerService ledger) {
+    this.accounts = accounts;
+    this.ledger = ledger;
+}
+
+@PostMapping
+@Transactional
+public ResponseEntity<AccountResponse> open(@Valid @RequestBody OpenAccountRequest request) {
+    Account account = accounts.save(Account.openCustomerAccount(request.ownerName().strip(), request.currency()));
+    return ResponseEntity.created(URI.create("/api/accounts/" + account.getId()))
+            .body(toResponse(account, 0));
+}
+
+@GetMapping("/{id}")
+@Transactional(readOnly = true)
+public AccountResponse get(@PathVariable UUID id) {
+    Account account = accounts.findById(id)
+            .filter(a -> a.getKind() == AccountKind.CUSTOMER)
+            .orElseThrow(() -> new NotFoundException("Account", id));
+    return toResponse(account, ledger.balanceOf(id));
+}
+
+private static AccountResponse toResponse(Account account, long balanceCents) {
+    return new AccountResponse(account.getId(), account.getOwnerName(), account.getCurrency(),
+            balanceCents, account.getCreatedAt());
+}
+```
+
+A new account's balance is 0 without asking: it cannot have entries yet.
+
+### Run it
+
+Restart with `show-sql` on. Flyway applies the new migration:
+
+```
+Current version of schema "public": 1
+Migrating schema "public" to version "2 - create ledger"
+Successfully applied 1 migration to schema "public", now at version v2 (execution time 00:00.033s)
+```
+
+Top up one of your accounts:
+
+```sh
+curl -X POST localhost:8080/api/accounts/4e5831ca-61d5-45e7-b451-5726d7b68095/top-ups \
+  -H 'Content-Type: application/json' -d '{"amountCents": 5000, "description": "First top-up"}'
+```
+
+```
+HTTP/1.1 201
+{"id":"65be30f7-4d73-4402-a4ef-21e0eb770853","type":"TOP_UP","description":"First top-up","amountCents":5000,"createdAt":"2026-10-22T00:06:31.659020218Z"}
+```
+
+The log shows one transaction and two entries, saved together thanks to the cascade:
+
+```
+Hibernate: select a1_0.id,a1_0.created_at,a1_0.currency,a1_0.kind,a1_0.owner_name from accounts a1_0 where a1_0.id=?
+Hibernate: select a1_0.id,a1_0.created_at,a1_0.currency,a1_0.kind,a1_0.owner_name from accounts a1_0 where a1_0.kind=? and a1_0.currency=?
+Hibernate: insert into ledger_transactions (created_at,description,idempotency_key,request_fingerprint,type,id) values (?,?,?,?,?,?)
+Hibernate: insert into ledger_entries (account_id,amount_cents,transaction_id,id) values (?,?,?,?)
+Hibernate: insert into ledger_entries (account_id,amount_cents,transaction_id,id) values (?,?,?,?)
+```
+
+Read the account:
+
+```
+{"id":"4e5831ca-61d5-45e7-b451-5726d7b68095","ownerName":"Ana Silva","currency":"USD","balanceCents":5000,"createdAt":"2026-10-22T00:00:19.847521Z"}
+```
+
+```
+Hibernate: select coalesce(sum(le1_0.amount_cents),0) from ledger_entries le1_0 where le1_0.account_id=?
+```
+
+And in psql, the whole story:
+
+```sql
+SELECT t.type, t.description, a.owner_name, e.amount_cents
+FROM ledger_entries e
+JOIN ledger_transactions t ON t.id = e.transaction_id
+JOIN accounts a ON a.id = e.account_id;
+```
+
+```
+  type  | description  |     owner_name      | amount_cents
+--------+--------------+---------------------+--------------
+ TOP_UP | First top-up | Outside world (USD) |        -5000
+ TOP_UP | First top-up | Ana Silva           |         5000
+(2 rows)
+```
+
+## Try it
+
+<Exercise title="Try it: the trial balance">
+Accountants call the list of every account's balance a **trial balance**. Top up your account once more (any amount), then write one SQL query that lists every account, customers and system accounts alike, with its balance worked out from `ledger_entries`. Accounts with no entries must show 0. Then check the golden rule with a second query.
+
+<Fragment slot="hint">`LEFT JOIN ledger_entries` from `accounts`, `GROUP BY` the account, and `coalesce(sum(...), 0)`, like the JPQL query. The golden rule: the sum of all entries.</Fragment>
+<Fragment slot="solution">
+
+After a second top-up of 2550 cents:
+
+```sql
+SELECT a.owner_name, a.kind, coalesce(sum(e.amount_cents), 0) AS balance_cents
+FROM accounts a
+LEFT JOIN ledger_entries e ON e.account_id = a.id
+GROUP BY a.id, a.owner_name, a.kind
+ORDER BY a.kind, a.owner_name;
+```
+
+```
+     owner_name      |   kind   | balance_cents
+---------------------+----------+---------------
+ Ana Silva           | CUSTOMER |          7550
+ Ben Okafor          | CUSTOMER |             0
+ Outside world (EUR) | SYSTEM   |             0
+ Outside world (GBP) | SYSTEM   |             0
+ Outside world (INR) | SYSTEM   |             0
+ Outside world (USD) | SYSTEM   |         -7550
+(6 rows)
+```
+
+```sql
+SELECT sum(amount_cents) FROM ledger_entries;
+```
+
+```
+ sum
+-----
+   0
+```
+
+The column adds up to zero, and "Outside world (USD)" shows exactly how many dollars have entered PayDeck. Real payment companies run a check like this every night; you will turn it into an automated test in Module 25.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Storing a balance column as well">
+It looks like a harmless shortcut, but now there are two truths that can disagree. If a balance query ever gets slow, the fix comes later and is carefully checked against the ledger; it never replaces it.
+</Aside>
+
+<Aside type="caution" title="Updating or deleting ledger rows">
+A mistaken payment is corrected with a new transaction that reverses it. Editing history destroys the very record that explains a balance.
+</Aside>
+
+<Aside type="caution" title="Topping up a system account">
+`customerAccount` refuses it with `404`. A top-up into the outside world would be money moving from the outside world to the outside world.
+</Aside>
+
+## Recap
+
+- A ledger stores every movement of money; balances are sums of entries, never stored.
+- Double entry: the entries of each transaction add up to zero, so the whole ledger always does.
+- Money entering PayDeck comes from a `SYSTEM` "outside world" account, which goes negative.
+- `LedgerService` is the only way to record money, and it refuses unbalanced transactions.
+- `@Query` with JPQL lets you write queries that method names cannot, such as a sum.
+
+<Quiz
+	questions={[
+		{
+			question: 'Ana (balance $30.00) sends Ben $12.00. Which entries are recorded?',
+			options: ['Ana: 1800 (her new balance)', 'Ana: -1200 and Ben: +1200', 'Ben: +1200 only'],
+			answer: 1,
+			explanation: 'Two entries that add up to zero. Ana\'s balance becomes the sum of her entries: 3000 - 1200 = 1800.',
+		},
+		{
+			question: 'What is the balance of the "Outside world (USD)" account?',
+			options: ['Always 0', 'Minus the total of all USD that has entered PayDeck', 'The total of all USD balances plus fees'],
+			answer: 1,
+			explanation: 'Each top-up takes the amount from it, so it is the negative of everything that came in.',
+		},
+		{
+			question: 'A bug calls record with postings of -500 and +600. What happens?',
+			options: ['100 cents appear from nowhere', 'checkBalanced throws and nothing is recorded', 'PostgreSQL fixes it'],
+			answer: 1,
+			explanation: 'The postings add up to 100, not 0, so LedgerService refuses them.',
+		},
+	]}
+/>
+
+<MarkComplete />
