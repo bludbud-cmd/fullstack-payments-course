@@ -1,0 +1,266 @@
+---
+title: "27.3 Spring Security"
+description: "Add Spring Security to the PayDeck API, see what it locks by default, understand its filter chain, and write PayDeck's own rules: which paths are public, no sessions, no CSRF, no browser password pop-up."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson Spring Security guards every request to the PayDeck API, and a `SecurityConfig` class says which paths are public. The rest stays open for one more lesson, until 27.5 can hand out access tokens.
+
+## Why it matters
+
+Checking "is this person signed in?" by hand in every controller method would be easy to forget, and one forgotten check is one open door. **Spring Security** checks every request **before** it reaches any controller, in one place, using rules you write once. It also handles the details that are easy to get wrong: comparing secrets safely, security headers, error responses. It is how almost every Spring application is secured.
+
+## The idea
+
+### Filters: checks in front of the controllers
+
+A request to the API does not go straight to your controller. It first passes through a line of **filters**, small pieces of code that can look at the request, change it, or stop it and answer by themselves. Spring Security adds its own line of filters, the **security filter chain**:
+
+```
+request ─▶ [ security headers ] ─▶ [ CSRF check ] ─▶ [ who is this? ] ─▶ [ may they do this? ] ─▶ controller
+                                                                                  │
+                                                                  no ─▶ 401 or 403, controller never runs
+```
+
+Each filter does one job. The "who is this?" filters read credentials (a cookie, a password, a token) and record who is making the request. The last one checks your **rules** ("`/api/auth/**` is open to everyone, everything else needs a signed-in user") and turns the request away if they are not met.
+
+### Secure by default
+
+The moment you add Spring Security, it locks **everything**: every endpoint needs a signed-in user, it creates a temporary user called `user` with a random password printed in the log, and it turns on browser-style protections (a sign-in form, a password pop-up, sessions, CSRF checks). That is a safe starting point: forgetting to configure it leaves the API closed, not open. Then you replace the defaults with rules that fit your API.
+
+## Worked example
+
+### Add the starter
+
+In `pom.xml`, replace the `spring-security-crypto` dependency from lesson 27.1 with the starter (which includes it):
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-security</artifactId>
+</dependency>
+```
+
+Start the API (`./mvnw spring-boot:run`). Among the log lines:
+
+```
+Using generated security password: 5697a083-530c-4d9b-ad0c-035c2f579a09
+```
+
+Now ask for an account (any ID from your database):
+
+```sh
+curl -i localhost:8080/api/accounts/4e5831ca-61d5-45e7-b451-5726d7b68095
+```
+
+```
+HTTP/1.1 401
+Set-Cookie: JSESSIONID=522641C8B6745CA5923C32D25000E819; Path=/; HttpOnly
+WWW-Authenticate: Basic realm="Realm", charset="UTF-8"
+X-Content-Type-Options: nosniff
+X-XSS-Protection: 0
+Cache-Control: no-cache, no-store, max-age=0, must-revalidate
+Pragma: no-cache
+Expires: 0
+X-Frame-Options: DENY
+Content-Length: 0
+```
+
+Locked. Notice what Spring Security added without being asked:
+
+- **`401`** and **`WWW-Authenticate: Basic`**: "sign in with HTTP Basic", the oldest way to send a username and password, which makes browsers show a password pop-up.
+- **`Set-Cookie: JSESSIONID=...`**: a session (lesson 27.2), ready to remember you.
+- **Security headers**: `X-Frame-Options: DENY` stops other sites from showing the API inside a frame, `X-Content-Type-Options: nosniff` stops browsers guessing content types, and `Cache-Control: no-store` stops private answers being cached.
+
+With the generated user, the request works:
+
+```sh
+curl -i -u user:5697a083-530c-4d9b-ad0c-035c2f579a09 localhost:8080/api/accounts/4e5831ca-61d5-45e7-b451-5726d7b68095
+```
+
+```
+HTTP/1.1 200
+...
+{"id":"4e5831ca-61d5-45e7-b451-5726d7b68095","ownerName":"Ana Silva","currency":"USD","balanceCents":10650,"createdAt":"2026-10-22T00:00:19.847521Z"}
+```
+
+`-u user:password` sends HTTP Basic credentials. But opening an account with the same credentials fails:
+
+```sh
+curl -i -u user:5697a083-530c-4d9b-ad0c-035c2f579a09 -X POST localhost:8080/api/accounts \
+  -H 'Content-Type: application/json' -d '{"ownerName": "Test", "currency": "USD"}'
+```
+
+```
+HTTP/1.1 401
+```
+
+To see why, restart the API with Spring Security's debug log switched on:
+
+```sh
+./mvnw spring-boot:run -Dspring-boot.run.arguments=--logging.level.org.springframework.security=DEBUG
+```
+
+and send the `POST` again. The log tells the story:
+
+```
+o.s.security.web.FilterChainProxy        : Securing POST /api/accounts
+o.s.security.web.csrf.CsrfFilter         : Invalid CSRF token found for http://localhost:8080/api/accounts
+o.s.s.w.access.AccessDeniedHandlerImpl   : Responding with 403 status code
+o.s.security.web.FilterChainProxy        : Securing GET /error
+```
+
+The **CSRF filter** refused the request, because a `POST` from a browser-style session must carry a CSRF token. Spring then tried to show its error page at `/error`, which is itself locked, so you got a `401` instead of the real `403`. Two lessons in one: the defaults are built for browsers, not for an API used by apps; and `/error` must be public, or errors turn into confusing `401`s.
+
+The tests that call the API would be refused in the same way, so do not worry if `./mvnw test` fails at this point.
+
+### PayDeck's rules
+
+Create `src/main/java/dev/paydeck/api/auth/SecurityConfig.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.crypto.factory.PasswordEncoderFactories;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+
+/** Who may call what. */
+@Configuration
+public class SecurityConfig {
+
+    @Bean
+    SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+                // CSRF attacks ride on cookies that a browser sends by itself. PayDeck's
+                // apps will send a token in a header instead, so CSRF protection is not needed.
+                .csrf(csrf -> csrf.disable())
+                // Remember nothing between requests: no session, no JSESSIONID cookie.
+                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                // No browser password pop-up and no login page: PayDeck has its own sign-in endpoints.
+                .httpBasic(basic -> basic.disable())
+                .formLogin(form -> form.disable())
+                .authorizeHttpRequests(requests -> requests
+                        .requestMatchers("/api/auth/**").permitAll()
+                        .requestMatchers("/actuator/health", "/docs/**", "/swagger-ui/**", "/v3/api-docs/**",
+                                "/error").permitAll()
+                        // TEMPORARY: everything else stays open until lesson 27.5 hands out access tokens.
+                        .anyRequest().permitAll());
+        return http.build();
+    }
+
+    /** BCrypt, stored with a {bcrypt} prefix so the algorithm can be changed later. */
+    @Bean
+    PasswordEncoder passwordEncoder() {
+        return PasswordEncoderFactories.createDelegatingPasswordEncoder();
+    }
+}
+```
+
+- **A `@Bean` of type `SecurityFilterChain`** (lesson 21.3) replaces Spring Security's default chain with yours. `HttpSecurity` is a builder: each method configures one part, and `http.build()` makes the chain.
+- **`csrf.disable()`**: CSRF protection is for cookie-based browser sessions. PayDeck's clients will send a token in a header, which no other website can make a browser add (lesson 27.2).
+- **`STATELESS`**: never create a session. Each request must prove who it is by itself.
+- **`httpBasic` and `formLogin` disabled**: no password pop-up, no generated sign-in page.
+- **`authorizeHttpRequests`** lists rules, checked **in order**; the first one that matches a request decides. `/api/auth/**` (`**` means "anything below") will hold sign-up and sign-in, which must be open to people who are not signed in yet. The health check, the API docs (lesson 22.5) and `/error` are open too.
+- **`.anyRequest().permitAll()`** is temporary and says so. Locking everything now would also lock out the Part 7 app and the tests, with no way to sign in yet. Lesson 27.5 changes this one line.
+- **`PasswordEncoder` as a bean**: lesson 27.4 needs BCrypt, and making it a bean means every class that needs it gets the same one, by injection.
+
+Restart and try the same requests without `-u`:
+
+```sh
+curl -i localhost:8080/api/accounts/4e5831ca-61d5-45e7-b451-5726d7b68095
+```
+
+```
+HTTP/1.1 200
+X-Content-Type-Options: nosniff
+X-XSS-Protection: 0
+Cache-Control: no-cache, no-store, max-age=0, must-revalidate
+Pragma: no-cache
+Expires: 0
+X-Frame-Options: DENY
+Content-Type: application/json
+...
+```
+
+The account, with the security headers still added, and no `JSESSIONID` cookie. Opening an account answers `201` again, and `./mvnw test` is back to all green.
+
+The log still prints a generated password, because Spring Security still creates its default user. Nothing uses it any more; it disappears in lesson 27.5.
+
+<Exercise title="Lock it and look">
+Change `.anyRequest().permitAll()` to `.anyRequest().authenticated()`, restart, and request an account with `curl -i`. What status do you get, and what is in the body? Why is that not good enough for the PayDeck app? Then change the line back.
+
+<Fragment slot="hint">With HTTP Basic and the sign-in form disabled, Spring Security has no way left to ask for credentials. Look at the status code and the `Content-Length`.</Fragment>
+<Fragment slot="solution">
+
+```
+HTTP/1.1 403
+X-Content-Type-Options: nosniff
+...
+Content-Length: 0
+```
+
+A `403 Forbidden` with an empty body. With every sign-in method switched off, Spring Security falls back to simply refusing. Two problems for the app: `403` means "you are signed in but not allowed", which is wrong here (the person is **not signed in**, so it should be `401`, which tells the app to show the sign-in screen); and there is no problem-details body with a message to show, unlike every other PayDeck error (lesson 22.4). Lesson 27.5 fixes both by telling Spring Security exactly how to answer.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Forgetting /error">
+When a request fails, Spring forwards it to `/error` to build the error response. If `/error` is not public, every error from a request that is not signed in becomes a blank `401`, hiding the real problem. Keep `/error` in the public list.
+</Aside>
+
+<Aside type="caution" title="Rules in the wrong order">
+Rules are checked from the top, and the first match wins. Putting `.anyRequest()` first would mean nothing after it could ever match, so Spring refuses to start: `Can't configure requestMatchers after anyRequest`.
+</Aside>
+
+<Aside type="caution" title="Disabling CSRF for a browser site">
+`csrf.disable()` is right for PayDeck because its clients do not use cookies. A website that signs people in with a session cookie must keep CSRF protection on.
+</Aside>
+
+<Aside type="caution" title="Using the generated password">
+The generated user is a placeholder that changes on every restart. Real users come from your own database (next lesson).
+</Aside>
+
+## Recap
+
+- Spring Security checks every request in a chain of filters before any controller runs.
+- Added on its own, it locks everything and assumes a browser: Basic pop-up, sign-in form, sessions, CSRF.
+- A `SecurityFilterChain` bean replaces the defaults: PayDeck turns off CSRF, sessions, Basic and the form, and lists public paths.
+- Rules are checked in order; `/api/auth/**`, the health check, the docs and `/error` are public.
+- For now everything else is still open; lesson 27.5 locks it once access tokens exist.
+
+<Quiz
+	questions={[
+		{
+			question: 'Where does Spring Security check requests?',
+			options: ['Inside each controller method', 'In a chain of filters that runs before any controller', 'In the database'],
+			answer: 1,
+			explanation: 'Filters see every request first, so one forgotten check in a controller cannot leave an endpoint open.',
+		},
+		{
+			question: 'Why did the POST fail with the default settings even with the right username and password?',
+			options: ['The password was wrong', 'The CSRF filter required a CSRF token', 'POST is not allowed'],
+			answer: 1,
+			explanation: 'The defaults protect browser sessions with CSRF tokens. The debug log showed "Invalid CSRF token found".',
+		},
+		{
+			question: 'Why is PayDeck allowed to disable CSRF protection?',
+			options: ['CSRF does not exist any more', 'Its clients prove who they are with a token in a header, not a cookie the browser sends by itself', 'The API is only used on localhost'],
+			answer: 1,
+			explanation: 'CSRF tricks a browser into sending its cookies. A header the app adds on purpose cannot be forged that way.',
+		},
+	]}
+/>
+
+<MarkComplete />

@@ -1,0 +1,501 @@
+---
+title: "27.4 Sign-up and login endpoints"
+description: "Store users with BCrypt-hashed passwords, and build POST /api/auth/register and /api/auth/login: validation, one account per email, and a login that never reveals whether an email is registered, not even through its timing."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson people can sign up and sign in to the PayDeck API with an email and a password, and the database holds only a BCrypt hash of each password.
+
+## Why it matters
+
+These two endpoints are the front door, and the front door is where attackers knock first. They will try thousands of common passwords (so passwords must be hashed and long), and they will try to discover **who has an account**, which is valuable on its own: knowing that `asha@example.com` uses PayDeck makes a convincing fake "PayDeck security alert" email easy to write. A careful sign-in never gives that away.
+
+## The idea
+
+### A users table
+
+Each person is a row in a new `users` table: an ID, their email (unique, so one account per email), a display name, the **password hash**, and when they joined. Emails are stored in **lower case**, because `Asha@Example.com` and `asha@example.com` are the same mailbox.
+
+### Two endpoints
+
+- **`POST /api/auth/register`** with an email, a password and a name: checks them, refuses an email that is already taken (`409`), hashes the password, saves the user, answers `201`.
+- **`POST /api/auth/login`** with an email and a password: finds the user, checks the password with `matches`, answers `200`, or `401` when they do not match.
+
+For now both answer with the user's details. The useful part, a token that proves who you are on later requests, arrives in lesson 27.5.
+
+### Saying nothing about who exists
+
+A login that answers "no account with that email" for one case and "wrong password" for the other tells an attacker which emails are registered. So both get **the same message**: "That email and password do not match."
+
+There is a quieter leak: **time**. Checking a password with BCrypt takes about 74 ms (lesson 27.1). If the server skips BCrypt when the email is unknown, an unknown email gets its answer much faster, and an attacker with a stopwatch can tell them apart. So PayDeck runs BCrypt **every time**: when the email is unknown, it checks the password against a made-up "dummy" hash. You will measure the difference yourself.
+
+Registration necessarily reveals that an email is taken ("try signing in"), which real services accept. They protect that endpoint in other ways, such as limiting how many attempts one address may make.
+
+## Worked example
+
+### The migration
+
+`src/main/resources/db/migration/V3__create_users.sql`:
+
+```sql
+-- A person who can sign in. We keep a BCrypt hash of their password, never the password itself.
+CREATE TABLE users (
+    id             UUID PRIMARY KEY,
+    email          VARCHAR(254) NOT NULL UNIQUE,
+    display_name   VARCHAR(100) NOT NULL,
+    password_hash  VARCHAR(100) NOT NULL,
+    created_at     TIMESTAMPTZ  NOT NULL
+);
+```
+
+254 characters is the longest email address the standards allow. A BCrypt hash with its `{bcrypt}` label is 68 characters; 100 leaves room for a future algorithm.
+
+### The entity and repository
+
+`src/main/java/dev/paydeck/api/auth/User.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import java.time.Instant;
+import java.util.Locale;
+import java.util.UUID;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+
+/** Someone who can sign in to PayDeck. */
+@Entity
+@Table(name = "users")
+public class User {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private UUID id;
+
+    /** Always stored in lower case, so "Asha@Example.com" and "asha@example.com" are one person. */
+    @Column(nullable = false)
+    private String email;
+
+    @Column(nullable = false)
+    private String displayName;
+
+    /** A BCrypt hash of the password. Never the password itself. */
+    @Column(nullable = false)
+    private String passwordHash;
+
+    @Column(nullable = false)
+    private Instant createdAt;
+
+    protected User() {
+        // For JPA
+    }
+
+    public static User withPassword(String email, String displayName, String passwordHash) {
+        User user = new User();
+        user.email = normalizeEmail(email);
+        user.displayName = displayName;
+        user.passwordHash = passwordHash;
+        user.createdAt = Instant.now();
+        return user;
+    }
+
+    public static String normalizeEmail(String email) {
+        return email.strip().toLowerCase(Locale.ROOT);
+    }
+
+    public UUID getId() {
+        return id;
+    }
+
+    public String getEmail() {
+        return email;
+    }
+
+    public String getDisplayName() {
+        return displayName;
+    }
+
+    public String getPasswordHash() {
+        return passwordHash;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+}
+```
+
+The table is called `users`, not `user`, because `USER` is a reserved word in PostgreSQL's SQL. `toLowerCase(Locale.ROOT)` lower-cases the same way on every computer, whatever language it is set to (some languages have unusual rules for the letter I).
+
+`src/main/java/dev/paydeck/api/auth/UserRepository.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import java.util.Optional;
+import java.util.UUID;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface UserRepository extends JpaRepository<User, UUID> {
+
+    Optional<User> findByEmail(String email);
+}
+```
+
+### Two new errors
+
+In `src/main/java/dev/paydeck/api/common/`, `InvalidCredentialsException.java`:
+
+```java
+package dev.paydeck.api.common;
+
+/** Sign-in failed. The message never says which part was wrong, so it cannot be used to find accounts. */
+public class InvalidCredentialsException extends RuntimeException {
+
+    public InvalidCredentialsException(String message) {
+        super(message);
+    }
+}
+```
+
+and `ConflictException.java`:
+
+```java
+package dev.paydeck.api.common;
+
+/** The request clashes with data that already exists, such as an email that is already registered. */
+public class ConflictException extends RuntimeException {
+
+    private final String code;
+
+    public ConflictException(String code, String message) {
+        super(message);
+        this.code = code;
+    }
+
+    public String getCode() {
+        return code;
+    }
+}
+```
+
+In `ApiExceptionHandler`, add a handler for each, above the `IdempotencyConflictException` one:
+
+```java
+    @ExceptionHandler(InvalidCredentialsException.class)
+    ProblemDetail invalidCredentials(InvalidCredentialsException e) {
+        ProblemDetail problem = problem(HttpStatus.UNAUTHORIZED, "Cannot sign in", e.getMessage());
+        problem.setProperty("code", "INVALID_CREDENTIALS");
+        return problem;
+    }
+
+    @ExceptionHandler(ConflictException.class)
+    ProblemDetail conflict(ConflictException e) {
+        ProblemDetail problem = problem(HttpStatus.CONFLICT, "Conflict", e.getMessage());
+        problem.setProperty("code", e.getCode());
+        return problem;
+    }
+```
+
+The handler for `DataIntegrityViolationException` from lesson 24.5 is also called `conflict`. Java allows two methods with the same name if their parameters differ, but it is confusing; rename the old one to `raced`.
+
+### The service
+
+`src/main/java/dev/paydeck/api/auth/AuthService.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import java.util.Optional;
+
+import dev.paydeck.api.common.ConflictException;
+import dev.paydeck.api.common.InvalidCredentialsException;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+/** Signing up and signing in. */
+@Service
+public class AuthService {
+
+    private final UserRepository users;
+    private final PasswordEncoder passwordEncoder;
+    /**
+     * Checked against when the email is unknown, so a wrong email takes as
+     * long to answer as a wrong password, and the timing gives nothing away.
+     */
+    private final String dummyHash;
+
+    public AuthService(UserRepository users, PasswordEncoder passwordEncoder) {
+        this.users = users;
+        this.passwordEncoder = passwordEncoder;
+        this.dummyHash = passwordEncoder.encode("not-a-real-password");
+    }
+
+    @Transactional
+    public User register(String email, String password, String displayName) {
+        String normalized = User.normalizeEmail(email);
+        if (users.findByEmail(normalized).isPresent()) {
+            throw emailTaken();
+        }
+        try {
+            return users.saveAndFlush(User.withPassword(normalized, displayName, passwordEncoder.encode(password)));
+        } catch (DataIntegrityViolationException raceWithAnotherSignUp) {
+            throw emailTaken();
+        }
+    }
+
+    @Transactional(readOnly = true)
+    public User login(String email, String password) {
+        Optional<User> found = users.findByEmail(User.normalizeEmail(email));
+        String hash = found.map(User::getPasswordHash).orElse(dummyHash);
+        if (!passwordEncoder.matches(password, hash) || found.isEmpty()) {
+            throw new InvalidCredentialsException("That email and password do not match.");
+        }
+        return found.get();
+    }
+
+    private static ConflictException emailTaken() {
+        return new ConflictException("EMAIL_TAKEN", "An account with this email already exists. Try signing in.");
+    }
+}
+```
+
+- **`register`** checks for the email first, for a friendly answer. If two sign-ups with the same email arrive at the same moment, both checks can pass; then the database's `UNIQUE` constraint stops the second insert. `saveAndFlush` sends the insert **now**, inside the `try`, instead of at the end of the transaction, so the `DataIntegrityViolationException` can be caught here and turned into the same friendly `409`. (The same "check, and let the database back it up" idea as idempotency keys in lesson 24.5.)
+- **`login`**: `found.map(User::getPasswordHash).orElse(dummyHash)` takes the user's hash if there is a user, or the dummy hash if not. `matches` always runs. Only **after** it has run does `|| found.isEmpty()` refuse the unknown email. Order matters here: `found.isEmpty() || !matches(...)` would skip BCrypt for unknown emails, because `||` stops as soon as one side is `true` (lesson 5.2).
+- **`readOnly = true`**: login changes nothing in the database.
+
+### The controller
+
+`src/main/java/dev/paydeck/api/auth/AuthController.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import java.util.UUID;
+
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+/** Sign-up and sign-in: the endpoints anyone may call without being signed in. */
+@RestController
+@RequestMapping("/api/auth")
+public class AuthController {
+
+    public record RegisterRequest(
+            @NotBlank @Email @Size(max = 254) String email,
+            @NotBlank @Size(min = 10, max = 128, message = "must be at least 10 characters") String password,
+            @NotBlank @Size(max = 100) String displayName) {
+    }
+
+    public record LoginRequest(@NotBlank String email, @NotBlank String password) {
+    }
+
+    public record UserResponse(UUID id, String email, String displayName) {
+
+        public static UserResponse of(User user) {
+            return new UserResponse(user.getId(), user.getEmail(), user.getDisplayName());
+        }
+    }
+
+    private final AuthService auth;
+
+    public AuthController(AuthService auth) {
+        this.auth = auth;
+    }
+
+    @PostMapping("/register")
+    public ResponseEntity<UserResponse> register(@Valid @RequestBody RegisterRequest request) {
+        User user = auth.register(request.email(), request.password(), request.displayName().strip());
+        return ResponseEntity.status(HttpStatus.CREATED).body(UserResponse.of(user));
+    }
+
+    @PostMapping("/login")
+    public UserResponse login(@Valid @RequestBody LoginRequest request) {
+        return UserResponse.of(auth.login(request.email(), request.password()));
+    }
+}
+```
+
+- **`@Email`** checks the shape of an email address. It cannot check that the mailbox exists; real services send a confirmation link for that.
+- **`max = 128` on the password**: BCrypt only uses the first 72 bytes of a password, and a limit stops someone sending a megabyte of "password" to keep the server busy.
+- **`UserResponse` never contains the hash.** Returning the entity itself would send `passwordHash` to the client: always answer with a DTO (lesson 22.2).
+- `/api/auth/**` is already public in `SecurityConfig` (lesson 27.3), so these endpoints work without being signed in.
+
+### Try it
+
+Restart the API. Flyway applies the migration:
+
+```
+Migrating schema "public" to version "3 - create users"
+```
+
+Sign up (note the capital letters in the email):
+
+```sh
+curl -i -X POST localhost:8080/api/auth/register -H 'Content-Type: application/json' \
+  -d '{"email": "Asha@Example.com", "password": "correct horse battery", "displayName": "Asha Rao"}'
+```
+
+```
+HTTP/1.1 201
+Content-Type: application/json
+
+{"id":"538436cd-19d2-43a4-b803-f91e16867977","email":"asha@example.com","displayName":"Asha Rao"}
+```
+
+The same email again, in any capitals:
+
+```
+HTTP/1.1 409
+Content-Type: application/problem+json
+
+{"detail":"An account with this email already exists. Try signing in.","instance":"/api/auth/register","status":409,"title":"Conflict","code":"EMAIL_TAKEN"}
+```
+
+Bad input (`{"email": "not-an-email", "password": "short", "displayName": ""}`):
+
+```
+HTTP/1.1 400
+Content-Type: application/problem+json
+
+{"detail":"Some fields are not valid","instance":"/api/auth/register","status":400,"title":"Invalid request","fields":{"displayName":"must not be blank","password":"must be at least 10 characters","email":"must be a well-formed email address"}}
+```
+
+Sign in with the right password:
+
+```sh
+curl -i -X POST localhost:8080/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"email": "asha@example.com", "password": "correct horse battery"}'
+```
+
+```
+HTTP/1.1 200
+Content-Type: application/json
+
+{"id":"538436cd-19d2-43a4-b803-f91e16867977","email":"asha@example.com","displayName":"Asha Rao"}
+```
+
+A wrong password, and an email nobody registered, get exactly the same answer:
+
+```
+HTTP/1.1 401
+Content-Type: application/problem+json
+
+{"detail":"That email and password do not match.","instance":"/api/auth/login","status":401,"title":"Cannot sign in","code":"INVALID_CREDENTIALS"}
+```
+
+And the database:
+
+```sh
+docker compose exec postgres psql -U paydeck -c "SELECT email, display_name, password_hash FROM users;"
+```
+
+```
+      email       | display_name |                            password_hash
+------------------+--------------+----------------------------------------------------------------------
+ asha@example.com | Asha Rao     | {bcrypt}$2a$10$Zi.UBwJbwRaodnIdQu8AiuOVO2AQ3dS64f.Ujt7L4o3q4imlKXy.u
+(1 row)
+```
+
+No password anywhere: even you, with full access to the database, cannot tell what Asha's password is.
+
+<Exercise title="Hear the timing leak">
+`curl -w "%{time_total}\n" -o /dev/null -s ...` prints how long a request took, in seconds, instead of the answer. Send six wrong-password logins for `asha@example.com` and six for `nobody@example.com`, and compare the last three times of each. Then change `login` to the "obvious" version below, restart, and measure again. What would an attacker learn? Put the safe version back afterwards.
+
+```java
+Optional<User> found = users.findByEmail(User.normalizeEmail(email));
+if (found.isEmpty() || !passwordEncoder.matches(password, found.get().getPasswordHash())) {
+```
+
+<Fragment slot="hint">A small shell function saves typing: `t() { for i in 1 2 3 4 5 6; do curl -s -o /dev/null -w "%{time_total}\n" -X POST localhost:8080/api/auth/login -H 'Content-Type: application/json' -d "{\"email\": \"$1\", \"password\": \"wrong password\"}"; done | tail -3; }`, then `t asha@example.com` and `t nobody@example.com`. The first few requests are slower while Java warms up, which is why you look at the last three.</Fragment>
+<Fragment slot="solution">
+
+With the dummy hash (the lesson's code):
+
+```
+0.104541 0.102504 0.129175  <- asha@example.com
+0.113093 0.100638 0.102697  <- nobody@example.com
+```
+
+With the "obvious" version:
+
+```
+0.104847 0.105268 0.108540  <- asha@example.com
+0.017571 0.012607 0.014147  <- nobody@example.com
+```
+
+Without the dummy hash, an unknown email is answered about seven times faster, because BCrypt never runs. The messages are identical, but the clock tells an attacker exactly which emails have PayDeck accounts, and they can check thousands of addresses an hour. With the dummy hash, both take the same time.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Different messages for wrong email and wrong password">
+"No such user" and "Wrong password" are friendlier, and they hand attackers a list of your customers. Use one message for both.
+</Aside>
+
+<Aside type="caution" title="Returning the entity">
+`return user;` from a controller sends every field, including `passwordHash`. Hashes are not passwords, but they are exactly what an attacker needs to start guessing offline. Answer with a DTO.
+</Aside>
+
+<Aside type="caution" title="Case-sensitive emails">
+Without `normalizeEmail`, `Asha@example.com` can register a second account and then cannot sign in as `asha@example.com`. Lower-case emails before saving **and** before looking them up.
+</Aside>
+
+<Aside type="caution" title="Checking the email only in Java">
+`findByEmail(...).isPresent()` alone has a race: two sign-ups at the same moment can both pass it. The `UNIQUE` constraint in the migration is what really guarantees one account per email.
+</Aside>
+
+## Recap
+
+- A `users` table holds a lower-case unique email, a name and a BCrypt `password_hash`.
+- `register` validates, refuses taken emails with `409 EMAIL_TAKEN`, and stores only the hash; the `UNIQUE` constraint backs up the check.
+- `login` answers the same `401` for a wrong password and an unknown email, and runs BCrypt either way so timing reveals nothing.
+- Answer with a `UserResponse` DTO, never the entity.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why does login check the password against a dummy hash when the email is unknown?',
+			options: ['To create the user', 'So unknown emails take as long as wrong passwords, and timing does not reveal who is registered', 'Because matches needs a hash to start'],
+			answer: 1,
+			explanation: 'Skipping BCrypt makes unknown emails about seven times faster to answer, which leaks who has an account.',
+		},
+		{
+			question: 'Two people sign up with the same email at the same moment. What makes sure only one account exists?',
+			options: ['The findByEmail check', 'The UNIQUE constraint on users.email', 'The @Email annotation'],
+			answer: 1,
+			explanation: 'Both Java checks can pass at once; the database refuses the second insert, and register turns that into the same 409.',
+		},
+		{
+			question: 'What should a wrong password and an unregistered email answer?',
+			options: ['404 and 401', 'The same 401 with the same message', '400 with the field that was wrong'],
+			answer: 1,
+			explanation: 'Identical answers mean sign-in cannot be used to find out who has an account.',
+		},
+	]}
+/>
+
+<MarkComplete />
