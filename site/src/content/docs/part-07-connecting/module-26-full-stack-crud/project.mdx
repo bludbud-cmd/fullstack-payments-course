@@ -1,0 +1,497 @@
+---
+title: "Mini-project: real cards"
+description: "Move PayDeck's cards from sample data to the API: list them, issue new ones, freeze and unfreeze, rename, set or remove a spending limit, and cancel, with every change saved on the server."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+The balance and the history are real now, but the cards still come from the sample data of Module 14, saved only on the device. In this project the last piece of sample data goes: every card lives in the API, and every change goes through it. When you finish, PayDeck on your Mac and PayDeck on the emulator show the same cards, because they ask the same server.
+
+## What it does
+
+- **Cards** loads the account's cards from `GET /api/accounts/{id}/cards`, with a spinner and **Try again** like the other screens, shows every card that is not cancelled, and says "No cards yet." when there are none.
+- An **Issue a card** button opens a new screen with a **Card name** (required) and a **Spending limit per payment** (optional; empty means no limit). It issues the card with `POST /api/accounts/{id}/cards` and goes back to the list, which shows the new card.
+- **Card settings** (tap a card) has **Freeze card** for an active card, **Unfreeze card** for a frozen one, the card name and spending limit as fields with **Save changes**, and **Cancel card**, which cancels it and goes back.
+- Cards show the limit in the **account's** currency.
+- The Wallet's "active cards" count comes from the API.
+- `WalletContext`, `useStoredState` and the sample data are deleted.
+
+## The API you are calling
+
+You built these endpoints in Modules 22 and 23:
+
+| Request | Answer |
+|---|---|
+| `GET /api/accounts/{accountId}/cards` | `200`, the account's cards, oldest first, cancelled ones included |
+| `POST /api/accounts/{accountId}/cards` with `{"nickname", "spendingLimitCents"}` | `201`, the new card |
+| `PATCH /api/cards/{id}` with `{"nickname", "spendingLimitCents", "removeSpendingLimit"}` | `200`, the changed card |
+| `POST /api/cards/{id}/freeze` and `POST /api/cards/{id}/unfreeze` | `200`, the changed card |
+| `DELETE /api/cards/{id}` | `204`, no body; the card is now `CANCELLED` |
+
+Remember how the `PATCH` treats missing values: a field that is `null` or left out means "do not change it". So `"spendingLimitCents": null` does **not** remove a limit; you must send `"removeSpendingLimit": true`.
+
+## Requirements
+
+1. Make the `Card` type match the API's JSON exactly.
+2. One function per endpoint in `paydeck.ts`.
+3. In `hooks.ts`: `useCards()`, and one mutation hook per change (`useIssueCard`, `useUpdateCard`, `useFreezeCard`, `useUnfreezeCard`, `useCancelCard`). Every one of them refetches the card list when it succeeds. Avoid writing that five times.
+4. Name and limit rules in one place, used by both the issue screen and the settings screen. Use `parseMoneyInput` for the limit.
+5. Show the API's error message if a change fails.
+6. `npx tsc --noEmit` reports no errors.
+7. Commit and push to your `paydeck` repository.
+
+<Exercise title="Build it">
+Build the features above, then check: issue a card with a limit of 150, freeze and unfreeze it, rename it and remove its limit, and cancel it. After each step, compare the app with `curl localhost:8080/api/accounts/<id>/cards`. Then open the Mac app and the Android app side by side.
+
+<Fragment slot="hint">Start with the types, `paydeck.ts` and `hooks.ts`, then change one screen at a time, running `npx tsc --noEmit` after each. Delete `WalletContext` last: TypeScript then lists every place that still used it.</Fragment>
+<Fragment slot="hint2">For requirement 3, write a private helper `useCardMutation(change)` that calls `useMutation({ mutationFn: change, onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.cards(accountId) }) })`. Then `useFreezeCard = () => useCardMutation(api.freezeCard)` is one line. For the settings screen, load the card first and then render a separate `CardSettings` component, so its `useState` for the fields starts from the loaded card's values.</Fragment>
+<Fragment slot="solution">
+
+### Types and endpoints
+
+`src/types.ts`, the card:
+
+```ts
+/** A card, exactly as the API sends it. */
+export type Card = {
+  id: string;
+  accountId: string;
+  nickname: string;
+  last4: string;
+  status: CardStatus;
+  spendingLimitCents: number | null;
+  createdAt: string;
+};
+```
+
+`src/api/paydeck.ts` (with `Card` added to the type import):
+
+```ts
+export const listCards = (accountId: string) => request<Card[]>(`/api/accounts/${accountId}/cards`);
+
+export const issueCard = (accountId: string, nickname: string, spendingLimitCents: number | null) =>
+  request<Card>(`/api/accounts/${accountId}/cards`, { method: 'POST', body: { nickname, spendingLimitCents } });
+
+export const updateCard = (cardId: string, nickname: string, spendingLimitCents: number | null) =>
+  request<Card>(`/api/cards/${cardId}`, {
+    method: 'PATCH',
+    // The API only removes a limit when asked to, so that leaving it out changes nothing.
+    body: { nickname, spendingLimitCents, removeSpendingLimit: spendingLimitCents === null },
+  });
+
+export const freezeCard = (cardId: string) => request<Card>(`/api/cards/${cardId}/freeze`, { method: 'POST' });
+
+export const unfreezeCard = (cardId: string) => request<Card>(`/api/cards/${cardId}/unfreeze`, { method: 'POST' });
+
+export const cancelCard = (cardId: string) => request<void>(`/api/cards/${cardId}`, { method: 'DELETE' });
+```
+
+### Hooks
+
+In `src/api/hooks.ts`, add a key:
+
+```ts
+  cards: (id: string) => ['cards', id] as const,
+```
+
+and:
+
+```ts
+export function useCards() {
+  const accountId = useAccountId();
+  return useQuery({ queryKey: keys.cards(accountId), queryFn: () => api.listCards(accountId) });
+}
+```
+
+```ts
+/** A mutation that changes a card, and then fetches the card list again. */
+function useCardMutation<Input>(change: (input: Input) => Promise<unknown>) {
+  const accountId = useAccountId();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: change,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.cards(accountId) }),
+  });
+}
+
+export function useIssueCard() {
+  const accountId = useAccountId();
+  return useCardMutation((input: { nickname: string; spendingLimitCents: number | null }) =>
+    api.issueCard(accountId, input.nickname, input.spendingLimitCents),
+  );
+}
+
+export const useUpdateCard = () =>
+  useCardMutation((input: { cardId: string; nickname: string; spendingLimitCents: number | null }) =>
+    api.updateCard(input.cardId, input.nickname, input.spendingLimitCents),
+  );
+
+export const useFreezeCard = () => useCardMutation(api.freezeCard);
+export const useUnfreezeCard = () => useCardMutation(api.unfreezeCard);
+export const useCancelCard = () => useCardMutation(api.cancelCard);
+```
+
+`useCardMutation<Input>` is generic: `Input` is whatever the change function takes. For `useFreezeCard` that is the card ID (`api.freezeCard` takes a `string`), so `freeze.mutate(card.id)` type-checks and `freeze.mutate(42)` does not. Freezing one card refetches the whole list, which is one small request, and the list, the Wallet's count and the settings screen all update from it.
+
+### The form rules
+
+`src/cardForm.ts`:
+
+```ts
+import { parseMoneyInput } from './money';
+
+// The rules for a card's name and spending limit, shared by the screens that
+// issue a card and change one. The API checks the same rules again.
+
+export function nicknameError(text: string): string | null {
+  return text.trim() === '' ? 'Give the card a name' : null;
+}
+
+/** An empty limit means "no limit". */
+export function limitError(text: string): string | null {
+  return text.trim() === '' || parseMoneyInput(text) !== null ? null : 'Enter an amount like 200, or leave it empty';
+}
+
+export function parseLimit(text: string): number | null {
+  return text.trim() === '' ? null : parseMoneyInput(text);
+}
+```
+
+### The payment card
+
+`src/components/PaymentCard.tsx` takes the currency:
+
+```tsx
+import { formatMoney, type Currency } from '../money';
+```
+
+```tsx
+export function PaymentCard({ card, currency }: { card: Card; currency: Currency }) {
+  const limit =
+    card.spendingLimitCents === null ? 'No limit' : `Limit ${formatMoney(card.spendingLimitCents, currency)}`;
+```
+
+The rest is unchanged.
+
+### Cards
+
+`src/screens/CardsScreen.tsx`:
+
+```tsx
+import { Pressable, Text } from 'react-native';
+import { useAccount, useCards } from '../api/hooks';
+import { Button } from '../components/Button';
+import { PaymentCard } from '../components/PaymentCard';
+import { QueryState } from '../components/QueryState';
+import { Screen } from '../components/Screen';
+import { useNavigation } from '../navigation/NavigationContext';
+
+export function CardsScreen() {
+  const account = useAccount();
+  const cards = useCards();
+  const { navigate } = useNavigation();
+
+  if (account.data === undefined || cards.data === undefined) {
+    return (
+      <Screen title="Cards">
+        <QueryState queries={[account, cards]} />
+      </Screen>
+    );
+  }
+
+  const open = cards.data.filter((card) => card.status !== 'CANCELLED');
+
+  return (
+    <Screen title="Cards">
+      <Button title="Issue a card" onPress={() => navigate({ name: 'issueCard' })} />
+      {open.length === 0 && <Text>No cards yet.</Text>}
+      {open.map((card) => (
+        <Pressable
+          key={card.id}
+          accessibilityRole="button"
+          onPress={() => navigate({ name: 'card', cardId: card.id })}
+        >
+          <PaymentCard card={card} currency={account.data.currency} />
+        </Pressable>
+      ))}
+    </Screen>
+  );
+}
+```
+
+### Issuing a card
+
+Add `| { name: 'issueCard' }` to `Route` in `routes.ts`, and to `AppNavigator.tsx`:
+
+```tsx
+    case 'issueCard':
+      return <IssueCardScreen />;
+```
+
+`src/screens/IssueCardScreen.tsx`:
+
+```tsx
+import { useState } from 'react';
+import { StyleSheet, Text } from 'react-native';
+import { useAccount, useIssueCard } from '../api/hooks';
+import { Button } from '../components/Button';
+import { Field } from '../components/Field';
+import { Screen } from '../components/Screen';
+import { limitError, nicknameError, parseLimit } from '../cardForm';
+import { useNavigation } from '../navigation/NavigationContext';
+
+export function IssueCardScreen() {
+  const { goBack } = useNavigation();
+  const account = useAccount();
+  const issue = useIssueCard();
+  const [nickname, setNickname] = useState('');
+  const [limit, setLimit] = useState('');
+  const [submitted, setSubmitted] = useState(false);
+
+  const errors = { nickname: nicknameError(nickname), limit: limitError(limit) };
+
+  function confirm() {
+    setSubmitted(true);
+    if (errors.nickname === null && errors.limit === null) {
+      issue.mutate({ nickname: nickname.trim(), spendingLimitCents: parseLimit(limit) }, { onSuccess: goBack });
+    }
+  }
+
+  return (
+    <Screen title="Issue a card">
+      <Field
+        label="Card name"
+        value={nickname}
+        onChangeText={setNickname}
+        maxLength={50}
+        placeholder="Groceries"
+        error={submitted ? errors.nickname : null}
+      />
+      <Field
+        label={`Spending limit per payment (${account.data?.currency ?? 'USD'})`}
+        value={limit}
+        onChangeText={setLimit}
+        keyboardType="decimal-pad"
+        placeholder="No limit"
+        error={submitted ? errors.limit : null}
+        onSubmitEditing={confirm}
+      />
+      {issue.error && <Text style={styles.error}>{issue.error.message}</Text>}
+      <Button title={issue.isPending ? 'Issuing…' : 'Issue card'} onPress={confirm} disabled={issue.isPending} />
+    </Screen>
+  );
+}
+
+const styles = StyleSheet.create({
+  error: { color: '#b3261e' },
+});
+```
+
+`maxLength={50}` matches the API's `@Size(max = 50)`, so the app cannot send a name the API would refuse.
+
+### Card settings
+
+`src/screens/CardDetailScreen.tsx`:
+
+```tsx
+import { useState } from 'react';
+import { StyleSheet, Text } from 'react-native';
+import {
+  useAccount,
+  useCancelCard,
+  useCards,
+  useFreezeCard,
+  useUnfreezeCard,
+  useUpdateCard,
+} from '../api/hooks';
+import { Button } from '../components/Button';
+import { Field } from '../components/Field';
+import { PaymentCard } from '../components/PaymentCard';
+import { QueryState } from '../components/QueryState';
+import { Screen } from '../components/Screen';
+import { limitError, nicknameError, parseLimit } from '../cardForm';
+import type { Currency } from '../money';
+import { useNavigation } from '../navigation/NavigationContext';
+import type { Card } from '../types';
+
+export function CardDetailScreen({ cardId }: { cardId: string }) {
+  const account = useAccount();
+  const cards = useCards();
+
+  if (account.data === undefined || cards.data === undefined) {
+    return (
+      <Screen title="Card">
+        <QueryState queries={[account, cards]} />
+      </Screen>
+    );
+  }
+
+  const card = cards.data.find((c) => c.id === cardId);
+  if (card === undefined) {
+    return (
+      <Screen title="Card">
+        <Text>This card no longer exists.</Text>
+      </Screen>
+    );
+  }
+  return <CardSettings card={card} currency={account.data.currency} />;
+}
+
+/** A separate component, so the form starts from the loaded card's values. */
+function CardSettings({ card, currency }: { card: Card; currency: Currency }) {
+  const { goBack } = useNavigation();
+  const update = useUpdateCard();
+  const freeze = useFreezeCard();
+  const unfreeze = useUnfreezeCard();
+  const cancel = useCancelCard();
+
+  const [nickname, setNickname] = useState(card.nickname);
+  const [limit, setLimit] = useState(card.spendingLimitCents === null ? '' : String(card.spendingLimitCents / 100));
+  const errors = { nickname: nicknameError(nickname), limit: limitError(limit) };
+  const failure = update.error ?? freeze.error ?? unfreeze.error ?? cancel.error;
+
+  function save() {
+    if (errors.nickname === null && errors.limit === null) {
+      update.mutate({ cardId: card.id, nickname: nickname.trim(), spendingLimitCents: parseLimit(limit) });
+    }
+  }
+
+  return (
+    <Screen title={card.nickname}>
+      <PaymentCard card={card} currency={currency} />
+      {card.status === 'ACTIVE' && (
+        <Button title="Freeze card" variant="secondary" onPress={() => freeze.mutate(card.id)} />
+      )}
+      {card.status === 'FROZEN' && <Button title="Unfreeze card" onPress={() => unfreeze.mutate(card.id)} />}
+
+      <Field label="Card name" value={nickname} onChangeText={setNickname} maxLength={50} error={errors.nickname} />
+      <Field
+        label={`Spending limit per payment (${currency})`}
+        value={limit}
+        onChangeText={setLimit}
+        keyboardType="decimal-pad"
+        placeholder="No limit"
+        error={errors.limit}
+      />
+      <Button
+        title={update.isPending ? 'Saving…' : 'Save changes'}
+        variant="secondary"
+        onPress={save}
+        disabled={update.isPending}
+      />
+
+      {failure && <Text style={styles.error}>{failure.message}</Text>}
+      <Button title="Cancel card" variant="danger" onPress={() => cancel.mutate(card.id, { onSuccess: goBack })} />
+    </Screen>
+  );
+}
+
+const styles = StyleSheet.create({
+  error: { color: '#b3261e' },
+});
+```
+
+- **Why two components?** `useState(card.nickname)` only uses its starting value on the **first** render. If the fields lived in `CardDetailScreen`, the first render would happen before the cards had loaded, with no card to start from. `CardSettings` is only rendered once the card exists, so its fields start with the card's real name and limit. (And all hooks stay above every early `return`.)
+- **`??` chains** pick the first error that is not `null`, so one line shows whichever change failed.
+- **No local status anywhere.** Pressing **Freeze card** does not change anything in the app; it asks the API, the list is refetched, and the new status arrives from the server. The button turns into **Unfreeze card** because the *server* says the card is frozen.
+
+### Wallet and cleanup
+
+In `HomeScreen.tsx`, replace `useWallet` with the API:
+
+```tsx
+import { useAccount, useActivity, useCards } from '../api/hooks';
+```
+
+```tsx
+  const cards = useCards();
+```
+
+add `cards` to the check and to `QueryState`:
+
+```tsx
+  if (account.data === undefined || activity.data === undefined || cards.data === undefined) {
+    return (
+      <Screen title="Wallet">
+        <QueryState queries={[account, activity, cards]} />
+      </Screen>
+    );
+  }
+```
+
+and count from `cards.data`:
+
+```tsx
+  const activeCards = cards.data.filter((card) => card.status === 'ACTIVE').length;
+```
+
+Remove `WalletProvider` from `App.tsx`, so it ends:
+
+```tsx
+    <QueryClientProvider client={queryClient}>
+      <AccountIdGate welcome={WelcomeScreen}>
+        <AppNavigator />
+      </AccountIdGate>
+    </QueryClientProvider>
+```
+
+and delete `src/state/WalletContext.tsx`, `src/state/useStoredState.ts` and `src/data/sampleData.ts` (and the empty `data` folder). `npx tsc --noEmit` reports nothing.
+
+### Checking it
+
+The whole tour, run against the real API with a new EUR account, Chloe's. On the Cards tab, "No cards yet." Pressing **Issue card** with empty fields:
+
+```
+Give the card a name
+```
+
+With the name "Groceries" and the limit "lots":
+
+```
+Enter an amount like 200, or leave it empty
+```
+
+With the limit 150, the list shows the new card. Its description for screen readers (the `accessibilityLabel` from Module 12):
+
+```
+Groceries card ending 8056, Active, Limit €150.00
+```
+
+After **Freeze card**:
+
+```
+Groceries card ending 8056, Frozen, Limit €150.00
+```
+
+After **Unfreeze card**, renaming it "Food", emptying the limit and pressing **Save changes**:
+
+```
+Food card ending 8056, Active, No limit
+```
+
+and the API agrees:
+
+```json
+[{"id":"fffcb7c0-650d-4443-bebe-4276f2c14f62","accountId":"843ea3df-fca9-41ac-aa12-53b819e89396","nickname":"Food","last4":"8056","status":"ACTIVE","spendingLimitCents":null,"createdAt":"2026-10-22T00:52:08.723703Z"}]
+```
+
+`"spendingLimitCents":null`: the limit really was removed, thanks to `removeSpendingLimit`. After **Cancel card**, the app is back on the list with "No cards yet.", the API says the card's status is `CANCELLED`, and the Wallet shows **0 active cards**.
+
+What to notice:
+
+- **The server is the only truth.** No screen keeps its own copy of a card's status; every change is a request, followed by a refetch. That is what makes the Mac and the phone agree.
+- **The pattern repeats.** Every feature from now on is the same four steps: a type, an endpoint function, a hook, a screen with `QueryState`. Part 8 adds sign-in, Part 9 payments, with exactly this shape.
+- **Validation lives on both sides.** The app's checks give instant, friendly messages; the API's checks protect the data from any client, including a buggy app or `curl`.
+</Fragment>
+</Exercise>
+
+<Aside type="tip" title="Commit and push">
+This is a good moment to commit (`git add -A`, `git commit -m "Load cards from the PayDeck API"`) and push. Your app and your API now form one working product.
+</Aside>
+
+<MarkComplete />

@@ -1,0 +1,434 @@
+---
+title: "26.2 Loading and error states"
+description: "Every request is either still waiting, failed, or done. Show a spinner, a clear error with a Try again button, or the data, and load the real transaction history."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson the Wallet and Activity screens load the real balance and transaction history, show a spinner while they wait, and show a readable error with a **Try again** button when the API cannot be reached.
+
+## Why it matters
+
+Sample data on the device was always there, instantly. Data from a server is not. On a train, in a lift, or when the server is down, a request can take seconds or fail completely. In lesson 26.1 you saw the result of ignoring that: a balance stuck at `…` forever, and no hint of what was wrong. A payments app that looks frozen makes people nervous about their money. Good apps always tell you what is going on.
+
+## The idea
+
+### Three states
+
+Every request is in exactly one of three states:
+
+| State | What the screen shows |
+|---|---|
+| **Pending** (waiting for the answer) | a spinner |
+| **Error** (it failed) | what went wrong, and a way to try again |
+| **Success** (the data arrived) | the data |
+
+Plus one more that is easy to forget: success with **nothing in it**. An empty list deserves a sentence like "No transactions yet.", not a blank screen.
+
+### A custom hook
+
+Every screen that loads data needs the same three pieces of state and the same `useEffect`. Lesson 14.5 showed how to put repeated hook code into a **custom hook** (`useStoredState`). Here it is `useLoad`: give it a function that loads something, and it gives back `data`, `error`, `isPending` and `refetch` (load again).
+
+### Answers that arrive too late
+
+There is one trap. Ana opens Activity, which starts a request, then quickly switches to the Wallet tab. The Activity screen is gone, but its request is still on its way. When the answer arrives, it would set the state of a screen that no longer exists. A `useEffect` can return a **cleanup function**, which React runs when the screen goes away (or before the effect runs again). The cleanup sets a flag, `current = false`, and the late answer is ignored.
+
+## Worked example
+
+### The activity type and endpoint
+
+The API's history endpoint from the Module 24 project sends lines like this:
+
+```json
+{"transactionId":"9441aa22-5ea5-48f8-8584-c10f06801175","type":"TOP_UP","description":"Top-up","amountCents":1250,"createdAt":"2026-10-22T00:49:02.797852Z"}
+```
+
+In `src/types.ts`, replace the sample `Transaction` type with one that matches:
+
+```ts
+export type TransactionType = 'TOP_UP' | 'TRANSFER';
+
+/** One line of an account's history, as GET /api/accounts/{id}/transactions sends it. */
+export type Activity = {
+  transactionId: string;
+  type: TransactionType;
+  description: string;
+  amountCents: number;
+  createdAt: string;
+};
+```
+
+In `src/api/paydeck.ts`, import `Activity` too (`import type { Account, Activity } from '../types';`) and add:
+
+```ts
+export const getActivity = (accountId: string) =>
+  request<Activity[]>(`/api/accounts/${accountId}/transactions`);
+```
+
+### useLoad
+
+`src/api/useLoad.ts`:
+
+```ts
+import { useEffect, useState } from 'react';
+
+export type Loaded<T> = {
+  data: T | undefined;
+  error: Error | null;
+  isPending: boolean;
+  refetch: () => void;
+};
+
+/**
+ * Runs `load` when the screen appears (and again when a value in `deps`
+ * changes), and keeps track of the three states: waiting, failed, or done.
+ */
+export function useLoad<T>(load: () => Promise<T>, deps: unknown[]): Loaded<T> {
+  const [data, setData] = useState<T | undefined>(undefined);
+  const [error, setError] = useState<Error | null>(null);
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    let current = true;
+    setError(null);
+    load().then(
+      (value) => {
+        if (current) {
+          setData(value);
+        }
+      },
+      (e: Error) => {
+        if (current) {
+          setError(e);
+        }
+      },
+    );
+    // If the screen goes away, or loads again, before the answer arrives, ignore it.
+    return () => {
+      current = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [...deps, attempt]);
+
+  return {
+    data,
+    error,
+    isPending: data === undefined && error === null,
+    refetch: () => setAttempt((n) => n + 1),
+  };
+}
+```
+
+- **`.then(onSuccess, onFailure)`**: `then` accepts a second function, which runs if the promise is rejected, like `.catch` (lesson 8.2). Exactly one of the two runs.
+- **`refetch`** adds one to `attempt`. Because `attempt` is in the effect's list, the effect runs again: a new request. That is all "Try again" needs.
+- **`[...deps, attempt]`** copies the caller's values into the list and adds `attempt` (the spread `...` from lesson 7.2).
+- **The `eslint-disable` comment** switches off a rule of the project's **linter**, the code checker that `npm run lint` runs. Without it, the linter reports two errors on that line: `React Hook useEffect has a missing dependency: 'load'` and `React Hook useEffect has a spread element in its dependency array`. The linter cannot see that `deps` lists everything `load` uses, so it asks you to list `load` itself, which is a new function on every render and would fetch forever. Comments like this are a sign that hand-made data loading is fiddly, which is why lesson 26.3 replaces `useLoad` with a library.
+
+### QueryState
+
+One component shows the spinner or the error for any screen. `src/components/QueryState.tsx`:
+
+```tsx
+import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import { Button } from './Button';
+
+type Query = {
+  isPending: boolean;
+  error: Error | null;
+  refetch: () => unknown;
+};
+
+/**
+ * Shows a spinner while data loads, and the error with a Try again button
+ * if it failed. Shows nothing once everything has loaded.
+ */
+export function QueryState({ queries }: { queries: Query[] }) {
+  const failed = queries.find((query) => query.error !== null);
+  if (failed?.error) {
+    return (
+      <View style={styles.box}>
+        <Text style={styles.message}>{failed.error.message}</Text>
+        <Button title="Try again" variant="secondary" onPress={() => queries.forEach((q) => q.refetch())} />
+      </View>
+    );
+  }
+  if (queries.some((query) => query.isPending)) {
+    return (
+      <View style={styles.box}>
+        <ActivityIndicator accessibilityLabel="Loading" color="#3c4fe0" />
+      </View>
+    );
+  }
+  return null;
+}
+
+const styles = StyleSheet.create({
+  box: { padding: 24, gap: 16, alignItems: 'center' },
+  message: { fontSize: 16, textAlign: 'center', color: '#14162b' },
+});
+```
+
+- It takes a **list** of queries, because the Wallet needs two things (the account and the activity) and should show one spinner, not two.
+- **`ActivityIndicator`** is React Native's built-in spinner. `accessibilityLabel` lets a screen reader say "Loading" instead of nothing.
+- An error wins over pending: if one request failed, there is no point spinning for the other.
+- **The error message is the `ApiError`'s message** from lesson 26.1, so it is already written for a person.
+- `refetch: () => unknown` means "a function whose result we ignore". Lesson 26.3's library returns a promise from `refetch`; this type accepts both.
+
+### The activity row
+
+`src/components/ActivityRow.tsx` now takes an `Activity` and the account's currency:
+
+```tsx
+import { StyleSheet, Text, View } from 'react-native';
+import { formatSignedMoney, type Currency } from '../money';
+import type { Activity } from '../types';
+
+export function ActivityRow({ item, currency }: { item: Activity; currency: Currency }) {
+  return (
+    <View style={styles.row}>
+      <View style={styles.grow}>
+        <Text style={styles.description}>{item.description}</Text>
+        <Text style={styles.date}>{item.createdAt.slice(0, 10)}</Text>
+      </View>
+      <Text style={[styles.amount, item.amountCents > 0 && styles.positive]}>
+        {formatSignedMoney(item.amountCents, currency)}
+      </Text>
+    </View>
+  );
+}
+```
+
+Keep your `styles` from Module 14 as they are. `createdAt.slice(0, 10)` takes the first ten characters, the date part: `2026-10-22`.
+
+### The screens
+
+`src/screens/ActivityScreen.tsx`:
+
+```tsx
+import { Text } from 'react-native';
+import { getAccount, getActivity } from '../api/paydeck';
+import { useLoad } from '../api/useLoad';
+import { ActivityRow } from '../components/ActivityRow';
+import { QueryState } from '../components/QueryState';
+import { Screen } from '../components/Screen';
+import { useAccountId } from '../state/AccountIdContext';
+
+export function ActivityScreen() {
+  const accountId = useAccountId();
+  const account = useLoad(() => getAccount(accountId), [accountId]);
+  const activity = useLoad(() => getActivity(accountId), [accountId]);
+
+  if (account.data === undefined || activity.data === undefined) {
+    return (
+      <Screen title="Activity">
+        <QueryState queries={[account, activity]} />
+      </Screen>
+    );
+  }
+
+  const { currency } = account.data;
+
+  return (
+    <Screen title="Activity">
+      {activity.data.length === 0 && <Text>No transactions yet.</Text>}
+      {activity.data.map((item) => (
+        <ActivityRow key={item.transactionId} item={item} currency={currency} />
+      ))}
+    </Screen>
+  );
+}
+```
+
+This shape is worth remembering, because every screen from now on uses it: **if anything is missing, show `QueryState` and stop (an early `return`); below that line, all the data is there.** TypeScript knows it too: after the `if`, `account.data` cannot be `undefined`, so no `?.` is needed anywhere below.
+
+`src/screens/HomeScreen.tsx`:
+
+```tsx
+import { StyleSheet, Text } from 'react-native';
+import { getAccount, getActivity } from '../api/paydeck';
+import { useLoad } from '../api/useLoad';
+import { ActivityRow } from '../components/ActivityRow';
+import { Button } from '../components/Button';
+import { QueryState } from '../components/QueryState';
+import { Screen } from '../components/Screen';
+import { formatMoney } from '../money';
+import { useNavigation } from '../navigation/NavigationContext';
+import { useAccountId } from '../state/AccountIdContext';
+import { useWallet } from '../state/WalletContext';
+
+export function HomeScreen() {
+  const accountId = useAccountId();
+  const account = useLoad(() => getAccount(accountId), [accountId]);
+  const activity = useLoad(() => getActivity(accountId), [accountId]);
+  const { cards } = useWallet();
+  const { switchTab } = useNavigation();
+
+  if (account.data === undefined || activity.data === undefined) {
+    return (
+      <Screen title="Wallet">
+        <QueryState queries={[account, activity]} />
+      </Screen>
+    );
+  }
+
+  const { ownerName, balanceCents, currency } = account.data;
+  const activeCards = cards.filter((card) => card.status === 'ACTIVE').length;
+
+  return (
+    <Screen title={`Hi, ${ownerName}`}>
+      <Text style={styles.muted}>Balance</Text>
+      <Text style={styles.balance}>{formatMoney(balanceCents, currency)}</Text>
+      <Text style={styles.muted}>
+        {activeCards} active {activeCards === 1 ? 'card' : 'cards'}
+      </Text>
+      <Text style={styles.heading}>Recent activity</Text>
+      {activity.data.length === 0 && <Text style={styles.muted}>No transactions yet.</Text>}
+      {activity.data.slice(0, 3).map((item) => (
+        <ActivityRow key={item.transactionId} item={item} currency={currency} />
+      ))}
+      <Button title="See all activity" variant="secondary" onPress={() => switchTab('activity')} />
+    </Screen>
+  );
+}
+```
+
+Keep your `styles` at the bottom. Hooks must run in the same order on every render (lesson 10.5), so all of them (`useAccountId`, both `useLoad`s, `useWallet`, `useNavigation`) come **before** the early `return`.
+
+### Remove the sample balance and activity
+
+The wallet context now only holds cards. In `src/data/sampleData.ts`, delete `sampleBalanceCents` and `sampleActivity`, and import only `Card`. In `src/state/WalletContext.tsx`:
+
+```tsx
+import { createContext, useContext, type ReactNode } from 'react';
+import { sampleCards } from '../data/sampleData';
+import type { Card, CardStatus } from '../types';
+import { useStoredState } from './useStoredState';
+
+type Wallet = {
+  cards: Card[];
+  setCardStatus: (cardId: string, status: CardStatus) => void;
+};
+```
+
+and at the end of `WalletProvider`:
+
+```tsx
+  return <WalletContext.Provider value={{ cards, setCardStatus }}>{children}</WalletContext.Provider>;
+```
+
+Run `npx tsc --noEmit`. It reports every place that still uses something you removed; fix each one. When it reports nothing, run the app.
+
+### See all three states
+
+Ana's account from lesson 26.1 is empty, so give it some history from the terminal (paste her account ID):
+
+```sh
+curl -s -X POST localhost:8080/api/accounts/<id>/top-ups \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $(uuidgen)" \
+  -d '{"amountCents": 2000, "description": "Top-up from card"}'
+```
+
+`uuidgen` is a Mac command that prints a new UUID. Run it a couple of times with different amounts, then press `r` in Metro to reload. The Wallet and Activity show the real top-ups, newest first.
+
+Now stop the API and reload again. For a moment you see the spinner, then:
+
+```
+Could not reach PayDeck. Check that the API is running.
+```
+
+with a **Try again** button. Start the API, wait for `Started PayDeckApplication`, and press **Try again**: the spinner, then "Hi, Ana Silva", the balance and the rows. When this lesson was tested, Ana's three newest rows were:
+
+```
++$1.00
++$10.00
++$20.00
+```
+
+and the balance `$81.50`: exactly what `curl localhost:8080/api/accounts/<id>` said.
+
+<Exercise title="Dates in the customer's time zone">
+`createdAt` is in **UTC**, the world's reference time zone (that is what the `Z` at the end means). `slice(0, 10)` shows the UTC date, so a coffee bought at 8 pm in California on 21 October shows as 2026-10-22: tomorrow. Write `src/dates.ts` with a function `formatDate(iso: string): string` that shows the date **in the device's time zone**, like `Oct 22, 2026`, and use it in `ActivityRow`.
+
+<Fragment slot="hint">`new Date(iso)` turns the text into a date. `Intl.DateTimeFormat` formats dates the way `Intl.NumberFormat` formats money (lesson 13.6), using the device's time zone unless told otherwise.</Fragment>
+<Fragment slot="hint2">The options you need are `{ day: 'numeric', month: 'short', year: 'numeric' }`.</Fragment>
+<Fragment slot="solution">
+
+`src/dates.ts`:
+
+```ts
+const dateFormat = new Intl.DateTimeFormat('en', { day: 'numeric', month: 'short', year: 'numeric' });
+
+/** "2026-10-22T00:41:15Z" becomes "Oct 22, 2026", or "Oct 21, 2026" where it was still the 21st. */
+export function formatDate(iso: string): string {
+  return dateFormat.format(new Date(iso));
+}
+```
+
+In `ActivityRow.tsx`, `import { formatDate } from '../dates';` and show `{formatDate(item.createdAt)}` instead of the slice.
+
+The same moment, `2026-10-22T00:41:15Z`, formatted on computers in two time zones:
+
+```
+Oct 22, 2026      (London)
+Oct 21, 2026      (Los Angeles)
+```
+
+The formatter is created once, outside the function, because creating an `Intl` formatter is much slower than using one.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Hooks after an early return">
+Moving `useWallet()` below `if (...) return` makes React fail with an error about rendering more hooks than during the previous render: on the first render the function stopped before reaching it, on the next it did not. Call every hook at the top.
+</Aside>
+
+<Aside type="caution" title="Only a spinner">
+A screen that only knows "loading" and "loaded" spins forever when the request fails. Every request can fail; always handle the error state.
+</Aside>
+
+<Aside type="caution" title="A blank screen for an empty list">
+`[].map(...)` renders nothing, which looks broken. Check `length === 0` and say so.
+</Aside>
+
+<Aside type="caution" title="Showing raw errors">
+`TypeError: Network request failed` means nothing to a customer. Turn errors into sentences a person can act on, in one place (`request` in `client.ts`), and show those.
+</Aside>
+
+## Recap
+
+- A request is pending, failed or done, and an empty result is a fourth case worth its own message.
+- `useLoad` keeps the three states in one custom hook; `refetch` loads again.
+- A `useEffect` cleanup stops a late answer from updating a screen that has gone.
+- `QueryState` shows a spinner or the error with **Try again** for any list of requests.
+- The screen shape: hooks first, then "if anything is missing, show `QueryState`", then the real screen with all the data.
+
+<Quiz
+	questions={[
+		{
+			question: 'What does the cleanup function in useLoad prevent?',
+			options: ['The request from being sent twice', 'A late answer from updating a screen that has gone or started a newer request', 'The spinner from showing'],
+			answer: 1,
+			explanation: 'React runs the cleanup when the screen goes away or the effect runs again; it sets current = false, and the late answer is ignored.',
+		},
+		{
+			question: 'Activity loads fine but returns an empty list. What should the screen show?',
+			options: ['A spinner', 'Nothing', 'A sentence such as "No transactions yet."'],
+			answer: 2,
+			explanation: 'An empty list is a successful answer, and the person should know there is simply nothing yet.',
+		},
+		{
+			question: 'Why are all hooks called before "if (account.data === undefined) return ..."?',
+			options: ['It is faster', 'React needs the same hooks in the same order on every render', 'TypeScript requires it'],
+			answer: 1,
+			explanation: 'If a hook is skipped on one render but not the next, React mixes up which state belongs to which hook and stops with an error.',
+		},
+	]}
+/>
+
+<MarkComplete />

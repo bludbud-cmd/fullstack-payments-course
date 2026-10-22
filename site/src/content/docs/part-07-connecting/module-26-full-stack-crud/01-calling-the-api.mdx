@@ -1,0 +1,531 @@
+---
+title: "26.1 Calling the API from the app"
+description: "Connect PayDeck to the Spring Boot API: one place for the server address, one function that makes every request and turns error answers into readable errors, and a first launch that opens a real account."
+sidebar:
+  order: 1
+---
+
+import { Aside, FileTree } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson the PayDeck app opens a real account on its first launch, remembers it, and shows that account's name and balance from the API.
+
+## Why it matters
+
+Since Module 14, the PayDeck app has shown sample data that lives on the device. Since Module 21, the PayDeck API has kept real accounts, cards and money in PostgreSQL. Neither is useful alone: an app without a server cannot share data with anyone, and a server without an app has no customers. This module connects them, which is what "full stack" means.
+
+## The idea
+
+### The app is just another client
+
+You already know how to talk to the API: in Module 19 you sent requests with `curl` and REST Client, and in Module 8 you used `fetch` in JavaScript. The app does exactly the same thing. To the API, the app is one more client sending `GET /api/accounts/{id}` and reading JSON back.
+
+### Three layers
+
+Screens should not be full of `fetch` calls. When the server's address changes, or an error needs handling, you would have to change every screen. So the code is split into three small layers:
+
+<FileTree>
+- src/
+  - config.ts **where the API is**
+  - api/
+    - client.ts **how to send any request**
+    - paydeck.ts **one function per endpoint**
+</FileTree>
+
+- `config.ts` holds the API's address, `API_BASE_URL`. Part 10 changes this one line to point at the real server.
+- `client.ts` has one function, `request`, that sends a request, reads the JSON answer, and turns error answers into a JavaScript error with a readable message.
+- `paydeck.ts` has a short function for each endpoint: `getAccount(id)`, `openAccount(name, currency)`, and so on. Screens only ever call these.
+
+### Where is localhost?
+
+`localhost` means "this computer". The Mac app runs on your Mac, the same computer as the API, so `http://localhost:8080` works. The Android emulator is different: it is a separate (virtual) phone, and for the emulator `localhost` is *the phone itself*, where no API is running. The emulator gives your Mac the special address **`10.0.2.2`**. Lesson 26.4 covers this, and other ways to connect, in detail.
+
+### Who am I?
+
+Every API call needs an account ID, but the app does not know who it belongs to. Sign-in arrives in Part 8. Until then, the app does what many apps do for guests: on first launch it opens a new account, saves the account ID on the device with AsyncStorage (lesson 14.5), and uses it from then on.
+
+## Worked example
+
+### Before you start
+
+1. Start the API, in its folder, as in Module 23:
+
+   ```sh
+   cd ~/Projects/course/paydeck-api
+   docker compose up -d
+   ./mvnw spring-boot:run
+   ```
+
+2. In a second terminal, open the app's folder, `~/Projects/course/PayDeck`.
+3. PayDeck needs two things from Module 13 that the Module 14 project did not use. Copy `Field.tsx` (the version with the `ref` prop, from lesson 13.5) from `HelloMe` into `src/components/`, and copy the `parseMoneyInput` function from lesson 13.6 into `src/money.ts`.
+
+### Currencies in money.ts
+
+Accounts can be in USD, EUR, GBP or INR (Module 21), so `formatMoney` needs a currency. Change the top of `src/money.ts`:
+
+```ts
+export type Currency = 'USD' | 'EUR' | 'GBP' | 'INR';
+
+export function formatMoney(cents: number, currency: Currency = 'USD'): string {
+  return new Intl.NumberFormat('en', { style: 'currency', currency }).format(cents / 100);
+}
+
+export function formatSignedMoney(cents: number, currency: Currency = 'USD'): string {
+  return (cents < 0 ? '−' : '+') + formatMoney(Math.abs(cents), currency);
+}
+```
+
+`currency: Currency = 'USD'` is a **default value**: when a caller leaves the currency out, it is `'USD'`. The screens that still show sample data keep working unchanged.
+
+### The account type
+
+The app's types should match the JSON the API sends. Add to `src/types.ts`:
+
+```ts
+import type { Currency } from './money';
+
+/** A PayDeck account, exactly as GET /api/accounts/{id} sends it. */
+export type Account = {
+  id: string;
+  ownerName: string;
+  currency: Currency;
+  balanceCents: number;
+  createdAt: string;
+};
+```
+
+`createdAt` is a `string` because JSON has no date type: the API sends times as text like `"2026-10-22T00:41:15.902741Z"`.
+
+### config.ts
+
+`src/config.ts`:
+
+```ts
+import { Platform } from 'react-native';
+
+/**
+ * Where the PayDeck API runs. On the Mac it is this computer, localhost.
+ * The Android emulator is a separate (virtual) device, and reaches the Mac
+ * through the special address 10.0.2.2. Part 10 points this at the real server.
+ */
+export const API_BASE_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8080' : 'http://localhost:8080';
+```
+
+`Platform.OS` is `'android'` on Android and `'macos'` on the Mac (lesson 11.3).
+
+### client.ts
+
+`src/api/client.ts`:
+
+```ts
+import { API_BASE_URL } from '../config';
+
+/** An error answer from the API, in its "problem details" format. */
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly title: string,
+    detail: string,
+    readonly code?: string,
+    readonly fields?: Record<string, string>,
+  ) {
+    super(detail);
+  }
+}
+
+type RequestOptions = {
+  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+  body?: unknown;
+  /** Send the same key again when retrying, so money never moves twice. */
+  idempotencyKey?: string;
+};
+
+/** Calls the PayDeck API and returns the JSON it answers, or throws an ApiError. */
+export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+  }
+  if (options.idempotencyKey) {
+    headers['Idempotency-Key'] = options.idempotencyKey;
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(API_BASE_URL + path, {
+      method: options.method ?? 'GET',
+      headers,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    });
+  } catch {
+    throw new ApiError(0, 'No connection', 'Could not reach PayDeck. Check that the API is running.');
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
+  }
+  const json = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new ApiError(
+      response.status,
+      json?.title ?? 'Something went wrong',
+      json?.detail ?? `The server answered ${response.status}`,
+      json?.code,
+      json?.fields,
+    );
+  }
+  return json as T;
+}
+```
+
+Line by line:
+
+- **`class ApiError extends Error`** works like a Java exception class (lesson 17.3): an `ApiError` *is an* `Error`, so it can be thrown and caught, and it has a `message`. `super(detail)` makes the API's `detail` text the message. Writing `readonly status: number` inside the constructor's brackets is TypeScript shorthand: it declares a field *and* fills it from the argument. So `error.status`, `error.title`, `error.code` and `error.fields` all exist, and nothing can change them afterwards.
+- **`ApiError` carries everything from the API's problem details** (lesson 22.4): the status, the title, the detail, PayDeck's own `code` like `INSUFFICIENT_FUNDS`, and the per-field messages of a validation error.
+- **`request<T>`** is generic, like `useStoredState<T>` in lesson 14.5: `request<Account>(...)` returns a `Promise<Account>`. TypeScript cannot check what the server really sends, so `json as T` *tells* it the type. That is why the types in `types.ts` must match the API exactly.
+- **`options: RequestOptions = {}`**: the options are optional; a plain `request('/api/...')` is a `GET`.
+- **Headers:** `Content-Type: application/json` only when there is a body, and the `Idempotency-Key` from lesson 24.5 when one is given. Lesson 26.3 uses it.
+- **`try { await fetch(...) } catch`**: `fetch` only fails when there is no answer at all: the API is not running, the address is wrong, or there is no network. That becomes an `ApiError` with status `0` and a message a person can act on.
+- **An answer always arrives as a `Response`**, even `404` or `500`. `response.ok` is `true` for 200–299. For anything else the problem details become an `ApiError`. `.catch(() => null)` covers an error answer with no JSON at all; `json?.title` reads `title` only if `json` is not `null` (optional chaining, lesson 9.4), and `??` supplies a fallback.
+- **`204 No Content`** has no body, so there is nothing to read (cancelling a card answers `204`).
+
+### paydeck.ts
+
+`src/api/paydeck.ts`:
+
+```ts
+import type { Currency } from '../money';
+import type { Account } from '../types';
+import { request } from './client';
+
+// One function per API endpoint. Screens never call fetch themselves.
+
+export const openAccount = (ownerName: string, currency: Currency) =>
+  request<Account>('/api/accounts', { method: 'POST', body: { ownerName, currency } });
+
+export const getAccount = (accountId: string) => request<Account>(`/api/accounts/${accountId}`);
+```
+
+### Remembering the account
+
+`src/state/AccountIdContext.tsx` holds the account ID for the whole app. It is a context (lesson 14.3) with a "gate" in front: until it knows the account, it shows something else instead of the app.
+
+```tsx
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { createContext, useContext, useEffect, useState, type ComponentType, type ReactNode } from 'react';
+
+const STORAGE_KEY = 'paydeck.accountId';
+
+type AccountIdState =
+  | { status: 'loading' }
+  | { status: 'none' }
+  | { status: 'ready'; accountId: string };
+
+const AccountIdContext = createContext<string | null>(null);
+
+type AccountIdGateProps = {
+  /** The screen shown when this device has no account yet. */
+  welcome: ComponentType<{ onOpened: (accountId: string) => void }>;
+  children: ReactNode;
+};
+
+/**
+ * Remembers which PayDeck account belongs to this device. Until sign-in
+ * arrives in Part 8, the first launch opens a new account and keeps its ID.
+ */
+export function AccountIdGate({ welcome: Welcome, children }: AccountIdGateProps) {
+  const [state, setState] = useState<AccountIdState>({ status: 'loading' });
+
+  useEffect(() => {
+    AsyncStorage.getItem(STORAGE_KEY)
+      .then((saved) => setState(saved ? { status: 'ready', accountId: saved } : { status: 'none' }))
+      .catch(() => setState({ status: 'none' }));
+  }, []);
+
+  if (state.status === 'loading') {
+    return null;
+  }
+  if (state.status === 'none') {
+    return (
+      <Welcome
+        onOpened={(accountId) => {
+          AsyncStorage.setItem(STORAGE_KEY, accountId).catch(() => {});
+          setState({ status: 'ready', accountId });
+        }}
+      />
+    );
+  }
+  return <AccountIdContext.Provider value={state.accountId}>{children}</AccountIdContext.Provider>;
+}
+
+export function useAccountId(): string {
+  const accountId = useContext(AccountIdContext);
+  if (accountId === null) {
+    throw new Error('useAccountId must be used inside <AccountIdGate>');
+  }
+  return accountId;
+}
+```
+
+- **The state is a union** (lesson 9.3) of three situations: still reading the device's storage, no saved account, or ready with an ID. Only the `ready` one has an `accountId`, so TypeScript will not let you use an ID that does not exist.
+- **`welcome: ComponentType<...>`** means the prop is a *component*, not an element. `welcome: Welcome` renames it while unpacking, because a component used in JSX must start with a capital letter: `<Welcome onOpened={...} />`.
+- **The children** (the whole app) are only rendered once there is an account, so every screen inside can call `useAccountId()` and always get a string.
+
+### The welcome screen
+
+`src/screens/WelcomeScreen.tsx`:
+
+```tsx
+import { useState } from 'react';
+import { StyleSheet, Text, View } from 'react-native';
+import { openAccount } from '../api/paydeck';
+import { Button } from '../components/Button';
+import { Field } from '../components/Field';
+import type { Currency } from '../money';
+
+const CURRENCIES: Currency[] = ['USD', 'EUR', 'GBP', 'INR'];
+
+/** Shown on first launch: opens a PayDeck account for this device. */
+export function WelcomeScreen({ onOpened }: { onOpened: (accountId: string) => void }) {
+  const [name, setName] = useState('');
+  const [currency, setCurrency] = useState<Currency>('USD');
+  const [submitted, setSubmitted] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const nameError = name.trim() === '' ? 'Tell us your name' : null;
+
+  async function open() {
+    setSubmitted(true);
+    if (nameError !== null) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const account = await openAccount(name.trim(), currency);
+      onOpened(account.id);
+    } catch (e) {
+      setError((e as Error).message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <View style={styles.page}>
+      <Text accessibilityRole="header" style={styles.title}>
+        Welcome to PayDeck
+      </Text>
+      <Text style={styles.muted}>Open your account to get started.</Text>
+      <Field
+        label="Your name"
+        value={name}
+        onChangeText={setName}
+        maxLength={100}
+        error={submitted ? nameError : null}
+      />
+      <Text style={styles.label}>Currency</Text>
+      <View style={styles.row}>
+        {CURRENCIES.map((code) => (
+          <View key={code} style={styles.choice}>
+            <Button
+              title={code}
+              variant={code === currency ? 'primary' : 'secondary'}
+              onPress={() => setCurrency(code)}
+            />
+          </View>
+        ))}
+      </View>
+      {error !== null && <Text style={styles.error}>{error}</Text>}
+      <Button title={busy ? 'Opening…' : 'Open my account'} onPress={open} disabled={busy} />
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  page: { padding: 24, gap: 16, width: '100%', maxWidth: 640, alignSelf: 'center' },
+  title: { fontSize: 28, fontWeight: '700', color: '#14162b' },
+  muted: { color: '#5d6177' },
+  label: { fontSize: 14, fontWeight: '600' },
+  row: { flexDirection: 'row', gap: 8 },
+  choice: { flex: 1 },
+  error: { color: '#b3261e' },
+});
+```
+
+The pattern for any action that calls the API: mark it **busy** (so the button cannot be pressed twice and shows "Opening…"), `await` the call inside `try`, and on failure show the error's message and allow another try. `(e as Error).message` works for an `ApiError` too, because an `ApiError` is an `Error`.
+
+### Wiring it up
+
+`App.tsx` puts the gate around everything:
+
+```tsx
+import { AppNavigator } from './src/navigation/AppNavigator';
+import { WelcomeScreen } from './src/screens/WelcomeScreen';
+import { AccountIdGate } from './src/state/AccountIdContext';
+import { WalletProvider } from './src/state/WalletContext';
+
+export default function App() {
+  return (
+    <AccountIdGate welcome={WelcomeScreen}>
+      <WalletProvider>
+        <AppNavigator />
+      </WalletProvider>
+    </AccountIdGate>
+  );
+}
+```
+
+And the Wallet screen loads the real account when it appears. In `src/screens/HomeScreen.tsx`, add these imports:
+
+```tsx
+import { useEffect, useState } from 'react';
+import { getAccount } from '../api/paydeck';
+import { useAccountId } from '../state/AccountIdContext';
+import type { Account } from '../types';
+```
+
+and change the start of `HomeScreen` and the title and balance:
+
+```tsx
+export function HomeScreen() {
+  const accountId = useAccountId();
+  const [account, setAccount] = useState<Account | null>(null);
+  const { cards, activity } = useWallet();
+  const { switchTab } = useNavigation();
+  const activeCards = cards.filter((card) => card.status === 'ACTIVE').length;
+
+  useEffect(() => {
+    getAccount(accountId).then(setAccount);
+  }, [accountId]);
+
+  return (
+    <Screen title={account ? `Hi, ${account.ownerName}` : 'Wallet'}>
+      <Text style={styles.muted}>Balance</Text>
+      <Text style={styles.balance}>{account ? formatMoney(account.balanceCents, account.currency) : '…'}</Text>
+```
+
+This is the `useEffect` pattern from lesson 10.5: after the first render, fetch; when the answer arrives, store it in state, which renders again with the data. `[accountId]` means "run again only if the account ID changes". Until the answer arrives, `account` is `null`, and the screen shows `…`. Cards and activity still come from sample data; lesson 26.2 and the mini-project replace them.
+
+Remove `balanceCents` from what `HomeScreen` takes from `useWallet()`; the sample balance is no longer used.
+
+### Run it
+
+Run `npm run macos`. The welcome screen appears. Type "Ana Silva", pick **EUR** and press **Open my account**. The Wallet says **Hi, Ana Silva**, with a balance of **€0.00**: a real, empty account, straight from PostgreSQL. Quit and reopen the app: it goes straight to the wallet, because the ID is saved.
+
+Check it from the other side. In the API's terminal, or with `curl`:
+
+```sh
+docker compose exec postgres psql -U paydeck -c "SELECT id, owner_name, currency FROM accounts ORDER BY created_at DESC LIMIT 1;"
+```
+
+The newest account is Ana's. Paste its ID into `curl -s localhost:8080/api/accounts/<the id>` and you get the same JSON the app just used: anything the app can do, `curl` can do too.
+
+Now see what happens when the API is not there. Stop it (`Ctrl+C` in its terminal). The Android app keeps its own storage, so on its first launch it shows the welcome screen too: start the emulator, run `npm run android`, type a name and press **Open my account**. You see:
+
+```
+Could not reach PayDeck. Check that the API is running.
+```
+
+That is the `catch` around `fetch` at work. The Wallet screen is less helpful: reload the Mac app with the API still stopped (press `r` in the Metro terminal, lesson 11.4), and the balance stays at `…` forever, with no word about what went wrong. Lesson 26.2 fixes that. Start the API again.
+
+Asking for an account that does not exist, `getAccount('00000000-0000-0000-0000-000000000840')`, throws an `ApiError` with status `404`, title `Not found` and the API's own message:
+
+```
+Account 00000000-0000-0000-0000-000000000840 was not found
+```
+
+<Exercise title="Show the account on the You screen">
+Change `src/screens/ProfileScreen.tsx` so the **You** tab shows the account holder's name and "Account opened on" with the date the account was opened (the first ten characters of `createdAt`, like `2026-10-22`), above the note about signing in. Change the note to: "Signing in arrives in Part 8. Until then, this device remembers the account it opened."
+
+<Fragment slot="hint">Do exactly what `HomeScreen` does: `useAccountId()`, a state variable for the account that starts as `null`, and a `useEffect` that calls `getAccount`.</Fragment>
+<Fragment slot="hint2">Render the two lines only when the account has loaded: `{account !== null && (<>...</>)}`. `<>` and `</>` are a **fragment**: they group several elements into one without adding a view to the screen. JSX needs this because `&&` must be followed by a single element.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+import { useEffect, useState } from 'react';
+import { Text } from 'react-native';
+import { getAccount } from '../api/paydeck';
+import { Screen } from '../components/Screen';
+import { useAccountId } from '../state/AccountIdContext';
+import type { Account } from '../types';
+
+export function ProfileScreen() {
+  const accountId = useAccountId();
+  const [account, setAccount] = useState<Account | null>(null);
+
+  useEffect(() => {
+    getAccount(accountId).then(setAccount);
+  }, [accountId]);
+
+  return (
+    <Screen title="You">
+      {account !== null && (
+        <>
+          <Text>{account.ownerName}</Text>
+          <Text>Account opened on {account.createdAt.slice(0, 10)}</Text>
+        </>
+      )}
+      <Text>Signing in arrives in Part 8. Until then, this device remembers the account it opened.</Text>
+    </Screen>
+  );
+}
+```
+
+Ana's You tab shows "Ana Silva" and "Account opened on 2026-10-22". Notice that this screen and the Wallet both fetch the same account separately. Lesson 26.3 fixes that.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Fetching in the component body">
+`getAccount(accountId).then(setAccount)` written directly inside the component, outside `useEffect`, runs on *every* render. Each answer sets state, which renders again, which fetches again: an endless stream of requests. Watch the API's log fill up. Fetch inside `useEffect`.
+</Aside>
+
+<Aside type="caution" title="localhost on Android">
+With `http://localhost:8080` the Mac app works and the Android app says "Could not reach PayDeck": the emulator's `localhost` is the emulator. Use `10.0.2.2`, as `config.ts` does.
+</Aside>
+
+<Aside type="caution" title="Types that do not match the JSON">
+If `types.ts` says `balance` but the API sends `balanceCents`, TypeScript is happy (you told it the type with `as T`) and the screen shows nothing, or `NaN`. When a value is mysteriously missing, compare the type with the real JSON from `curl`.
+</Aside>
+
+<Aside type="caution" title="Forgetting http://">
+`fetch('localhost:8080/...')` is not a web address. Every URL needs its scheme: `http://`.
+</Aside>
+
+## Recap
+
+- The app is one more client of the API, using `fetch` like any other.
+- `config.ts` holds the address, `client.ts` sends requests and turns failures into `ApiError`s with readable messages, `paydeck.ts` has one function per endpoint.
+- `fetch` throws only when no answer arrives; error answers like `404` must be checked with `response.ok`.
+- On Android's emulator, the Mac is `10.0.2.2`, not `localhost`.
+- Until sign-in, the first launch opens an account and saves its ID with AsyncStorage.
+- Load data in `useEffect`, store it in state, and render a placeholder until it arrives.
+
+<Quiz
+	questions={[
+		{
+			question: 'The API answers 404 to a fetch. What does fetch itself do?',
+			options: ['Throws an error', 'Returns a Response with ok set to false', 'Returns null'],
+			answer: 1,
+			explanation: 'fetch only throws when no answer arrives at all. Any answer, even an error, is a Response, so request checks response.ok.',
+		},
+		{
+			question: 'Why does the Android emulator use http://10.0.2.2:8080?',
+			options: ['Port 8080 is blocked on Android', 'The emulator is a separate device; 10.0.2.2 is its way to reach the Mac', 'It is faster than localhost'],
+			answer: 1,
+			explanation: 'For the emulator, localhost is the emulator itself. 10.0.2.2 is the special address of the computer running it.',
+		},
+		{
+			question: 'Why do screens call getAccount instead of fetch?',
+			options: ['fetch does not work in screens', 'The address, headers and error handling live in one place instead of in every screen', 'getAccount is faster'],
+			answer: 1,
+			explanation: 'Changing the server address or how errors are handled then means changing one file.',
+		},
+	]}
+/>
+
+<MarkComplete />

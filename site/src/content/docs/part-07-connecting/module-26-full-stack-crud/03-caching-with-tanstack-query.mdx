@@ -1,0 +1,470 @@
+---
+title: "26.3 Caching with TanStack Query"
+description: "Replace hand-made loading with TanStack Query: data shared between screens, shown instantly from a cache and refreshed in the background, retried when the network blips, and refetched after a top-up that is safe to retry."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson PayDeck loads all its data through TanStack Query, and has a **Top up** screen that adds money exactly once even when the network loses the answer.
+
+## Why it matters
+
+`useLoad` from lesson 26.2 works, but watch what it does:
+
+- The Wallet, Activity and You screens each fetch the same account separately.
+- Every time you switch tabs, the screen starts from nothing and shows a spinner again, even though it had the data a second ago.
+- When something changes the balance (a top-up, in this lesson), the other screens have no way to know their data is out of date.
+- A single dropped request on a shaky network shows an error, although trying once more would probably work.
+
+Every app that talks to a server has these problems, so there are libraries that solve them. **TanStack Query** (it used to be called React Query) is the most widely used one for React and React Native.
+
+## The idea
+
+### A cache with names
+
+TanStack Query keeps a **cache**: a store of answers it has already received, kept in memory while the app runs. Each piece of data has a name, its **query key**, like `['account', '4e5831ca-…']`. When a screen asks for a key:
+
+- **Not in the cache:** it fetches, and the screen shows a spinner (`isPending`).
+- **In the cache:** the screen gets the cached data **immediately**, with no spinner. If the data is **stale** (old enough that it may have changed), TanStack Query also fetches a fresh copy in the background and updates the screen when it arrives.
+- **Two screens ask for the same key at once:** one request, shared.
+
+By default, data is stale as soon as it arrives (`staleTime` is 0). That sounds odd, but it gives you both: instant screens from the cache, and up-to-date data a moment later.
+
+### Queries and mutations
+
+- A **query** reads data: `useQuery({ queryKey, queryFn })`. `queryFn` is the function that fetches it, `getAccount` for example. It returns an object with `data`, `error`, `isPending` and `refetch`: the same names `useLoad` used, so `QueryState` keeps working unchanged.
+- A **mutation** changes data on the server: `useMutation({ mutationFn })`. It returns an object with `mutate(input)` to run it, and `isPending` and `error`.
+
+### Invalidation
+
+After a top-up, the cached balance and history are wrong. The mutation's `onSuccess` calls `queryClient.invalidateQueries({ queryKey })`, which marks that data as stale, and refetches it right away if a screen is showing it. Any screen that shows it afterwards gets the new data. You never update the balance yourself: the server is the only source of truth, and the app asks it again.
+
+### Retries, and why top-ups need a key
+
+When a query fails, TanStack Query tries again three more times, waiting a little longer each time, before it shows the error. Reading is always safe to repeat.
+
+Mutations are **not** retried automatically, because repeating one could move money twice. But the person may press the button again after an error, and they should be able to. This is exactly the case from lesson 24.5: the top-up arrived, but the answer was lost. The app solves it the way the API expects: it makes an **idempotency key** when the person chooses an amount, and sends the same key with every attempt.
+
+## Worked example
+
+### Install it
+
+In the app's folder:
+
+```sh
+npm install @tanstack/react-query@5.104.5
+```
+
+It is plain JavaScript, so there is no `pod install` and no rebuild: Metro picks it up after a reload.
+
+### The client and the provider
+
+All screens must share one cache, the **query client**. It is made once, in `App.tsx`, and given to every screen with a provider (like the contexts in lesson 14.3):
+
+```tsx
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { useState } from 'react';
+import { AppNavigator } from './src/navigation/AppNavigator';
+import { WelcomeScreen } from './src/screens/WelcomeScreen';
+import { AccountIdGate } from './src/state/AccountIdContext';
+import { WalletProvider } from './src/state/WalletContext';
+
+export default function App() {
+  const [queryClient] = useState(() => new QueryClient());
+  return (
+    <QueryClientProvider client={queryClient}>
+      <AccountIdGate welcome={WelcomeScreen}>
+        <WalletProvider>
+          <AppNavigator />
+        </WalletProvider>
+      </AccountIdGate>
+    </QueryClientProvider>
+  );
+}
+```
+
+`useState(() => new QueryClient())` gives `useState` a *function* instead of a value. React calls it only on the first render and keeps the result, so the app has exactly one client. Writing `new QueryClient()` directly in the component body would make a new, empty cache on every render.
+
+### The hooks
+
+Screens should not have to know about keys and query functions, so put them in one file. `src/api/hooks.ts`:
+
+```ts
+import { useQuery } from '@tanstack/react-query';
+import { useAccountId } from '../state/AccountIdContext';
+import * as api from './paydeck';
+
+// Each key names one piece of cached data. Data with the same key is
+// fetched once and shared by every screen that asks for it.
+const keys = {
+  account: (id: string) => ['account', id] as const,
+  activity: (id: string) => ['activity', id] as const,
+};
+
+export function useAccount() {
+  const accountId = useAccountId();
+  return useQuery({ queryKey: keys.account(accountId), queryFn: () => api.getAccount(accountId) });
+}
+
+export function useActivity() {
+  const accountId = useAccountId();
+  return useQuery({ queryKey: keys.activity(accountId), queryFn: () => api.getActivity(accountId) });
+}
+```
+
+- **`import * as api from './paydeck'`** imports everything `paydeck.ts` exports as one object: `api.getAccount`, `api.getActivity`, and so on.
+- **The keys include the account ID**, so two accounts can never share cached data. `as const` tells TypeScript the array will never change, which TanStack Query uses to type the key.
+
+### The screens
+
+`HomeScreen` and `ActivityScreen` change only at the top. Replace the imports of `getAccount`, `getActivity`, `useLoad` and `useAccountId` with:
+
+```tsx
+import { useAccount, useActivity } from '../api/hooks';
+```
+
+and the three lines that loaded the data with:
+
+```tsx
+  const account = useAccount();
+  const activity = useActivity();
+```
+
+Everything else stays the same: `account.data`, `activity.data`, and `QueryState` with `[account, activity]`. Change the You screen from lesson 26.1's exercise the same way, and give it a `QueryState` too:
+
+```tsx
+import { Text } from 'react-native';
+import { useAccount } from '../api/hooks';
+import { QueryState } from '../components/QueryState';
+import { Screen } from '../components/Screen';
+
+export function ProfileScreen() {
+  const account = useAccount();
+
+  return (
+    <Screen title="You">
+      {account.data === undefined ? (
+        <QueryState queries={[account]} />
+      ) : (
+        <>
+          <Text>{account.data.ownerName}</Text>
+          <Text>Account opened on {account.data.createdAt.slice(0, 10)}</Text>
+        </>
+      )}
+      <Text>Signing in arrives in Part 8. Until then, this device remembers the account it opened.</Text>
+    </Screen>
+  );
+}
+```
+
+(`condition ? a : b` is the ternary operator from lesson 10.2, choosing between two pieces of JSX. If you did the date exercise in lesson 26.2, use `formatDate` here too.)
+
+Delete `src/api/useLoad.ts`. Run `npx tsc --noEmit`: no errors means nothing used it any more.
+
+### What changed
+
+Reload the app and switch between Wallet, Activity and Wallet again. Every request the app made, logged in a test against the real API:
+
+```
+GET /api/accounts/{id} -> 200
+GET /api/accounts/{id}/transactions -> 200
+--- Activity tab
+spinner on Activity? false
+GET /api/accounts/{id} -> 200
+GET /api/accounts/{id}/transactions -> 200
+--- Wallet tab
+spinner on Wallet? false
+GET /api/accounts/{id} -> 200
+GET /api/accounts/{id}/transactions -> 200
+```
+
+The Activity tab appeared **without a spinner**: it showed the cached account and history at once, and refreshed both in the background. The Wallet did the same when you came back.
+
+Now stop the API and reload. The spinner stays for several seconds before the error appears. The requests, with the time each one was sent:
+
+```
+0.2s /api/accounts/{id}
+0.3s /api/accounts/{id}/transactions
+1.3s /api/accounts/{id}
+1.3s /api/accounts/{id}/transactions
+3.3s /api/accounts/{id}
+3.3s /api/accounts/{id}/transactions
+7.3s /api/accounts/{id}
+7.3s /api/accounts/{id}/transactions
+ERROR after 7.3
+```
+
+Four tries, with 1, 2 and 4 seconds between them: a short network blip never reaches the screen. **Try again** still works as before, because a TanStack Query result has a `refetch` too.
+
+### A top-up screen
+
+Now the mutation. Add the endpoint to `src/api/paydeck.ts`:
+
+```ts
+export const topUp = (accountId: string, amountCents: number, idempotencyKey: string) =>
+  request<unknown>(`/api/accounts/${accountId}/top-ups`, {
+    method: 'POST',
+    body: { amountCents, description: 'Top-up' },
+    idempotencyKey,
+  });
+```
+
+`request<unknown>` says "we do not use what comes back": `unknown` is TypeScript's type for "could be anything; check before you use it".
+
+A way to make keys, at the end of `src/api/client.ts`:
+
+```ts
+/**
+ * A new random ID for an Idempotency-Key. It only has to be unique, not
+ * secret, so Math.random is good enough.
+ */
+export function newIdempotencyKey(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char) => {
+    const random = Math.floor(Math.random() * 16);
+    // The "y" digit must be 8, 9, a or b in a standard UUID.
+    return (char === 'x' ? random : 8 + (random % 4)).toString(16);
+  });
+}
+```
+
+It builds a random UUID, like the ones `uuidgen` prints: `replace` with the pattern `/[xy]/g` (every `x` or `y`, lesson 13.6 introduced patterns) calls the function for each one and puts in a random hexadecimal digit. `toString(16)` writes a number in base 16 (`11` becomes `b`).
+
+The mutation hook, in `src/api/hooks.ts` (add `useMutation` and `useQueryClient` to the import from `@tanstack/react-query`):
+
+```ts
+export function useTopUp() {
+  const accountId = useAccountId();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ amountCents, idempotencyKey }: { amountCents: number; idempotencyKey: string }) =>
+      api.topUp(accountId, amountCents, idempotencyKey),
+    // The balance and the history are now out of date: fetch them again.
+    onSuccess: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: keys.account(accountId) }),
+        queryClient.invalidateQueries({ queryKey: keys.activity(accountId) }),
+      ]),
+  });
+}
+```
+
+`useQueryClient()` gets the client from the provider in `App.tsx`. `Promise.all` waits for both refetches, so the mutation only counts as finished once the new balance is in the cache.
+
+The screen, `src/screens/TopUpScreen.tsx`:
+
+```tsx
+import { useState } from 'react';
+import { StyleSheet, Text } from 'react-native';
+import { newIdempotencyKey } from '../api/client';
+import { useAccount, useTopUp } from '../api/hooks';
+import { Button } from '../components/Button';
+import { Field } from '../components/Field';
+import { Screen } from '../components/Screen';
+import { formatMoney, parseMoneyInput } from '../money';
+import { useNavigation } from '../navigation/NavigationContext';
+
+export function TopUpScreen() {
+  const { goBack } = useNavigation();
+  const account = useAccount();
+  const topUp = useTopUp();
+  const [amount, setAmount] = useState('');
+  const [submitted, setSubmitted] = useState(false);
+  // One key per amount. If the network fails and the person taps again,
+  // the same key is sent, and the API makes sure the money arrives only once.
+  const [idempotencyKey, setIdempotencyKey] = useState(newIdempotencyKey);
+
+  const currency = account.data?.currency ?? 'USD';
+  const cents = parseMoneyInput(amount);
+  const error = cents === null ? 'Enter an amount like 25 or 25.50' : null;
+
+  function changeAmount(text: string) {
+    setAmount(text);
+    setIdempotencyKey(newIdempotencyKey());
+  }
+
+  function confirm() {
+    setSubmitted(true);
+    if (cents !== null && !topUp.isPending) {
+      topUp.mutate({ amountCents: cents, idempotencyKey }, { onSuccess: goBack });
+    }
+  }
+
+  return (
+    <Screen title="Top up">
+      <Text style={styles.muted}>Add money to your wallet. For now it is pretend money; Part 9 charges a real card.</Text>
+      <Field
+        label={`Amount (${currency})`}
+        value={amount}
+        onChangeText={changeAmount}
+        keyboardType="decimal-pad"
+        placeholder="0.00"
+        error={submitted ? error : null}
+        onSubmitEditing={confirm}
+      />
+      {topUp.error && <Text style={styles.error}>{topUp.error.message}</Text>}
+      <Button
+        title={topUp.isPending ? 'Adding…' : cents !== null ? `Add ${formatMoney(cents, currency)}` : 'Add money'}
+        onPress={confirm}
+        disabled={topUp.isPending}
+      />
+    </Screen>
+  );
+}
+
+const styles = StyleSheet.create({
+  muted: { color: '#5d6177' },
+  error: { color: '#b3261e' },
+});
+```
+
+- **The key lives in state.** `useState(newIdempotencyKey)` passes the function itself (no brackets), so React calls it once, on the first render. Every tap of the button sends that same key.
+- **A new amount gets a new key** (`changeAmount`). Topping up $12.50 and then $20.00 are two different intentions; sending the old key with a different amount would get a `409` from the API (lesson 24.5).
+- **`mutate(input, { onSuccess: goBack })`**: callbacks given to `mutate` run for this one call, after the hook's own `onSuccess`. So the screen goes back only once the balance has been refetched, and the Wallet shows the new balance straight away.
+- **`currency`** comes from the cached account. `?? 'USD'` is only for the moment before it loads; in practice the Wallet has already loaded it.
+
+Connect it. In `src/navigation/routes.ts` add a route:
+
+```ts
+  | { name: 'card'; cardId: string }
+  | { name: 'topUp' };
+```
+
+In `AppNavigator.tsx`, import `TopUpScreen` and add a case:
+
+```tsx
+    case 'topUp':
+      return <TopUpScreen />;
+```
+
+And in `HomeScreen`, take `navigate` from `useNavigation()` as well (`const { navigate, switchTab } = useNavigation();`), and add a button below the balance:
+
+```tsx
+      <Button title="Top up" onPress={() => navigate({ name: 'topUp' })} />
+```
+
+Run it: **Top up**, type `12.50`, press **Add $12.50**. You are back on the Wallet with the new balance, and the top-up is first in Recent activity.
+
+### Lose an answer on purpose
+
+To see the key do its job, make the app lose the first answer to a `POST`, after the server has already done the work. In `client.ts`, add this line above `export async function request`:
+
+```ts
+let loseNextAnswer = true; // TEMPORARY: pretend the first answer to a POST is lost
+```
+
+and this right after the `try { ... } catch { ... }` around `fetch`:
+
+```ts
+  if (options.method === 'POST' && loseNextAnswer) {
+    loseNextAnswer = false; // TEMPORARY
+    throw new ApiError(0, 'No connection', 'Could not reach PayDeck. Check that the API is running.');
+  }
+```
+
+Reload, open **Top up**, type `12.50` and press **Add $12.50**. The screen says "Could not reach PayDeck. Check that the API is running." But the request did reach the API, and the money did move. Press **Add $12.50** again. From a test that did exactly this, the balance and every request:
+
+```
+BEFORE $81.50
+ERROR Could not reach PayDeck. Check that the API is running.
+AFTER $94.00
+
+GET /api/accounts/{id} -> 200
+GET /api/accounts/{id}/transactions -> 200
+GET /api/accounts/{id} -> 200
+GET /api/accounts/{id}/transactions -> 200
+POST /api/accounts/{id}/top-ups -> 201
+POST /api/accounts/{id}/top-ups -> 200
+GET /api/accounts/{id} -> 200
+GET /api/accounts/{id} -> 200
+GET /api/accounts/{id}/transactions -> 200
+```
+
+The first `POST` got `201 Created`: the money moved, and the app never saw that answer. The second sent the same key and got `200`, the replay. $81.50 + $12.50 = $94.00: the money arrived **once**, and Activity shows one top-up of +$12.50, not two.
+
+**Now remove the temporary lines.**
+
+<Exercise title="Trust the cache for 30 seconds">
+Every tab switch refetches, because data is stale at once. For PayDeck, data up to 30 seconds old is fine on screen (a top-up from this app still updates at once, because it invalidates). Make every query in the app stay fresh for 30 seconds, and check that switching tabs no longer sends requests. Then think: why would 30 **minutes** be a bad idea for PayDeck?
+
+<Fragment slot="hint">`new QueryClient(...)` takes options. Options under `defaultOptions.queries` apply to every `useQuery`.</Fragment>
+<Fragment slot="hint2">The option is `staleTime`, in milliseconds. `30_000` is 30000: the `_` only makes long numbers easier to read.</Fragment>
+<Fragment slot="solution">
+
+In `App.tsx`:
+
+```tsx
+  const [queryClient] = useState(
+    () => new QueryClient({ defaultOptions: { queries: { staleTime: 30_000 } } }),
+  );
+```
+
+The same test as above, switching Wallet, Activity, Wallet:
+
+```
+GET /api/accounts/{id} -> 200
+GET /api/accounts/{id}/transactions -> 200
+--- Activity tab
+spinner on Activity? false
+--- Wallet tab
+spinner on Wallet? false
+```
+
+Two requests instead of six. Thirty minutes would be too long because the balance also changes from **outside** this app: a transfer from a friend, or (from Part 9) a card payment in a shop. The app would show an old balance for half an hour. A short stale time, plus invalidating after your own changes, is the usual balance. Part 9 goes further: the server tells the app the moment something changes.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="A new QueryClient on every render">
+`<QueryClientProvider client={new QueryClient()}>` throws the cache away every time `App` renders. Make it once, with `useState(() => new QueryClient())`.
+</Aside>
+
+<Aside type="caution" title="A new key on every tap">
+`idempotencyKey: newIdempotencyKey()` inside `confirm` gives each tap a fresh key, and the lost-answer test above adds the money twice. The key belongs to the person's intention, so it changes only when the amount does.
+</Aside>
+
+<Aside type="caution" title="Updating the balance yourself">
+Adding the amount to the cached balance by hand looks faster, but the server may know something the app does not (fees, a transfer that just arrived). Invalidate, and let the server say what the balance is.
+</Aside>
+
+<Aside type="caution" title="Keys without the account ID">
+With a key of just `['account']`, a second account on the same device (after sign-in arrives in Part 8) would briefly show the first person's balance from the cache. Put every value the query depends on in its key.
+</Aside>
+
+## Recap
+
+- TanStack Query caches answers under **query keys**, shares them between screens, shows cached data instantly and refreshes stale data in the background.
+- Failed queries are retried three times, with growing waits, before the error shows.
+- `useQuery` reads; `useMutation` changes; `invalidateQueries` after a change makes the affected data refetch.
+- Put the keys and query functions in custom hooks (`useAccount`, `useTopUp`) so screens stay short.
+- A money-moving mutation sends an idempotency key that is made once per intention and reused for every retry.
+
+<Quiz
+	questions={[
+		{
+			question: 'You switch to a tab whose data is in the cache but stale. What do you see?',
+			options: ['A spinner until fresh data arrives', 'The cached data at once, then fresh data when the background refetch finishes', 'An error'],
+			answer: 1,
+			explanation: 'Stale data is still shown; staleness only means TanStack Query fetches a fresh copy in the background.',
+		},
+		{
+			question: 'Why does TanStack Query retry failed queries but not failed mutations?',
+			options: ['Mutations are always fast', 'Reading again is harmless, but repeating a change could, for example, move money twice', 'Mutations cannot fail'],
+			answer: 1,
+			explanation: 'A mutation may have worked even though the answer was lost. Retrying it safely needs an idempotency key, which only the app knows how to manage.',
+		},
+		{
+			question: 'After a top-up succeeds, how does the Wallet get the new balance?',
+			options: ['The app adds the amount to the cached balance', 'invalidateQueries marks the account as stale and it is fetched again from the API', 'The Wallet screen polls every second'],
+			answer: 1,
+			explanation: 'The server stays the only source of truth; the app asks it again.',
+		},
+	]}
+/>
+
+<MarkComplete />
