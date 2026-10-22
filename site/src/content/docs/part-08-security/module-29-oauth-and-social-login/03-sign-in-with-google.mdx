@@ -1,0 +1,823 @@
+---
+title: "29.3 Sign in with Google"
+description: "Register PayDeck with Google, let Spring Security run the OAuth flow, send the browser back to the app with a one-time code, and add a \"Continue with Google\" button that opens the browser and catches the paydeck:// link on the Mac and on Android."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson the sign-in screen has a **Continue with Google** button. It opens the browser, Google signs the person in, and the browser hands them back to PayDeck, signed in, on the Mac and on Android. Someone new is signed up on the spot.
+
+## Why it matters
+
+This is where lessons 29.1 and 29.2 meet real code. Most of the OAuth machinery is already written, in Spring Security; your job is to configure it, to connect its two ends (where a sign-in starts, and what happens when Google says yes), and to make the operating system deliver the `paydeck://` link to your app.
+
+## The idea
+
+Here is the whole flow with PayDeck's real addresses:
+
+1. The app makes a verifier and opens the browser at
+   `http://localhost:8080/api/auth/google?redirect_uri=paydeck://auth&code_challenge=…`
+2. **Your code**, `GoogleSignIn.start`, checks the `redirect_uri` and the challenge, remembers both in a short **browser session** (a cookie), and redirects to `/oauth2/authorization/google`.
+3. **Spring Security** redirects to Google, with PayDeck's client ID, the scopes, `state` and `nonce`.
+4. Google signs the person in and redirects back to `/login/oauth2/code/google?code=…&state=…`.
+5. **Spring Security** checks `state`, trades Google's code for tokens (with the client secret), checks the ID token, and calls your success handler.
+6. **Your code**, `GoogleSignIn.onSuccess`, finds or creates the PayDeck user, creates a login code with the remembered challenge (lesson 29.2), forgets the browser session, and redirects to `paydeck://auth?code=…`.
+7. The operating system opens PayDeck with that link. The app posts the code and verifier to `/api/auth/token` and is signed in.
+
+Two codes, two different jobs: Google's code (step 4) is for the API; PayDeck's login code (step 6) is for the app.
+
+### Only send codes to the app
+
+Step 2 checks `redirect_uri` against a list of allowed links, just `paydeck://auth`. Without that check, a phishing page could start a sign-in with `redirect_uri=https://evil.example.com` and the API would hand the code to it.
+
+### A session, briefly
+
+Since lesson 27.2 the API has kept no sessions: each request carries its token. Steps 2 to 6 are different: they are a series of browser visits, and the API must remember, between visits, where the sign-in started and Spring's own `state`. So the session policy changes from "never" to "only when needed" (`IF_REQUIRED`), and the success handler throws the session away as soon as it is done. API requests with tokens still never create one.
+
+### Google is optional
+
+A server without a Google client ID should still start, and simply say "Sign in with Google is not set up". So the Google parts are switched on only when the client ID is configured. That also keeps the tests from needing one.
+
+## Register PayDeck with Google
+
+You need a Google account, and the client ID and secret Google gives you. All of this is in the Google Cloud console, free, and needs no credit card.
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com), sign in, and create a project called `PayDeck`.
+2. Open **Google Auth Platform** from the menu (older guides call this part "APIs & Services → OAuth consent screen"). Google asks for some app information first: the app name `PayDeck`, your email as the support and contact address, and **External** as the audience.
+3. Under **Audience**, the app starts in **Testing**: only the Google accounts you list as **test users** can sign in. Add your own Google account. That is all you need while you build; publishing is for Part 10.
+4. Under **Clients**, create a client of type **Web application** (the PayDeck API is a web server, and it is the client). Add one **Authorised redirect URI**:
+   ```
+   http://localhost:8080/login/oauth2/code/google
+   ```
+   This is step 4's address: Spring Security's built-in callback. Google refuses to send anyone anywhere else, which is one more protection against stolen codes.
+5. Copy the **Client ID** (ends in `.apps.googleusercontent.com`) and the **Client secret**. Treat the secret like a password.
+
+Spring Boot reads them from two environment variables, with long but exact names. Put them in a file called `.env` in the API folder:
+
+```sh
+export SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_GOOGLE_CLIENT_ID=123456789012-abc123.apps.googleusercontent.com
+export SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_GOOGLE_CLIENT_SECRET=GOCSPX-your-secret-here
+```
+
+Make sure `.gitignore` has a line `.env`, so the secret never goes into Git, and start the API with:
+
+```sh
+source .env && ./mvnw spring-boot:run
+```
+
+Spring Boot already knows everything else about Google (its addresses, and the scopes `openid`, `profile` and `email`), so these two values are all the configuration there is.
+
+## Worked example: the API
+
+### The library and settings
+
+In `pom.xml`, next to the resource server starter:
+
+```xml
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security-oauth2-client</artifactId>
+        </dependency>
+```
+
+The resource server starter (lesson 27.5) checks PayDeck's own tokens. The **client** starter is the other side: it signs in somewhere else, here Google.
+
+In `application.yml`, under `paydeck.auth`:
+
+```yaml
+    # Where "Sign in with Google" may send people back to: the app's own link.
+    app-redirect-uris: ${PAYDECK_APP_REDIRECT_URIS:paydeck://auth}
+```
+
+and `AuthProperties` gets the list:
+
+```java
+package dev.paydeck.api.auth;
+
+import java.util.List;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+
+/** The {@code paydeck.auth.*} settings from application.yml. */
+@ConfigurationProperties("paydeck.auth")
+public record AuthProperties(String jwtSecret, List<String> appRedirectUris) {
+
+    public AuthProperties {
+        appRedirectUris = appRedirectUris == null ? List.of() : List.copyOf(appRedirectUris);
+    }
+}
+```
+
+The block after the record header is a **compact constructor**: it runs when the record is created, and here turns a missing setting into an empty list. `List.copyOf` makes the list unchangeable.
+
+### People without passwords
+
+`src/main/resources/db/migration/V7__google_sign_in.sql`:
+
+```sql
+-- People can sign in with Google. google_subject is Google's ID for them,
+-- and someone who only ever uses Google has no password.
+ALTER TABLE users ADD COLUMN google_subject VARCHAR(255) UNIQUE;
+ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;
+```
+
+`UNIQUE`: one Google account belongs to at most one PayDeck user.
+
+In `User.java`, the password hash may now be empty, and there is a new field:
+
+```java
+    /** A BCrypt hash of the password. Never the password itself. Empty for people who only use Google. */
+    private String passwordHash;
+
+    /** Google's ID for this person (the "sub" claim). Empty if they have never signed in with Google. */
+    private String googleSubject;
+```
+
+(remove `@Column(nullable = false)` from `passwordHash`), a second way to create a user, next to `withPassword`:
+
+```java
+    public static User withGoogle(String email, String displayName, String googleSubject) {
+        User user = new User();
+        user.email = normalizeEmail(email);
+        user.displayName = displayName;
+        user.googleSubject = googleSubject;
+        user.createdAt = Instant.now();
+        return user;
+    }
+```
+
+and a getter, `getGoogleSubject()`. In `UserRepository`:
+
+```java
+    Optional<User> findByGoogleSubject(String googleSubject);
+```
+
+What happens when someone who only uses Google tries the password form? `login` reads `found.map(User::getPasswordHash)`. For them that is `null`, which `map` turns into an empty `Optional`, so the dummy hash is checked and the answer is the usual "That email and password do not match." No special case needed, and a test below proves it.
+
+### Finding or creating the user
+
+In `AuthService`:
+
+```java
+    /**
+     * Called once Google has told us who someone is: finds them by their
+     * Google ID, or signs them up. An email that already has a PayDeck
+     * password is refused for now; lesson 29.4 links the two.
+     */
+    @Transactional
+    public User signInWithGoogle(String googleSubject, String email, String name) {
+        Optional<User> known = users.findByGoogleSubject(googleSubject);
+        if (known.isPresent()) {
+            return known.get();
+        }
+        String normalized = User.normalizeEmail(email);
+        if (users.findByEmail(normalized).isPresent()) {
+            throw new ConflictException("EMAIL_TAKEN", "Sign in with your password: this email already has an account.");
+        }
+        String displayName = name == null || name.isBlank() ? normalized : name;
+        return users.save(User.withGoogle(normalized, displayName, googleSubject));
+    }
+```
+
+People are found by `sub` first (lesson 29.1). If the email already belongs to someone who signed up with a password, this version refuses rather than guess; lesson 29.4 decides when it is safe to link them.
+
+### The two ends of the flow
+
+`src/main/java/dev/paydeck/api/auth/GoogleSignIn.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import java.io.IOException;
+import java.net.URI;
+
+import dev.paydeck.api.common.ConflictException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.HttpSession;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ProblemDetail;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.oauth2.client.registration.ClientRegistrationRepository;
+import org.springframework.security.oauth2.core.oidc.user.OidcUser;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.util.UriComponentsBuilder;
+
+/**
+ * "Sign in with Google" for an app, in four steps:
+ * <ol>
+ *   <li>The app makes a secret code verifier and opens the browser at
+ *   {@code /api/auth/google} with its hash, the code challenge.</li>
+ *   <li>The API sends the browser to Google. Spring Security handles the
+ *   OAuth back-and-forth with Google.</li>
+ *   <li>Google sends the browser back to the API, which finds or creates the
+ *   user and sends the browser on to the app's link, {@code paydeck://auth},
+ *   with a one-time code.</li>
+ *   <li>The app posts the code and its verifier to {@code /api/auth/token}
+ *   and gets PayDeck tokens.</li>
+ * </ol>
+ */
+@RestController
+public class GoogleSignIn {
+
+    private static final String REDIRECT_URI = "paydeck.google.redirectUri";
+    private static final String CODE_CHALLENGE = "paydeck.google.codeChallenge";
+
+    private final ObjectProvider<ClientRegistrationRepository> googleClient;
+    private final AuthService auth;
+    private final AuthProperties properties;
+
+    public GoogleSignIn(ObjectProvider<ClientRegistrationRepository> googleClient, AuthService auth,
+                        AuthProperties properties) {
+        this.googleClient = googleClient;
+        this.auth = auth;
+        this.properties = properties;
+    }
+
+    /** Step 1: remember where to send the browser back to, and the challenge, then off to Google. */
+    @GetMapping("/api/auth/google")
+    public ResponseEntity<?> start(@RequestParam("redirect_uri") String redirectUri,
+                                   @RequestParam("code_challenge") String codeChallenge,
+                                   @RequestParam(name = "code_challenge_method", defaultValue = "S256") String method,
+                                   HttpServletRequest request) {
+        if (googleClient.getIfAvailable() == null) {
+            return problem(HttpStatus.SERVICE_UNAVAILABLE, "GOOGLE_NOT_CONFIGURED",
+                    "Sign in with Google is not set up on this server.");
+        }
+        // Only send codes to links we know belong to the PayDeck app. Otherwise
+        // a phishing page could start a sign-in and collect the code itself.
+        if (!properties.appRedirectUris().contains(redirectUri)) {
+            return problem(HttpStatus.BAD_REQUEST, "BAD_REDIRECT_URI", "This redirect_uri is not allowed.");
+        }
+        if (!"S256".equals(method) || codeChallenge.length() < 43 || codeChallenge.length() > 128) {
+            return problem(HttpStatus.BAD_REQUEST, "BAD_CODE_CHALLENGE", "Send a SHA-256 (S256) code challenge.");
+        }
+        HttpSession session = request.getSession(true);
+        session.setAttribute(REDIRECT_URI, redirectUri);
+        session.setAttribute(CODE_CHALLENGE, codeChallenge);
+        return ResponseEntity.status(HttpStatus.FOUND).location(URI.create("/oauth2/authorization/google")).build();
+    }
+
+    /** Step 3: Google said who this is. Send the browser back to the app with a one-time code. */
+    void onSuccess(HttpServletRequest request, HttpServletResponse response, Authentication authentication)
+            throws IOException {
+        HttpSession session = request.getSession(false);
+        String redirectUri = session == null ? null : (String) session.getAttribute(REDIRECT_URI);
+        String challenge = session == null ? null : (String) session.getAttribute(CODE_CHALLENGE);
+        // PayDeck uses its own tokens from here on, so forget the browser session.
+        if (session != null) {
+            session.invalidate();
+        }
+        SecurityContextHolder.clearContext();
+        if (redirectUri == null || challenge == null) {
+            response.sendError(HttpStatus.BAD_REQUEST.value(), "Start signing in from the PayDeck app.");
+            return;
+        }
+
+        OidcUser google = (OidcUser) authentication.getPrincipal();
+        try {
+            User user = auth.signInWithGoogle(google.getSubject(), google.getEmail(), google.getFullName());
+            String code = auth.createLoginCode(user.getId(), challenge);
+            response.sendRedirect(withParam(redirectUri, "code", code));
+        } catch (ConflictException e) {
+            response.sendRedirect(withParam(redirectUri, "error", "account_exists"));
+        }
+    }
+
+    /** Google said no, or the person pressed Cancel. */
+    void onFailure(HttpServletRequest request, HttpServletResponse response, AuthenticationException e)
+            throws IOException {
+        HttpSession session = request.getSession(false);
+        String redirectUri = session == null ? null : (String) session.getAttribute(REDIRECT_URI);
+        if (redirectUri == null) {
+            response.sendError(HttpStatus.UNAUTHORIZED.value(), "Google sign-in failed.");
+            return;
+        }
+        session.invalidate();
+        response.sendRedirect(withParam(redirectUri, "error", "access_denied"));
+    }
+
+    private static String withParam(String uri, String name, String value) {
+        return UriComponentsBuilder.fromUriString(uri).queryParam(name, value).build().toUriString();
+    }
+
+    private static ResponseEntity<ProblemDetail> problem(HttpStatus status, String code, String detail) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(status, detail);
+        problem.setTitle("Cannot sign in with Google");
+        problem.setProperty("code", code);
+        return ResponseEntity.status(status).body(problem);
+    }
+}
+```
+
+- **`ObjectProvider<ClientRegistrationRepository>`**: Spring Boot creates a `ClientRegistrationRepository` (the list of places PayDeck can sign in with) only when a client ID is configured. Asking for it through an `ObjectProvider` means "give it to me if it exists"; `getIfAvailable()` returns `null` otherwise.
+- **`start`** is an ordinary endpoint. It returns `ResponseEntity<?>` because it answers either a redirect or a problem.
+- **`onSuccess` and `onFailure`** are not endpoints: Spring Security calls them, as you will set up next. The `OidcUser` is the person according to Google's checked ID token: `getSubject()` is `sub`, and so on.
+- **`session.invalidate()`** and **`clearContext()`**: once the login code exists, the browser session has no further use, and keeping it would leave a signed-in session lying around in the browser.
+- **`UriComponentsBuilder`** adds `?code=...` correctly encoded. Gluing strings together breaks the day a value contains `&`.
+
+### Switching it on
+
+In `SecurityConfig`, the filter chain takes two more parameters:
+
+```java
+    @Bean
+    SecurityFilterChain securityFilterChain(HttpSecurity http,
+                                            ObjectProvider<ClientRegistrationRepository> googleClient,
+                                            GoogleSignIn googleSignIn) throws Exception {
+```
+
+The session policy changes:
+
+```java
+                // API requests carry their own token. Only signing in with Google needs a
+                // short browser session, to remember where it started.
+                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED))
+```
+
+Spring's two Google addresses join the public ones:
+
+```java
+                        .requestMatchers("/api/auth/**", "/oauth2/**", "/login/oauth2/**").permitAll()
+```
+
+and before `return http.build();`:
+
+```java
+        // "Sign in with Google" is switched on only when a Google client ID is configured.
+        if (googleClient.getIfAvailable() != null) {
+            http.oauth2Login(login -> login
+                    .loginPage("/api/auth/google")
+                    .successHandler(googleSignIn::onSuccess)
+                    .failureHandler(googleSignIn::onFailure));
+        }
+```
+
+`oauth2Login` adds the two Spring addresses from the flow, `/oauth2/authorization/google` and `/login/oauth2/code/google`. `loginPage` tells it where a sign-in starts, so it does not generate its own HTML login page. `googleSignIn::onSuccess` is a method reference (lesson 17.4): "call this method when it succeeds".
+
+### Fixing the tests
+
+`MoneyControllerTest` is a slice test (lesson 25.1): it loads `SecurityConfig` but not `GoogleSignIn`, so it now fails to start. Give it a mock:
+
+```java
+    // SecurityConfig needs it; this test never signs in with Google.
+    @MockitoBean
+    GoogleSignIn googleSignIn;
+```
+
+### New tests
+
+The tests never call Google. `GoogleSignInTest` starts from the moment Google has said who someone is, by calling `AuthService` directly:
+
+```java
+package dev.paydeck.api.auth;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import java.util.UUID;
+
+import dev.paydeck.api.ApiTestSupport;
+import dev.paydeck.api.common.ConflictException;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.MediaType;
+
+/**
+ * PayDeck's side of "Sign in with Google". Google itself is not called:
+ * the tests start from the moment Google has said who the person is.
+ */
+class GoogleSignInTest extends ApiTestSupport {
+
+    @Autowired
+    AuthService auth;
+
+    @Test
+    void saysSoWhenGoogleIsNotSetUp() throws Exception {
+        mvc.perform(get("/api/auth/google")
+                        .param("redirect_uri", "paydeck://auth")
+                        .param("code_challenge", "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.code").value("GOOGLE_NOT_CONFIGURED"));
+    }
+
+    @Test
+    void aNewGoogleUserIsSignedUpOnceAndFoundAfterwards() {
+        String subject = UUID.randomUUID().toString();
+        User chen = auth.signInWithGoogle(subject, "chen-" + subject + "@gmail.com", "Chen Wei");
+
+        assertThat(chen.getDisplayName()).isEqualTo("Chen Wei");
+        assertThat(chen.getPasswordHash()).isNull();
+        // Next time, Google's ID finds her, even if she changed her email at Google.
+        assertThat(auth.signInWithGoogle(subject, "chen-new@gmail.com", "Chen Wei").getId()).isEqualTo(chen.getId());
+    }
+
+    @Test
+    void anEmailThatHasAPasswordIsNotTakenOver() throws Exception {
+        TestUser asha = register("Asha");
+
+        assertThatThrownBy(() -> auth.signInWithGoogle(UUID.randomUUID().toString(), asha.email(), "Asha"))
+                .isInstanceOf(ConflictException.class);
+    }
+
+    @Test
+    void someoneWhoOnlyUsesGoogleCannotSignInWithAPassword() throws Exception {
+        String subject = UUID.randomUUID().toString();
+        auth.signInWithGoogle(subject, "dev-" + subject + "@gmail.com", "Dev");
+
+        mvc.perform(post("/api/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"email": "dev-%s@gmail.com", "password": "any password at all"}
+                                """.formatted(subject)))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.detail").value("That email and password do not match."));
+    }
+}
+```
+
+`GoogleSignInConfiguredTest` gives the test a made-up client ID with `@TestPropertySource`, and checks the first two redirects:
+
+```java
+package dev.paydeck.api.auth;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.redirectedUrl;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import dev.paydeck.api.ApiTestSupport;
+import org.junit.jupiter.api.Test;
+import org.springframework.mock.web.MockHttpSession;
+import org.springframework.test.context.TestPropertySource;
+
+/** With a Google client ID configured, /api/auth/google starts a real Google sign-in. */
+@TestPropertySource(properties = {
+        "spring.security.oauth2.client.registration.google.client-id=test-client-id",
+        "spring.security.oauth2.client.registration.google.client-secret=test-client-secret"
+})
+class GoogleSignInConfiguredTest extends ApiTestSupport {
+
+    private static final String CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+    @Test
+    void sendsTheBrowserToGoogle() throws Exception {
+        MockHttpSession browser = new MockHttpSession();
+        mvc.perform(get("/api/auth/google").session(browser)
+                        .param("redirect_uri", "paydeck://auth")
+                        .param("code_challenge", CHALLENGE))
+                .andExpect(status().isFound())
+                .andExpect(redirectedUrl("/oauth2/authorization/google"));
+
+        String google = mvc.perform(get("/oauth2/authorization/google").session(browser))
+                .andExpect(status().isFound())
+                .andReturn().getResponse().getRedirectedUrl();
+        assertThat(google).startsWith("https://accounts.google.com/o/oauth2/v2/auth")
+                .contains("client_id=test-client-id")
+                .contains("scope=openid%20profile%20email")
+                .contains("redirect_uri=http://localhost/login/oauth2/code/google");
+    }
+
+    @Test
+    void onlySendsCodesToTheApp() throws Exception {
+        mvc.perform(get("/api/auth/google")
+                        .param("redirect_uri", "https://evil.example.com/steal")
+                        .param("code_challenge", CHALLENGE))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void apiRequestsStillGet401InsteadOfARedirectToGoogle() throws Exception {
+        mvc.perform(get("/api/me")).andExpect(status().isUnauthorized());
+    }
+}
+```
+
+- **`MockHttpSession`** plays the browser's cookie: both requests share one session, as in a real browser.
+- The last test guards against a classic surprise: with `oauth2Login` switched on, Spring Security likes to answer "not signed in" with a redirect to the login page. An app calling `/api/me` must keep getting `401`. Your explicit `authenticationEntryPoint` (lesson 27.5) keeps it that way.
+
+`./mvnw test`: 57 tests, all green.
+
+### Try it with curl
+
+Restart the API **without** `.env` and ask it to start a sign-in:
+
+```sh
+curl -s "localhost:8080/api/auth/google?redirect_uri=paydeck://auth&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+```
+
+```json
+{"detail":"Sign in with Google is not set up on this server.","instance":"/api/auth/google","status":503,"title":"Cannot sign in with Google","code":"GOOGLE_NOT_CONFIGURED"}
+```
+
+Now with `source .env && ./mvnw spring-boot:run`. Follow the first two redirects by hand; `-c` and `-b` keep the session cookie between requests, like a browser:
+
+```sh
+curl -s -i -c cookies.txt "localhost:8080/api/auth/google?redirect_uri=paydeck://auth&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+curl -s -i -b cookies.txt localhost:8080/oauth2/authorization/google
+```
+
+The interesting lines (yours have your client ID and different random values):
+
+```
+HTTP/1.1 302
+Set-Cookie: JSESSIONID=75F6DE761185FE8FD5DFEA641BF3D89E; Path=/; HttpOnly
+Location: /oauth2/authorization/google
+
+HTTP/1.1 302
+Location: https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=123456789012-abc123.apps.googleusercontent.com&scope=openid%20profile%20email&state=sKDp_pwZdQhcGXDUPK0GjXMil0-CVOlGTN6dMjvaajw%3D&redirect_uri=http://localhost:8080/login/oauth2/code/google&nonce=ZUKxnX5HCrbQNtI44CGRYED2aA66Vl11qnVAmoPZPGw&code_challenge=LEBt4t4q2C_X_u1dfSJJkKIvMNY44oJbmY6XTaBahtY&code_challenge_method=S256
+```
+
+Everything from lesson 29.1 is in that second address: client ID, scopes, `state`, `nonce` and the callback. There is also a `code_challenge`, and it is **not** the app's: Spring Security uses PKCE with Google on its own account, with a verifier it keeps in the session. The app's challenge stays in PayDeck's session and is never sent to Google. Delete `cookies.txt` when you are done.
+
+A `redirect_uri` that is not the app's is refused:
+
+```json
+{"detail":"This redirect_uri is not allowed.","instance":"/api/auth/google","status":400,"title":"Cannot sign in with Google","code":"BAD_REDIRECT_URI"}
+```
+
+## Worked example: the app
+
+### Where the browser goes
+
+Google accepts plain `http://` redirect addresses only for `localhost`. On the Mac that is fine. The Android emulator reaches the Mac through `10.0.2.2` (lesson 26.4), which Google would refuse. So the browser part of the sign-in always uses `localhost`, and on Android you forward it with `adb reverse`, as you would for a phone on USB. In `src/config.ts`:
+
+```ts
+/**
+ * Where the browser goes to sign in with Google. Google accepts plain http://
+ * only for localhost, so this is localhost on Android too, where
+ * `adb reverse tcp:8080 tcp:8080` forwards it to the Mac.
+ */
+export const SIGN_IN_BASE_URL = 'http://localhost:8080';
+```
+
+The app's own API calls keep using `API_BASE_URL`.
+
+### The API calls
+
+In `src/api/auth.ts` (import `SIGN_IN_BASE_URL` from `'../config'`):
+
+```ts
+/** The app's own link. After Google, the API sends the browser here with a one-time code. */
+export const APP_REDIRECT_URI = 'paydeck://auth';
+
+/** The page that starts "Sign in with Google", opened in the browser. */
+export const googleSignInUrl = (codeChallenge: string) =>
+  `${SIGN_IN_BASE_URL}/api/auth/google?redirect_uri=${encodeURIComponent(APP_REDIRECT_URI)}` +
+  `&code_challenge=${codeChallenge}&code_challenge_method=S256`;
+
+/** The last step of "Sign in with Google": the one-time code and the verifier, for tokens. */
+export const exchangeCode = (code: string, codeVerifier: string) =>
+  request<AuthResponse>('/api/auth/token', { method: 'POST', body: { code, codeVerifier }, withToken: false });
+```
+
+`encodeURIComponent` turns `paydeck://auth` into `paydeck%3A%2F%2Fauth`, so its `:` and `/` cannot be mistaken for parts of the outer address. The challenge needs no encoding: base64url was designed for addresses.
+
+### Reading the link
+
+`src/auth/links.ts`:
+
+```ts
+/** The ?a=1&b=2 part of a link, as { a: '1', b: '2' }. */
+export function queryParams(url: string): Record<string, string> {
+  const query = url.split('?')[1] ?? '';
+  const params: Record<string, string> = {};
+  for (const pair of query.split('&')) {
+    const [key, value = ''] = pair.split('=');
+    if (key !== '') {
+      params[decodeURIComponent(key)] = decodeURIComponent(value);
+    }
+  }
+  return params;
+}
+```
+
+Browsers have `URLSearchParams` for this, but React Native's version is incomplete, so a small function of your own is the reliable choice.
+
+### AuthContext: start, and finish
+
+In `src/auth/AuthContext.tsx`, import `Linking` from `react-native`, `queryParams` from `./links`, and `codeChallenge` and `newCodeVerifier` from `./pkce`. Add to the `Auth` type:
+
+```tsx
+  /** Opens Google in the browser. Signing in finishes when the browser comes back to the app. */
+  signInWithGoogle: () => Promise<void>;
+  /** Why the last Google sign-in did not work, if it did not. */
+  googleError: string | null;
+```
+
+Inside `AuthProvider`, next to the other refs:
+
+```tsx
+  // The PKCE secret of a Google sign-in in progress. Only in memory, and used once.
+  const codeVerifier = useRef<string | null>(null);
+  const [googleError, setGoogleError] = useState<string | null>(null);
+```
+
+Above the `auth` object:
+
+```tsx
+  // After Google, the API sends the browser to paydeck://auth?code=..., the
+  // system opens PayDeck with that link, and the app finishes signing in.
+  async function finishGoogleSignIn(url: string) {
+    const verifier = codeVerifier.current;
+    if (!url.startsWith(authApi.APP_REDIRECT_URI) || verifier === null) {
+      return; // Not a sign-in link, or not one this app started.
+    }
+    codeVerifier.current = null;
+    const params = queryParams(url);
+    if (params.code === undefined) {
+      setGoogleError(
+        params.error === 'account_exists'
+          ? 'This email already has a PayDeck password. Sign in with it instead.'
+          : 'Google sign-in was cancelled.',
+      );
+      return;
+    }
+    try {
+      await accept(await authApi.exchangeCode(params.code, verifier));
+    } catch (e) {
+      setGoogleError((e as Error).message);
+    }
+  }
+
+  // Listen for links. Like the token source, this always uses this render's function.
+  useEffect(() => {
+    const subscription = Linking.addEventListener('url', ({ url }) => finishGoogleSignIn(url));
+    return () => subscription.remove();
+  });
+```
+
+and in the `auth` object:
+
+```tsx
+    signInWithGoogle: async () => {
+      setGoogleError(null);
+      codeVerifier.current = newCodeVerifier();
+      await Linking.openURL(authApi.googleSignInUrl(codeChallenge(codeVerifier.current)));
+    },
+    googleError,
+```
+
+- **`Linking.openURL`** opens an address in the default browser. **`Linking.addEventListener('url', ...)`** is called when the system opens the running app with a link.
+- **Ignoring links without a verifier**: a `paydeck://auth` link the app did not ask for (an old one, or one someone sent) does nothing.
+- **`codeVerifier.current = null`** before anything else: a verifier is used once, whatever happens next.
+- **`accept`** is the same function password sign-in uses (lesson 28.4): it saves the refresh token and switches to `signedIn`. Everything after this point is identical.
+- **The effect** has no dependency list and does clean up: it removes the old listener and adds a new one after every render, so the listener always calls the current `finishGoogleSignIn`. Removing and adding happen in one go, so no link can slip through between them.
+
+### The button
+
+In `SignInScreen`, take `signInWithGoogle` and `googleError` from `useAuth()`, and add after the "Create an account" button:
+
+```tsx
+      <Text style={styles.or}>or</Text>
+      <Button title="Continue with Google" variant="secondary" onPress={signInWithGoogle} />
+      {googleError !== null && <Text style={styles.error}>{googleError}</Text>}
+```
+
+with a style `or: { color: '#5d6177', textAlign: 'center' }`.
+
+### Telling the system that `paydeck://` links are PayDeck's
+
+**Android.** In `android/app/src/main/AndroidManifest.xml`, inside the `<activity android:name=".MainActivity" ...>` element, next to the existing `<intent-filter>`, add a second one:
+
+```xml
+        <!-- Opens the app for paydeck://auth links (after "Sign in with Google"). -->
+        <intent-filter>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.DEFAULT" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="paydeck" android:host="auth" />
+        </intent-filter>
+```
+
+`VIEW` plus `BROWSABLE` means "a browser may open me for links like this". The activity already has `android:launchMode="singleTask"` from the template, so the link arrives in the running app instead of starting a second copy.
+
+**macOS.** Two steps. First, `macos/PayDeck-macOS/Info.plist` declares the scheme. Add inside the top-level `<dict>`:
+
+```xml
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>PayDeck sign-in</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>paydeck</string>
+			</array>
+		</dict>
+	</array>
+```
+
+Second, macOS gives the link to the app's delegate, which must pass it on to React Native. In `macos/PayDeck-macOS/AppDelegate.swift`, add this method inside `class AppDelegate`:
+
+```swift
+  // macOS calls this when a paydeck:// link is opened, for example when the
+  // browser comes back from "Sign in with Google". Passing it on as this
+  // notification makes it arrive in JavaScript through Linking's "url" event.
+  func application(_ application: NSApplication, open urls: [URL]) {
+    for url in urls {
+      NotificationCenter.default.post(
+        name: NSNotification.Name("RCTOpenURLNotification"),
+        object: self,
+        userInfo: ["url": url.absoluteString]
+      )
+    }
+  }
+```
+
+React Native's `Linking` module on macOS listens for exactly this notification, `RCTOpenURLNotification`, with the link in `userInfo["url"]`.
+
+Native files changed, so rebuild both apps.
+
+### Try it
+
+On the Mac, start the API with `source .env && ./mvnw spring-boot:run`, run the app, and tap **Continue with Google**.
+
+1. Your browser opens on Google's sign-in page. Choose the Google account you added as a test user. If Google shows a warning that the app is still in testing, continue.
+2. Google asks whether PayDeck may see your name, email and profile picture. Continue.
+3. The browser goes to `localhost:8080`, then to `paydeck://auth?code=...`, and asks whether to open PayDeck. Allow it.
+4. PayDeck comes to the front: **Welcome to PayDeck**, with your Google name. You are new, so you open an account as usual.
+
+Quit and reopen: you are still signed in, through the refresh token, exactly as with a password. Sign out, tap **Continue with Google** again: this time Google may skip the questions and you are back in your wallet at once.
+
+On Android, run `adb reverse tcp:8080 tcp:8080` first, then the same. The emulator's browser needs to be signed in to (or sign in to) a Google test user.
+
+Try **Cancel** on Google's page: PayDeck says "Google sign-in was cancelled." Try the Google account whose email you used for a password account, if you have one: "This email already has a PayDeck password. Sign in with it instead."
+
+<Exercise title="Remove the allow-list">
+In `GoogleSignIn.start`, comment out the `redirect_uri` check and run `./mvnw test -Dtest='GoogleSignIn*'`. Which test fails? Then describe, step by step, how a phishing page could use this to sign in as someone, and which of PayDeck's other defences would and would not still help. Put the check back.
+
+<Fragment slot="hint">The phishing page would start the flow with its own address as `redirect_uri` and its own code challenge. Who would end up with the login code, and who would know the verifier?</Fragment>
+<Fragment slot="solution">
+
+```
+[ERROR]   GoogleSignInConfiguredTest.onlySendsCodesToTheApp:45 Status expected:<400> but was:<302>
+```
+
+The attack: the phishing page makes its **own** verifier and challenge, and sends the victim to `/api/auth/google?redirect_uri=https://evil.example.com/steal&code_challenge=<its challenge>`. The victim sees Google's real page, signs in, and is sent to the evil address with a login code. The phishing page knows the verifier (it made it), so `/api/auth/token` gives it the victim's PayDeck tokens.
+
+PKCE does not help here, because the attacker started the flow and holds the verifier. Google's own redirect check does not help either: it only protects step 4, which still goes to the PayDeck API. The allow-list is the defence for this step, which is why the test exists.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="redirect_uri_mismatch">
+Google's error page says this when the callback address is not exactly one of the client's **Authorised redirect URIs**: `http` not `https`, `localhost` not `127.0.0.1`, port `8080`, path `/login/oauth2/code/google`. On Android it means the browser reached the API as `10.0.2.2`; use `localhost` with `adb reverse`.
+</Aside>
+
+<Aside type="caution" title="The browser opens, but the app never hears back">
+On the Mac, check the `Info.plist` entry and the `AppDelegate` method, and rebuild: a reload does not pick up either. On Android, check that the intent filter is inside the `MainActivity` element.
+</Aside>
+
+<Aside type="caution" title="Committing .env">
+The client secret lets anyone pretend to be PayDeck to Google. If it was ever pushed, create a new secret in the Google console and delete the old one: a secret in Git history stays there.
+</Aside>
+
+## Recap
+
+- Google needs a **Web application** client with the redirect URI `http://localhost:8080/login/oauth2/code/google`; its ID and secret go in `.env`, never in Git.
+- `/api/auth/google` checks the app's link and challenge, keeps them in a short session, and hands over to Spring's `oauth2Login`.
+- The success handler finds or creates the user, makes a login code, ends the session, and redirects to `paydeck://auth?code=...`.
+- The app opens the browser with `Linking.openURL`, catches the link with `Linking.addEventListener('url')`, and trades the code and verifier for tokens.
+- Android needs an intent filter; macOS needs `CFBundleURLTypes` and an `AppDelegate` method.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which part of PayDeck is registered with Google as the OAuth client?',
+			options: ['The Mac app', 'The Android app', 'The API, as a web application'],
+			answer: 2,
+			explanation: 'The API holds the client secret and receives Google\'s callback. The apps only open the browser and receive PayDeck\'s own code.',
+		},
+		{
+			question: 'Why does the API need a browser session during Google sign-in, when it is otherwise stateless?',
+			options: ['To store the access token', 'To remember the app\'s link and challenge, and Spring\'s state, between redirects', 'Google requires cookies'],
+			answer: 1,
+			explanation: 'The flow is several separate browser visits. The session carries what must be remembered between them, and is thrown away at the end.',
+		},
+		{
+			question: 'Why does the Android app open the sign-in page at localhost:8080 instead of 10.0.2.2:8080?',
+			options: ['It is faster', 'Google only accepts plain http redirect addresses for localhost', '10.0.2.2 does not work in browsers'],
+			answer: 1,
+			explanation: 'The callback address is built from the address the browser used. With adb reverse, localhost on the emulator reaches the Mac.',
+		},
+	]}
+/>
+
+<MarkComplete />

@@ -1,0 +1,320 @@
+---
+title: "Mini-project: PayDeck with Google sign-in"
+description: "Finish Google sign-in on both platforms, show people how they can sign in, and let someone who signed up with Google add a password, with tests for every rule."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+People can now sign in with a password, with Google, or both. But nobody can see which, and someone who signed up with Google is stuck with it: on a borrowed computer without their Google account, they cannot get in. This project makes PayDeck tell people how they sign in, and lets Google-only people add a password.
+
+## The tasks
+
+1. **Both platforms, for real.** With your own Google client from lesson 29.3, sign in with Google on the Mac **and** on the Android emulator, once as someone new and once linking to a password account.
+2. **How do I sign in?** Every user in an API answer (sign-in responses and `/api/me`) gets a `signInMethods` list: `"PASSWORD"` if they have a password, `"GOOGLE"` if they have linked Google, in that order.
+3. **Add a password.** `POST /api/me/password` with `{"newPassword": "..."}`, for the signed-in person. Same length rule as sign-up (10 to 128 characters, with the same message). It answers `204`, or `409` with code `PASSWORD_EXISTS` if they already have one. Changing an existing password is a different feature, which needs the old password, and is not part of this project.
+4. **Tests.** `SignInMethodsApiTest` with two tests: `/api/me` says how you sign in, before and after linking Google; and a Google-only person can add a password once (too short is `400`, then `204`, then signing in with it works, then a second try is `409`). `./mvnw test` should report 60 tests.
+5. **The app.** The **You** screen says "Signs in with a password", "Signs in with Google" or "Signs in with a password and Google". If there is no password, it shows a form to add one, checked with `newPasswordError` from lesson 28.1. After saving, the line updates and the form disappears.
+6. Try the whole story: a new person signs up with Google, opens an account, adds a password, signs out, and signs back in **with the password**. Commit.
+
+<Exercise title="Build it">
+Do the six tasks.
+
+<Fragment slot="hint">`UserResponse.of(user)` is the one place that turns a `User` into JSON, so `signInMethods` belongs there; build the list with an `ArrayList`. For the endpoint, `MeController` needs `AuthService`. In the test, a Google-only person has no password to sign in with: get their access token with `TokenService.issue(user).accessToken()`.</Fragment>
+<Fragment slot="hint2">In the app, a `useAddPassword` mutation that invalidates `['me']` (like `useOpenAccount`) makes the You screen refresh by itself. The API's field error arrives as `ApiError.fields.newPassword` (lesson 22.4).</Fragment>
+<Fragment slot="solution">
+
+### How people sign in
+
+In `AuthController`, `UserResponse` gains the list (import `java.util.ArrayList` and `java.util.List`):
+
+```java
+    /** Who someone is, and how they can sign in: "PASSWORD", "GOOGLE" or both. */
+    public record UserResponse(UUID id, String email, String displayName, List<String> signInMethods) {
+
+        public static UserResponse of(User user) {
+            List<String> methods = new ArrayList<>();
+            if (user.getPasswordHash() != null) {
+                methods.add("PASSWORD");
+            }
+            if (user.getGoogleSubject() != null) {
+                methods.add("GOOGLE");
+            }
+            return new UserResponse(user.getId(), user.getEmail(), user.getDisplayName(), methods);
+        }
+    }
+```
+
+Every answer that includes a user now says how they sign in, because they all go through `of`.
+
+### Adding a password
+
+In `User.java`:
+
+```java
+    /** For someone who signed up with Google: from now on, they can use a password too. */
+    public void addPassword(String passwordHash) {
+        this.passwordHash = passwordHash;
+    }
+```
+
+In `AuthService`:
+
+```java
+    /** Lets someone who only uses Google sign in with a password too. Changing a password is another feature. */
+    @Transactional
+    public void addPassword(UUID userId, String password) {
+        User user = users.findById(userId).orElseThrow();
+        if (user.getPasswordHash() != null) {
+            throw new ConflictException("PASSWORD_EXISTS", "You already have a password.");
+        }
+        user.addPassword(passwordEncoder.encode(password));
+    }
+```
+
+Why refuse when there is already a password? If this endpoint could **replace** a password, anyone holding a stolen access token for 15 minutes could change the password and keep the account for good. Changing a password must ask for the old one; adding the first one has nothing to ask for, and is only possible for people who are signed in through Google.
+
+In `MeController`, inject `AuthService` (add it to the constructor), and add:
+
+```java
+    public record NewPasswordRequest(
+            @NotBlank @Size(min = 10, max = 128, message = "must be at least 10 characters") String newPassword) {
+    }
+```
+
+```java
+    /** Someone who signed up with Google adds a password, to sign in without Google too. */
+    @PostMapping("/api/me/password")
+    public ResponseEntity<Void> addPassword(CurrentUser current, @Valid @RequestBody NewPasswordRequest request) {
+        auth.addPassword(current.id(), request.newPassword());
+        return ResponseEntity.noContent().build();
+    }
+```
+
+with imports for `jakarta.validation.Valid`, `jakarta.validation.constraints.NotBlank`, `jakarta.validation.constraints.Size` and `org.springframework.web.bind.annotation.RequestBody`.
+
+### The tests
+
+`src/test/java/dev/paydeck/api/auth/SignInMethodsApiTest.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import java.util.UUID;
+
+import dev.paydeck.api.ApiTestSupport;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.ResultActions;
+
+class SignInMethodsApiTest extends ApiTestSupport {
+
+    @Autowired
+    AuthService auth;
+
+    @Autowired
+    TokenService tokens;
+
+    @Test
+    void meSaysHowYouSignIn() throws Exception {
+        TestUser asha = register("Asha");
+        mvc.perform(get("/api/me").with(as(asha)))
+                .andExpect(jsonPath("$.user.signInMethods[0]").value("PASSWORD"))
+                .andExpect(jsonPath("$.user.signInMethods.length()").value(1));
+
+        auth.signInWithGoogle(UUID.randomUUID().toString(), asha.email(), true, "Asha");
+        mvc.perform(get("/api/me").with(as(asha)))
+                .andExpect(jsonPath("$.user.signInMethods[1]").value("GOOGLE"));
+    }
+
+    @Test
+    void someoneWhoUsesGoogleCanAddAPasswordOnce() throws Exception {
+        String email = "chen-" + UUID.randomUUID() + "@gmail.com";
+        User chen = auth.signInWithGoogle(UUID.randomUUID().toString(), email, true, "Chen");
+        String token = tokens.issue(chen).accessToken();
+
+        addPassword(token, "short").andExpect(status().isBadRequest());
+        addPassword(token, PASSWORD).andExpect(status().isNoContent());
+
+        mvc.perform(post("/api/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"email": "%s", "password": "%s"}
+                                """.formatted(email, PASSWORD)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.user.signInMethods.length()").value(2));
+
+        addPassword(token, "another password entirely")
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("PASSWORD_EXISTS"));
+    }
+
+    private ResultActions addPassword(String accessToken, String newPassword) throws Exception {
+        return mvc.perform(post("/api/me/password")
+                .header("Authorization", "Bearer " + accessToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"newPassword": "%s"}
+                        """.formatted(newPassword)));
+    }
+}
+```
+
+`./mvnw test`: 60 tests, all green.
+
+With curl, Asha (who linked Google in lesson 29.4) asks who she is, then tries to add a password:
+
+```sh
+T=$(curl -s -X POST localhost:8080/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"asha@example.com","password":"correct horse battery"}' | jq -r .accessToken)
+curl -s localhost:8080/api/me -H "Authorization: Bearer $T" | jq -c .user
+curl -s -X POST localhost:8080/api/me/password -H "Authorization: Bearer $T" \
+  -H 'Content-Type: application/json' -d '{"newPassword":"another password entirely"}'
+```
+
+```
+{"id":"538436cd-19d2-43a4-b803-f91e16867977","email":"asha@example.com","displayName":"Asha Rao","signInMethods":["PASSWORD","GOOGLE"]}
+{"detail":"You already have a password.","instance":"/api/me/password","status":409,"title":"Conflict","code":"PASSWORD_EXISTS"}
+```
+
+### The app
+
+`src/types.ts`:
+
+```ts
+export type User = {
+  id: string;
+  email: string;
+  displayName: string;
+  /** How this person can sign in. */
+  signInMethods: ('PASSWORD' | 'GOOGLE')[];
+};
+```
+
+`src/api/auth.ts`:
+
+```ts
+/** For someone who signed up with Google: a password, to sign in without Google too. */
+export const addPassword = (newPassword: string) =>
+  request<void>('/api/me/password', { method: 'POST', body: { newPassword } });
+```
+
+`src/api/hooks.ts`:
+
+```ts
+export function useAddPassword() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: authApi.addPassword,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.me }),
+  });
+}
+```
+
+`src/components/AddPassword.tsx`:
+
+```tsx
+import { useState } from 'react';
+import { StyleSheet, Text, View } from 'react-native';
+import { useAddPassword } from '../api/hooks';
+import { ApiError } from '../api/client';
+import { newPasswordError } from '../auth/signInForm';
+import { Button } from './Button';
+import { Field } from './Field';
+
+/** Lets someone who signed up with Google choose a password too. */
+export function AddPassword() {
+  const addPassword = useAddPassword();
+  const [password, setPassword] = useState('');
+  const [submitted, setSubmitted] = useState(false);
+
+  const error = submitted ? newPasswordError(password) : null;
+  const apiError = addPassword.error;
+  const fieldError = apiError instanceof ApiError ? apiError.fields?.newPassword : undefined;
+
+  function save() {
+    setSubmitted(true);
+    if (newPasswordError(password) === null) {
+      addPassword.mutate(password);
+    }
+  }
+
+  return (
+    <View style={styles.box}>
+      <Text>Add a password to sign in without Google, for example on a computer where you are not signed in to Google.</Text>
+      <Field
+        label="New password"
+        value={password}
+        onChangeText={setPassword}
+        secureTextEntry
+        autoComplete="new-password"
+        onSubmitEditing={save}
+        error={error ?? fieldError}
+      />
+      {apiError !== null && fieldError === undefined && <Text style={styles.error}>{apiError.message}</Text>}
+      <Button
+        title={addPassword.isPending ? 'Saving…' : 'Add password'}
+        variant="secondary"
+        onPress={save}
+        disabled={addPassword.isPending}
+      />
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  box: { gap: 12 },
+  error: { color: '#b3261e' },
+});
+```
+
+In `ProfileScreen`, import `AddPassword`, add above the component:
+
+```tsx
+const METHOD_NAMES = { PASSWORD: 'a password', GOOGLE: 'Google' };
+```
+
+and below the email:
+
+```tsx
+      <Text>Signs in with {me.data.user.signInMethods.map((method) => METHOD_NAMES[method]).join(' and ')}</Text>
+      {!me.data.user.signInMethods.includes('PASSWORD') && <AddPassword />}
+```
+
+`METHOD_NAMES[method]` type-checks because `method` can only be `'PASSWORD'` or `'GOOGLE'`, the two keys of the object (lesson 9.3).
+
+### Try it
+
+A new person, Eve, taps **Continue with Google** and signs up. She sees **Welcome to PayDeck, Eve Moreau**, opens a USD account, and goes to **You**:
+
+- "Signs in with Google", and the password form.
+- She types `short` and taps **Add password**: "Use at least 10 characters", from the app, before anything is sent.
+- She types `purple elephants dancing`: the line changes to **Signs in with a password and Google**, and the form disappears, because `['me']` was refetched.
+
+She signs out and signs in with her email and the new password:
+
+```json
+{"id":"41609685-d300-4e72-8b60-949d329a3f9b","email":"eve.moreau@gmail.com","displayName":"Eve Moreau","signInMethods":["PASSWORD","GOOGLE"]}
+```
+
+(That is the `user` part of the sign-in answer.) Same account, same wallet, two ways in.
+
+### What to notice
+
+- **One way to build every user answer** (`UserResponse.of`) meant one change updated sign-up, sign-in, refresh, Google and `/api/me` together.
+- **Adding is not changing.** The rule that a password can only be added, never replaced, here, is what keeps a stolen 15-minute access token from becoming a stolen account.
+- **Every way in leads to the same tokens.** Password, Google and refresh all end in `signedIn` on the API and `accept` in the app. Module 30 builds roles and permissions on top of that one path, and does not need to care how anyone signed in.
+</Fragment>
+</Exercise>
+
+<MarkComplete />
