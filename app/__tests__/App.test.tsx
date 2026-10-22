@@ -174,6 +174,28 @@ describe('staying signed in', () => {
     expect(screen.getByTestId('balance')).toHaveTextContent('$1,243.50');
   });
 
+  it('gets a new access token after signing in with a password', async () => {
+    const user = userEvent.setup();
+    api.seedUser('Asha', 'USD', 5_000);
+    await render(<App queryClient={queryClient} />);
+    await user.type(await screen.findByLabelText('Email'), 'asha@example.com');
+    await user.type(screen.getByLabelText('Password'), 'correct horse battery');
+    await user.press(screen.getByRole('button', { name: 'Sign in' }));
+    await screen.findByText('Hi, Asha');
+    api.expireAccessTokens();
+
+    await user.press(screen.getByRole('tab', { name: 'Activity' }));
+
+    expect(await screen.findByText('Opening balance')).toBeOnTheScreen();
+    const refreshes = api.calls.filter(
+      call => call.path === '/api/auth/refresh',
+    );
+    expect(refreshes).toHaveLength(1);
+    // The expired access token must not go to the refresh endpoint: the API
+    // refuses any request that carries a token it does not accept.
+    expect(refreshes[0].headers.Authorization).toBeUndefined();
+  });
+
   it('gets a new access token when the old one expires', async () => {
     const user = userEvent.setup();
     await startSignedIn();
