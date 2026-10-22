@@ -1,0 +1,433 @@
+---
+title: "28.1 Login and sign-up screens"
+description: "Give PayDeck a screen to sign in or create an account, send the access token with every API request, and show the wallet only to someone who is signed in."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson PayDeck opens on a sign-in screen, you can create an account or sign in from the app, and every request the app sends carries your access token.
+
+## Why it matters
+
+Since Module 27 the API answers `401 Sign in to continue.` to everything, so the app you built in Part 7 shows nothing but that message. The API is ready; the app needs a way in. This is also where most people first meet your app, so the screen has to be clear: what went wrong, under the field it went wrong in, in plain words.
+
+## The idea
+
+Three new pieces, each with one job:
+
+| Piece | Job |
+|---|---|
+| `src/api/auth.ts` | Calls `POST /api/auth/register` and `POST /api/auth/login` |
+| `src/auth/AuthContext.tsx` | Remembers who is signed in, and hands their token to the API client |
+| `src/screens/SignInScreen.tsx` | The form: email, password, and a name when signing up |
+
+The app now has two states, **signed out** and **signed in**, and `App.tsx` shows the sign-in screen in the first and the wallet in the second. The access token goes into a variable in `client.ts`, and `request` adds `Authorization: Bearer ...` to every call. Screens never touch the token themselves.
+
+One screen does both jobs, signing in and signing up, with a button to switch. People often land on the wrong one, and a single screen makes switching cheap.
+
+## Worked example
+
+### The user type and the API calls
+
+Add to `src/types.ts`:
+
+```ts
+/** A person who can sign in, as the API sends them. */
+export type User = {
+  id: string;
+  email: string;
+  displayName: string;
+};
+```
+
+Create `src/api/auth.ts`:
+
+```ts
+import type { User } from '../types';
+import { request } from './client';
+
+/** What the API answers when someone signs up or signs in. */
+export type AuthResponse = {
+  accessToken: string;
+  tokenType: 'Bearer';
+  expiresIn: number;
+  user: User;
+};
+
+export const register = (email: string, password: string, displayName: string) =>
+  request<AuthResponse>('/api/auth/register', { method: 'POST', body: { email, password, displayName } });
+
+export const login = (email: string, password: string) =>
+  request<AuthResponse>('/api/auth/login', { method: 'POST', body: { email, password } });
+```
+
+The type matches lesson 27.5's `AuthResponse` field for field.
+
+### The token in the client
+
+In `src/api/client.ts`, above `request`:
+
+```ts
+// The access token from signing in. It lives only in memory: see src/auth/AuthContext.tsx.
+let accessToken: string | null = null;
+
+/** Called when someone signs in or out, so every request carries the right token. */
+export function setAccessToken(token: string | null) {
+  accessToken = token;
+}
+```
+
+And in `request`, after the `Idempotency-Key` lines:
+
+```ts
+  if (accessToken) {
+    headers.Authorization = `Bearer ${accessToken}`;
+  }
+```
+
+A `let` at the top of a file (a **module variable**) is shared by everything that imports the file. Every request, from every screen, now reads the same token.
+
+### Who is signed in
+
+Create `src/auth/AuthContext.tsx`:
+
+```tsx
+import { createContext, useContext, useState, type ReactNode } from 'react';
+import * as authApi from '../api/auth';
+import { setAccessToken } from '../api/client';
+import type { User } from '../types';
+
+type Session = { status: 'signedOut' } | { status: 'signedIn'; user: User };
+
+type Auth = {
+  session: Session;
+  signIn: (email: string, password: string) => Promise<void>;
+  signUp: (displayName: string, email: string, password: string) => Promise<void>;
+};
+
+const AuthContext = createContext<Auth | null>(null);
+
+/** Knows who is signed in, and gives every API request their token. */
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [session, setSession] = useState<Session>({ status: 'signedOut' });
+
+  function accept(response: authApi.AuthResponse) {
+    setAccessToken(response.accessToken);
+    setSession({ status: 'signedIn', user: response.user });
+  }
+
+  const auth: Auth = {
+    session,
+    signIn: async (email, password) => accept(await authApi.login(email, password)),
+    signUp: async (displayName, email, password) => accept(await authApi.register(email, password, displayName)),
+  };
+
+  return <AuthContext.Provider value={auth}>{children}</AuthContext.Provider>;
+}
+
+export function useAuth(): Auth {
+  const auth = useContext(AuthContext);
+  if (auth === null) {
+    throw new Error('useAuth must be used inside <AuthProvider>');
+  }
+  return auth;
+}
+```
+
+- **`Session`** is a union type (lesson 9.3): either signed out, or signed in **with** a user. TypeScript will not let a screen read `session.user` without first checking that `status` is `'signedIn'`.
+- **A context** (lesson 14.3) lets any screen call `useAuth()` instead of passing the session down through every component.
+- **`accept`** is what happens after either kind of success: keep the token, remember the user. If `login` throws, `accept` never runs and the error goes back to the screen.
+
+### The form rules
+
+Create `src/auth/signInForm.ts`, in the same style as `cardForm.ts` from Module 26:
+
+```ts
+// The rules for the sign-in and sign-up forms. The API checks them again:
+// the app checks first so people get help straight away.
+
+/** A light check that catches typos. The API does the full check. */
+export function emailError(text: string): string | null {
+  const trimmed = text.trim();
+  if (trimmed === '') {
+    return 'Enter your email';
+  }
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed) ? null : 'That does not look like an email address';
+}
+
+/** Matches the API: length is what makes a password strong. */
+export function newPasswordError(text: string): string | null {
+  if (text.length < 10) {
+    return 'Use at least 10 characters';
+  }
+  return text.length > 128 ? 'Use 128 characters or fewer' : null;
+}
+```
+
+The pattern `^[^\s@]+@[^\s@]+\.[^\s@]+$` means "some characters without spaces or `@`, an `@`, more of them, a dot, more of them". It catches `asha@example` and `asha example.com`; the API does the full check.
+
+### The screen
+
+Create `src/screens/SignInScreen.tsx`:
+
+```tsx
+import { useState } from 'react';
+import { ScrollView, StyleSheet, Text } from 'react-native';
+import { ApiError } from '../api/client';
+import { useAuth } from '../auth/AuthContext';
+import { emailError, newPasswordError } from '../auth/signInForm';
+import { Button } from '../components/Button';
+import { Field } from '../components/Field';
+
+/** Sign in, or create an account: one screen, two modes. */
+export function SignInScreen() {
+  const { signIn, signUp } = useAuth();
+  const [mode, setMode] = useState<'signIn' | 'signUp'>('signIn');
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [submitted, setSubmitted] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const signingUp = mode === 'signUp';
+  const errors = {
+    name: signingUp && name.trim() === '' ? 'Tell us your name' : null,
+    email: emailError(email),
+    password: signingUp ? newPasswordError(password) : password === '' ? 'Enter your password' : null,
+  };
+
+  // The API checks the fields too. Show its answer under the right field.
+  const fieldErrors = error instanceof ApiError ? error.fields : undefined;
+
+  async function submit() {
+    setSubmitted(true);
+    if (errors.name || errors.email || errors.password) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      if (signingUp) {
+        await signUp(name.trim(), email.trim(), password);
+      } else {
+        await signIn(email.trim(), password);
+      }
+    } catch (e) {
+      setError(e as Error);
+      setBusy(false);
+    }
+  }
+
+  function switchMode() {
+    setMode(signingUp ? 'signIn' : 'signUp');
+    setSubmitted(false);
+    setError(null);
+  }
+
+  return (
+    <ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled">
+      <Text accessibilityRole="header" style={styles.title}>
+        {signingUp ? 'Create your PayDeck account' : 'Sign in to PayDeck'}
+      </Text>
+      {signingUp && (
+        <Field
+          label="Your name"
+          value={name}
+          onChangeText={setName}
+          maxLength={100}
+          autoComplete="name"
+          error={submitted ? errors.name : null}
+        />
+      )}
+      <Field
+        label="Email"
+        value={email}
+        onChangeText={setEmail}
+        autoCapitalize="none"
+        autoCorrect={false}
+        autoComplete="email"
+        keyboardType="email-address"
+        error={(submitted ? errors.email : null) ?? fieldErrors?.email}
+      />
+      <Field
+        label="Password"
+        value={password}
+        onChangeText={setPassword}
+        secureTextEntry
+        autoComplete={signingUp ? 'new-password' : 'current-password'}
+        onSubmitEditing={submit}
+        error={(submitted ? errors.password : null) ?? fieldErrors?.password}
+      />
+      {signingUp && <Text style={styles.muted}>At least 10 characters. A short sentence works well.</Text>}
+      {error !== null && fieldErrors === undefined && <Text style={styles.error}>{error.message}</Text>}
+      <Button
+        title={busy ? 'Please wait…' : signingUp ? 'Create account' : 'Sign in'}
+        onPress={submit}
+        disabled={busy}
+      />
+      <Button
+        title={signingUp ? 'I already have an account' : 'Create an account'}
+        variant="secondary"
+        onPress={switchMode}
+      />
+    </ScrollView>
+  );
+}
+
+const styles = StyleSheet.create({
+  page: { padding: 24, gap: 16, width: '100%', maxWidth: 480, alignSelf: 'center' },
+  title: { fontSize: 28, fontWeight: '700', color: '#14162b' },
+  muted: { color: '#5d6177' },
+  error: { color: '#b3261e' },
+});
+```
+
+The props on the fields do a lot of quiet work:
+
+- **`autoCapitalize="none"`** and **`autoCorrect={false}`**: phones like to turn `asha@` into `Asha@`, and correct names into words.
+- **`keyboardType="email-address"`** puts `@` and `.` on the phone's keyboard.
+- **`secureTextEntry`** shows dots instead of the password.
+- **`autoComplete`** tells password managers what each field is. `new-password` asks them to suggest a strong one; `current-password` lets them fill in the saved one. Good security is easy security.
+- **`onSubmitEditing={submit}`**: pressing Return in the password field signs in, on the phone and on the Mac (lesson 13.5).
+- The password rule is shown **before** someone gets it wrong, not only after.
+
+Two kinds of error: the API's `400` has `fields` (lesson 22.4), shown under each field; anything else (`401` wrong password, `409` email taken, no connection) is shown above the button.
+
+### Only signed-in people see the wallet
+
+Replace `App.tsx`:
+
+```tsx
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { useState } from 'react';
+import { AuthProvider, useAuth } from './src/auth/AuthContext';
+import { AppNavigator } from './src/navigation/AppNavigator';
+import { SignInScreen } from './src/screens/SignInScreen';
+import { WelcomeScreen } from './src/screens/WelcomeScreen';
+import { AccountIdGate } from './src/state/AccountIdContext';
+
+export default function App() {
+  const [queryClient] = useState(() => new QueryClient());
+  return (
+    <QueryClientProvider client={queryClient}>
+      <AuthProvider>
+        <Root />
+      </AuthProvider>
+    </QueryClientProvider>
+  );
+}
+
+/** Signed out: the sign-in screen. Signed in: the wallet. */
+function Root() {
+  const { session } = useAuth();
+  if (session.status === 'signedOut') {
+    return <SignInScreen />;
+  }
+  return (
+    <AccountIdGate welcome={WelcomeScreen}>
+      <AppNavigator />
+    </AccountIdGate>
+  );
+}
+```
+
+`Root` is a separate component because `useAuth` only works **inside** `<AuthProvider>`, and `App` is the component that creates it.
+
+### Try it
+
+Start the API and the app (lesson 26.4). PayDeck opens on **Sign in to PayDeck**.
+
+- Press **Sign in** with nothing filled in: "Enter your email" and "Enter your password".
+- `asha@example.com` with a wrong password: "That email and password do not match."
+- **Create an account** with the email `Asha@Example.com` and a 5-character password: "Use at least 10 characters", and nothing is sent. With a long password: "An account with this email already exists. Try signing in." The API lower-cased the email, as you made it do in lesson 27.4.
+- Create a new account, say Cara Lim with `cara@example.com`: you are signed in and see **Welcome to PayDeck**. Open an account there, and the wallet says **Hi, Cara Lim**.
+
+<Aside type="caution" title="The account ID from Part 7">
+If this device saved an account ID in Part 7, the wallet now says "Account ... was not found": that account has no owner, so the API hides it from everyone (Module 27 mini-project). Tap **You**, then **Use a different account**, and open a new one. Lesson 28.3 replaces the saved ID with the accounts the API says are yours, and this step disappears.
+</Aside>
+
+Close the app and open it again: you are back on the sign-in screen, because the token lived only in memory. The next lesson keeps it safely.
+
+<Exercise title="Show the password">
+Typing a long password on a phone behind dots is error-prone. Add a **Show** button next to the password label that switches `secureTextEntry` off and on (its title changes to **Hide**). The password must start hidden.
+
+<Fragment slot="hint">A new state `const [showPassword, setShowPassword] = useState(false)` and `secureTextEntry={!showPassword}`. A secondary `Button` below the field is fine; it does not have to sit inside it.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+  const [showPassword, setShowPassword] = useState(false);
+```
+
+```tsx
+      <Field
+        label="Password"
+        value={password}
+        onChangeText={setPassword}
+        secureTextEntry={!showPassword}
+        autoComplete={signingUp ? 'new-password' : 'current-password'}
+        onSubmitEditing={submit}
+        error={(submitted ? errors.password : null) ?? fieldErrors?.password}
+      />
+      <Button
+        title={showPassword ? 'Hide password' : 'Show password'}
+        variant="secondary"
+        onPress={() => setShowPassword(!showPassword)}
+      />
+```
+
+Starting hidden matters: someone may be signing in on a train, with people behind them. Showing it is their choice.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Telling people which part was wrong">
+Show the API's message as it is. "That email and password do not match" is deliberately vague (lesson 27.4); an app that says "No account with this email" undoes that work.
+</Aside>
+
+<Aside type="caution" title="Logging the password">
+`console.log('signing in', email, password)` while debugging ends up in log files and crash reports. Never log passwords or tokens, not even "just for now".
+</Aside>
+
+<Aside type="caution" title="Keeping the password around">
+The password is needed for one request. Do not save it in state outside the form, in a context, or on the device; the token is what proves who you are from now on.
+</Aside>
+
+## Recap
+
+- `src/api/auth.ts` calls register and login; `AuthResponse` matches the API.
+- `client.ts` keeps the access token in a module variable and adds `Authorization: Bearer ...` to every request.
+- `AuthProvider` holds the session (`signedOut` or `signedIn` with a user); `useAuth()` gives screens `session`, `signIn` and `signUp`.
+- One `SignInScreen` signs in and signs up, checks fields first, and shows the API's field errors under the right field.
+- `App.tsx` shows the wallet only when signed in.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why does the email field use autoCapitalize="none"?',
+			options: ['Emails must be lower case to be valid', 'Phones capitalise the first letter, and people should see exactly what they typed', 'It makes the field faster'],
+			answer: 1,
+			explanation: 'The API lower-cases emails anyway, but an unexpected capital letter confuses people and breaks password managers\' matching.',
+		},
+		{
+			question: 'Where does the access token live after signing in, in this lesson?',
+			options: ['In AsyncStorage', 'In a variable in client.ts, in memory only', 'In the URL of each request'],
+			answer: 1,
+			explanation: 'Memory only, so closing the app forgets it. Lesson 28.2 keeps it in secure storage.',
+		},
+		{
+			question: 'Why is Root a separate component from App?',
+			options: ['Components must be short', 'useAuth only works inside AuthProvider, which App creates', 'So it can be tested'],
+			answer: 1,
+			explanation: 'A hook can only read a context from inside its provider. App renders the provider; Root, inside it, can use it.',
+		},
+	]}
+/>
+
+<MarkComplete />

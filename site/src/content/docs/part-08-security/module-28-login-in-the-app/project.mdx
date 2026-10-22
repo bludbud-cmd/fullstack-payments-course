@@ -1,0 +1,430 @@
+---
+title: "Mini-project: PayDeck with accounts"
+description: "Let people hold several accounts and switch between them, remember the choice per person on each device, open more accounts from the You screen, and sign out on every device at once when a phone is lost."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+PayDeck now knows who you are, keeps you signed in and lets you sign out. But since the Module 27 project the API lets one person own **several** accounts, and the app can neither open a second one nor show anything but the first. And if Asha loses her phone, signing out of the Mac does nothing about the phone. This project fixes both.
+
+## The tasks
+
+1. **Sign out everywhere (API).** Add `POST /api/me/sign-out-everywhere`. It revokes **every** refresh token of the signed-in person and answers `204`. It needs an access token, unlike `/api/auth/logout`: you must prove who you are before ending all of someone's sessions.
+2. **Test it.** In `RefreshTokenApiTest`, write `signingOutEverywhereEndsEverySession`: Asha registers (that is one session) and signs in again (a second, "on the Mac"); after signing out everywhere, **neither** refresh token works. `./mvnw test` should then report 47 tests.
+3. **Sign out everywhere (app).** Add `signOutEverywhere` to `src/api/auth.ts` and to `AuthContext`. If the API call fails, stay signed in and show the error: unlike a normal sign-out, the whole point of this one is what happens on the server.
+4. **Switching accounts.** `AccountGate` shows the account you chose last time **on this device**, or your first. Give the context a `switchTo(accountId)` and export a `useSwitchAccount()` hook next to `useAccountId()`. Save the choice in AsyncStorage under a key that includes the user's ID, so two people sharing a Mac do not mix them up. Ignore a saved choice that is not one of yours any more.
+5. **A `CurrencyPicker` component.** Move the row of currency buttons out of `OpenAccountScreen` into `src/components/CurrencyPicker.tsx` (`value` and `onChange` props), and use it there.
+6. **Open another account.** A new route `anotherAccount` and `AnotherAccountScreen`: pick a currency (EUR to start with), open the account, switch to it and go to the wallet.
+7. **The You screen.** Name and email; **Your accounts**, one row per account with its currency and balance, the one being shown marked (tapping a row switches to it); **Open another account**; **Sign out**; and **Sign out on all devices**.
+8. Try it on the Mac and on Android at the same time. Commit.
+
+<Aside type="note" title="Why not end the access tokens too?">
+After signing out everywhere, the other devices' **access** tokens keep working until they expire, at most 15 minutes (lesson 28.5). Their next refresh fails, and they show "Your session has ended". For a lost phone that is usually enough. If it were not, the next step would be a "tokens issued before" time per user that the API checks on every request, which costs a database lookup per request.
+</Aside>
+
+<Exercise title="Build it">
+Do the eight tasks. Use Asha, who has the USD account she opened in the Module 27 project.
+
+<Fragment slot="hint">`RefreshTokenRepository.revokeAllFor(userId)` from lesson 28.4 already does the work; the endpoint needs `CurrentUser` and `@Transactional` (a `@Modifying` query must run in a transaction). In the app, `signOutEverywhere` calls the API **with** the access token, so leave out `withToken: false`.</Fragment>
+<Fragment slot="hint2">In `AccountGate`, keep the saved choice in state: `undefined` while it is being read from AsyncStorage, `null` if nothing was saved. Read it in a `useEffect` that depends on the user's ID (lesson 10.5). Until it has been read, show the same loading view as while `/api/me` loads, or the wallet will flash the first account and then jump.</Fragment>
+<Fragment slot="solution">
+
+### Sign out everywhere: the API
+
+In `MeController`, inject `RefreshTokenRepository` (add it to the constructor) and add:
+
+```java
+    /**
+     * For a lost phone: every refresh token of this user stops working, so
+     * every device is signed out within 15 minutes, when its access token expires.
+     */
+    @PostMapping("/api/me/sign-out-everywhere")
+    @Transactional
+    public ResponseEntity<Void> signOutEverywhere(CurrentUser current) {
+        refreshTokens.revokeAllFor(current.id());
+        return ResponseEntity.noContent().build();
+    }
+```
+
+with `import org.springframework.http.ResponseEntity;` and `import org.springframework.web.bind.annotation.PostMapping;`. The path is under `/api/me`, not `/api/auth`, so `SecurityConfig` demands a valid access token for it.
+
+The test, in `RefreshTokenApiTest`:
+
+```java
+    @Test
+    void signingOutEverywhereEndsEverySession() throws Exception {
+        TestUser asha = register("Asha");
+        String body = mvc.perform(post("/api/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"email": "%s", "password": "%s"}
+                                """.formatted(asha.email(), PASSWORD)))
+                .andReturn().getResponse().getContentAsString();
+        String onTheMac = JsonPath.read(body, "$.refreshToken");
+
+        mvc.perform(post("/api/me/sign-out-everywhere").with(as(asha)))
+                .andExpect(status().isNoContent());
+
+        refresh(asha.refreshToken()).andExpect(status().isUnauthorized());
+        refresh(onTheMac).andExpect(status().isUnauthorized());
+    }
+```
+
+`./mvnw test`: 47 tests, all green.
+
+With curl: sign in twice (two devices), sign out everywhere with the first device's access token, then try the second device's refresh token:
+
+```sh
+login() { curl -s -X POST localhost:8080/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"asha@example.com","password":"correct horse battery"}'; }
+A=$(login); B=$(login)
+TOKEN=$(echo "$A" | jq -r .accessToken)
+MAC=$(echo "$B" | jq -r .refreshToken)
+curl -si -X POST localhost:8080/api/me/sign-out-everywhere -H "Authorization: Bearer $TOKEN" | head -1
+curl -s -X POST localhost:8080/api/auth/refresh -H 'Content-Type: application/json' \
+  -d "{\"refreshToken\":\"$MAC\"}" | jq -c '{status,detail}'
+curl -s localhost:8080/api/me -H "Authorization: Bearer $TOKEN" | jq -c '.user.displayName'
+```
+
+```
+HTTP/1.1 204
+{"status":401,"detail":"Your session has ended. Please sign in again."}
+"Asha Rao"
+```
+
+The last line is the note above in action: the access token still works until it expires.
+
+### Sign out everywhere: the app
+
+In `src/api/auth.ts`:
+
+```ts
+/** Ends every session of the signed-in person, on every device. */
+export const signOutEverywhere = () => request<void>('/api/me/sign-out-everywhere', { method: 'POST' });
+```
+
+In `AuthContext`, add `signOutEverywhere: () => Promise<void>;` to the `Auth` type, and to the `auth` object:
+
+```tsx
+    signOutEverywhere: async () => {
+      await authApi.signOutEverywhere(); // If this fails, stay signed in and show why.
+      await forget();
+    },
+```
+
+No `.catch` here: if the API call throws, `forget` never runs and the error reaches the screen.
+
+### Remembering the account per person
+
+Replace `src/state/AccountContext.tsx`:
+
+```tsx
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { createContext, useContext, useEffect, useState, type ComponentType, type ReactNode } from 'react';
+import { ScrollView, StyleSheet } from 'react-native';
+import { useMe } from '../api/hooks';
+import { QueryState } from '../components/QueryState';
+
+type CurrentAccount = {
+  accountId: string;
+  /** Show another of your accounts, and remember the choice on this device. */
+  switchTo: (accountId: string) => void;
+};
+
+const AccountContext = createContext<CurrentAccount | null>(null);
+
+type AccountGateProps = {
+  /** The screen for someone who has no account yet. */
+  openAccount: ComponentType;
+  children: ReactNode;
+};
+
+/**
+ * Picks which of your accounts the app shows: the one you chose last time
+ * on this device, or your first. Someone with no account opens one first.
+ */
+export function AccountGate({ openAccount: OpenAccount, children }: AccountGateProps) {
+  const me = useMe();
+  // undefined: still reading the saved choice. null: nothing saved.
+  const [chosen, setChosen] = useState<string | null | undefined>(undefined);
+  const userId = me.data?.user.id;
+  // One saved choice per person, so two people sharing a Mac do not mix them up.
+  // An account ID is not a secret, so AsyncStorage is fine here.
+  const storageKey = `paydeck.accountId.${userId}`;
+
+  useEffect(() => {
+    if (userId !== undefined) {
+      AsyncStorage.getItem(storageKey)
+        .then(setChosen)
+        .catch(() => setChosen(null));
+    }
+  }, [userId, storageKey]);
+
+  if (me.data === undefined || chosen === undefined) {
+    return (
+      <ScrollView contentContainerStyle={styles.page}>
+        <QueryState queries={[me]} />
+      </ScrollView>
+    );
+  }
+  const accounts = me.data.accounts;
+  if (accounts.length === 0) {
+    return <OpenAccount />;
+  }
+  // A saved choice that is no longer one of yours is ignored.
+  const accountId = accounts.some((account) => account.id === chosen) ? chosen! : accounts[0].id;
+  const switchTo = (id: string) => {
+    setChosen(id);
+    AsyncStorage.setItem(storageKey, id).catch(() => {});
+  };
+  return <AccountContext.Provider value={{ accountId, switchTo }}>{children}</AccountContext.Provider>;
+}
+
+function useCurrentAccount(): CurrentAccount {
+  const current = useContext(AccountContext);
+  if (current === null) {
+    throw new Error('useAccountId must be used inside <AccountGate>');
+  }
+  return current;
+}
+
+export function useAccountId(): string {
+  return useCurrentAccount().accountId;
+}
+
+export function useSwitchAccount(): (accountId: string) => void {
+  return useCurrentAccount().switchTo;
+}
+
+const styles = StyleSheet.create({
+  page: { flexGrow: 1, justifyContent: 'center' },
+});
+```
+
+- **`chosen!`**: the `!` tells TypeScript "this is not `null` here". The `some(...)` check proves it, but TypeScript cannot see that.
+- **Ignoring a stale choice** matters: an account ID saved by someone else, or for an account that has since been closed, must never be sent to the API as if it were yours. (The API would answer `404` anyway, since Module 27.)
+- **The saved choice is a convenience, not security.** Which accounts you may see is decided by the API with your token.
+
+Every screen already reads the account through `useAccountId()`, so they all follow a switch without changes. Their TanStack Query keys include the account ID (lesson 26.3), so switching shows the other account's cached data at once if it was loaded before.
+
+### The currency picker
+
+`src/components/CurrencyPicker.tsx`:
+
+```tsx
+import { StyleSheet, View } from 'react-native';
+import type { Currency } from '../money';
+import { Button } from './Button';
+
+const CURRENCIES: Currency[] = ['USD', 'EUR', 'GBP', 'INR'];
+
+/** One button per currency PayDeck supports; the chosen one is filled in. */
+export function CurrencyPicker({ value, onChange }: { value: Currency; onChange: (currency: Currency) => void }) {
+  return (
+    <View style={styles.row}>
+      {CURRENCIES.map((code) => (
+        <View key={code} style={styles.choice}>
+          <Button title={code} variant={code === value ? 'primary' : 'secondary'} onPress={() => onChange(code)} />
+        </View>
+      ))}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  row: { flexDirection: 'row', gap: 8 },
+  choice: { flex: 1 },
+});
+```
+
+In `OpenAccountScreen`, delete `CURRENCIES`, the `row` and `choice` styles and the `View` import, import `CurrencyPicker`, and replace the row of buttons with:
+
+```tsx
+      <CurrencyPicker value={currency} onChange={setCurrency} />
+```
+
+### Opening another account
+
+In `src/navigation/routes.ts`, add the route to `Route`:
+
+```ts
+  | { name: 'issueCard' }
+  | { name: 'anotherAccount' };
+```
+
+In `AppNavigator.tsx`, import the screen and add a case to `renderScreen`:
+
+```tsx
+    case 'anotherAccount':
+      return <AnotherAccountScreen />;
+```
+
+`src/screens/AnotherAccountScreen.tsx`:
+
+```tsx
+import { useState } from 'react';
+import { StyleSheet, Text } from 'react-native';
+import { useOpenAccount } from '../api/hooks';
+import { Button } from '../components/Button';
+import { CurrencyPicker } from '../components/CurrencyPicker';
+import { Screen } from '../components/Screen';
+import type { Currency } from '../money';
+import { useNavigation } from '../navigation/NavigationContext';
+import { useSwitchAccount } from '../state/AccountContext';
+
+/** Opens a second (or third...) account, and switches to it. */
+export function AnotherAccountScreen() {
+  const openAccount = useOpenAccount();
+  const switchTo = useSwitchAccount();
+  const { switchTab } = useNavigation();
+  const [currency, setCurrency] = useState<Currency>('EUR');
+
+  function open() {
+    openAccount.mutate(currency, {
+      onSuccess: (account) => {
+        switchTo(account.id);
+        switchTab('home');
+      },
+    });
+  }
+
+  return (
+    <Screen title="Open another account">
+      <Text>Keep money in another currency. Each account has its own balance and cards.</Text>
+      <CurrencyPicker value={currency} onChange={setCurrency} />
+      {openAccount.error !== null && <Text style={styles.error}>{openAccount.error.message}</Text>}
+      <Button
+        title={openAccount.isPending ? 'Opening…' : `Open a ${currency} account`}
+        onPress={open}
+        disabled={openAccount.isPending}
+      />
+    </Screen>
+  );
+}
+
+const styles = StyleSheet.create({
+  error: { color: '#b3261e' },
+});
+```
+
+`useOpenAccount` (lesson 28.3) already invalidates `['me']`, so the new account appears in the list. For a moment the saved choice is an account `/api/me` has not returned yet; `AccountGate` shows your first account until the new list arrives, then the new one.
+
+### The You screen
+
+Replace `src/screens/ProfileScreen.tsx`:
+
+```tsx
+import { useState } from 'react';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useMe } from '../api/hooks';
+import { useAuth } from '../auth/AuthContext';
+import { Button } from '../components/Button';
+import { QueryState } from '../components/QueryState';
+import { Screen } from '../components/Screen';
+import { formatMoney } from '../money';
+import { useNavigation } from '../navigation/NavigationContext';
+import { useAccountId, useSwitchAccount } from '../state/AccountContext';
+
+export function ProfileScreen() {
+  const { signOut, signOutEverywhere } = useAuth();
+  const me = useMe();
+  const accountId = useAccountId();
+  const switchTo = useSwitchAccount();
+  const { navigate } = useNavigation();
+  const [error, setError] = useState<string | null>(null);
+
+  if (me.data === undefined) {
+    return (
+      <Screen title="You">
+        <QueryState queries={[me]} />
+      </Screen>
+    );
+  }
+
+  async function everywhere() {
+    setError(null);
+    await signOutEverywhere().catch((e: Error) => setError(e.message));
+  }
+
+  return (
+    <Screen title="You">
+      <Text style={styles.name}>{me.data.user.displayName}</Text>
+      <Text style={styles.muted}>{me.data.user.email}</Text>
+
+      <Text style={styles.heading}>Your accounts</Text>
+      {me.data.accounts.map((account) => {
+        const selected = account.id === accountId;
+        return (
+          <Pressable
+            key={account.id}
+            accessibilityRole="button"
+            accessibilityState={{ selected }}
+            accessibilityLabel={`${account.currency} account, ${formatMoney(account.balanceCents, account.currency)}`}
+            onPress={() => switchTo(account.id)}
+            style={[styles.account, selected && styles.selected]}
+          >
+            <Text style={styles.currency}>{account.currency}</Text>
+            <Text>{formatMoney(account.balanceCents, account.currency)}</Text>
+            {selected && <Text style={styles.muted}>Showing</Text>}
+          </Pressable>
+        );
+      })}
+      <Button title="Open another account" variant="secondary" onPress={() => navigate({ name: 'anotherAccount' })} />
+
+      <View style={styles.signOut}>
+        <Button title="Sign out" variant="secondary" onPress={signOut} />
+        <Button title="Sign out on all devices" variant="danger" onPress={everywhere} />
+        {error !== null && <Text style={styles.error}>{error}</Text>}
+      </View>
+    </Screen>
+  );
+}
+
+const styles = StyleSheet.create({
+  name: { fontSize: 20, fontWeight: '700' },
+  muted: { color: '#5d6177' },
+  heading: { fontSize: 18, fontWeight: '700', marginTop: 8 },
+  account: {
+    flexDirection: 'row',
+    gap: 12,
+    alignItems: 'center',
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#dfe1ea',
+    borderRadius: 10,
+  },
+  selected: { borderColor: '#3c4fe0', borderWidth: 2 },
+  currency: { fontWeight: '700', width: 40 },
+  signOut: { gap: 12, marginTop: 16 },
+  error: { color: '#b3261e' },
+});
+```
+
+- The name and email now come from `/api/me`, like the accounts, instead of from the session.
+- **`accessibilityLabel`** reads the row as one phrase, "EUR account, €0.00", for screen readers (and for tests). **`accessibilityState={{ selected }}`** says which one is showing, since the blue border alone means nothing to someone who cannot see it.
+
+### Try it
+
+Rebuild if needed and sign in as Asha on the Mac.
+
+1. **You** lists one account, `USD account, $0.00` (with your own balance), marked **Showing**.
+2. **Open another account** → **Open a EUR account**: you land on the wallet, in euros. **You** now lists `USD account, $0.00` and `EUR account, €0.00`.
+3. Tap **USD**, then **Wallet**: dollars. Go back to **You**, tap **EUR**, then **Wallet**: euros again.
+4. Quit and reopen the app: still EUR. The choice was saved under her user ID.
+5. **Open another account** → **GBP** → **Open a GBP account**: the wallet in pounds, and three accounts on **You**.
+6. Sign in as Asha on Android too. On the Mac, tap **Sign out on all devices**: the Mac shows the sign-in screen. On Android, keep using the app: within 15 minutes, when its access token expires and it tries to refresh, it shows "Your session has ended. Please sign in again."
+7. Sign in as Bea on the Mac. She has no account yet, so she sees **Welcome to PayDeck** with her name; nothing of Asha's, and Asha's saved choice is under Asha's key, so it is never tried for Bea.
+
+### What to notice
+
+- **Three ways a session ends**, each with its own scope: the access token expiring (one device, silently fixed by a refresh), **Sign out** (this device), and **Sign out on all devices** (every device, within 15 minutes).
+- **Security decisions stay on the server.** The app remembers which account to *show*; the API decides which accounts you may *use*.
+</Fragment>
+</Exercise>
+
+<MarkComplete />

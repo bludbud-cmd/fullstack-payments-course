@@ -1,0 +1,761 @@
+---
+title: "28.4 Refresh tokens"
+description: "Keep people signed in for weeks without long-lived access tokens: the API hands out single-use refresh tokens, stores only their hashes, rotates them on every use and signs everyone out when an old one is replayed; the app refreshes silently and retries."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson signing in gives a second, long-lived **refresh token**; the app keeps it in secure storage and trades it for new tokens whenever the access token expires, so people stay signed in for 30 days without ever noticing the 15-minute access tokens.
+
+## Why it matters
+
+Lesson 27.2 promised this: short access tokens limit the damage if one is stolen, and a refresh token that the server **records** gives back what pure tokens lack, the power to sign someone out. After this lesson PayDeck has both: a stolen access token is useless within 15 minutes, and a stolen refresh token can be detected and shut down.
+
+## The idea
+
+### Two tokens, two jobs
+
+| | Access token | Refresh token |
+|---|---|---|
+| What it is | A signed JWT | 32 random bytes, as text |
+| Lifetime | 15 minutes | 30 days, **one use** |
+| Sent to | Every endpoint | Only `POST /api/auth/refresh` |
+| Server keeps | Nothing | A SHA-256 **hash** of it |
+| App keeps it in | Memory | The Keychain or Keystore |
+
+When a request gets `401`, the app sends the refresh token to `/api/auth/refresh` and gets a **new pair**, then repeats the request. The person sees nothing.
+
+### Rotation and reuse detection
+
+Each refresh token works **once**. Refreshing marks it used (the database says `revoked_at = now`) and hands out a new one. This is called **rotation**, and it makes theft visible:
+
+1. A thief copies Asha's refresh token `R1`.
+2. Asha's app refreshes first: `R1` is used up, Asha gets `R2`.
+3. The thief tries `R1`. It was **already used**. Only a copy could still be trying it, so the API assumes the worst and revokes **every** refresh token Asha has, `R2` included.
+
+Asha has to sign in again (mildly annoying), and the thief is locked out (the point). It works the other way round too: if the thief refreshes first, Asha's app is the one that turns up with a used token, and both are shut out.
+
+### Why store a hash?
+
+A refresh token is as good as a password for 30 days. If the `refresh_tokens` table ever leaked, plain tokens would let anyone sign in. So, like passwords, only a hash is stored. Unlike passwords, it does not need to be **slow** (BCrypt, lesson 27.1): the token is 256 random bits, impossible to guess, so plain SHA-256 is enough, and fast enough to look up by.
+
+## Worked example: the API
+
+### The table
+
+`src/main/resources/db/migration/V5__create_refresh_tokens.sql`:
+
+```sql
+-- Refresh tokens we handed out. Only a SHA-256 hash of each token is kept, so
+-- someone who reads this table still cannot use them.
+CREATE TABLE refresh_tokens (
+    id          UUID PRIMARY KEY,
+    user_id     UUID        NOT NULL REFERENCES users (id),
+    token_hash  VARCHAR(64) NOT NULL UNIQUE,
+    expires_at  TIMESTAMPTZ NOT NULL,
+    revoked_at  TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX refresh_tokens_user_id ON refresh_tokens (user_id);
+```
+
+A SHA-256 hash written in hexadecimal is always 64 characters.
+
+### Random tokens and their hashes
+
+`src/main/java/dev/paydeck/api/auth/Secrets.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.util.Base64;
+import java.util.HexFormat;
+
+/** Small helpers for making random secrets and storing them safely. */
+final class Secrets {
+
+    private static final SecureRandom RANDOM = new SecureRandom();
+
+    private Secrets() {
+    }
+
+    /** 256 random bits, as text that is safe in JSON and URLs. Impossible to guess. */
+    static String randomToken() {
+        byte[] bytes = new byte[32];
+        RANDOM.nextBytes(bytes);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+    }
+
+    /** What we store instead of a token: if the database leaks, the hashes are useless. */
+    static String sha256Hex(String value) {
+        try {
+            byte[] hash = MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(hash);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("Every Java runtime has SHA-256", e);
+        }
+    }
+}
+```
+
+**`SecureRandom`**, not `Random` or `Math.random()`: ordinary random numbers are predictable if you have seen a few, which is fine for an idempotency key (lesson 24.5) and fatal for a token.
+
+### The entity and repository
+
+`src/main/java/dev/paydeck/api/auth/RefreshToken.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import java.time.Instant;
+import java.util.UUID;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+
+/** A refresh token we handed out. Only its SHA-256 hash is stored. */
+@Entity
+@Table(name = "refresh_tokens")
+public class RefreshToken {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private UUID id;
+
+    @Column(nullable = false)
+    private UUID userId;
+
+    @Column(nullable = false)
+    private String tokenHash;
+
+    @Column(nullable = false)
+    private Instant expiresAt;
+
+    private Instant revokedAt;
+
+    @Column(nullable = false)
+    private Instant createdAt;
+
+    protected RefreshToken() {
+        // For JPA
+    }
+
+    public RefreshToken(UUID userId, String tokenHash, Instant expiresAt) {
+        this.userId = userId;
+        this.tokenHash = tokenHash;
+        this.expiresAt = expiresAt;
+        this.createdAt = Instant.now();
+    }
+
+    public boolean isRevoked() {
+        return revokedAt != null;
+    }
+
+    public boolean isExpired() {
+        return Instant.now().isAfter(expiresAt);
+    }
+
+    public void revoke() {
+        if (revokedAt == null) {
+            revokedAt = Instant.now();
+        }
+    }
+
+    public UUID getUserId() {
+        return userId;
+    }
+}
+```
+
+`src/main/java/dev/paydeck/api/auth/RefreshTokenRepository.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import java.util.Optional;
+import java.util.UUID;
+
+import jakarta.persistence.LockModeType;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+
+public interface RefreshTokenRepository extends JpaRepository<RefreshToken, UUID> {
+
+    /** Locks the row, so two requests with the same token are handled one after the other. */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select t from RefreshToken t where t.tokenHash = :tokenHash")
+    Optional<RefreshToken> findByTokenHashForUpdate(String tokenHash);
+
+    /** Signs a user out on every device. */
+    @Modifying
+    @Query("update RefreshToken t set t.revokedAt = CURRENT_TIMESTAMP where t.userId = :userId and t.revokedAt is null")
+    int revokeAllFor(UUID userId);
+}
+```
+
+- **The lock** is the same `SELECT ... FOR UPDATE` that stopped double spending in lesson 24.3. Without it, two requests with the same token could both read "not used yet" and both get new tokens, and rotation would be broken.
+- **`@Modifying`** marks a query that changes rows instead of reading them. One `UPDATE` revokes them all.
+
+### Handing out both tokens
+
+Replace `TokenService.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import java.time.Duration;
+import java.time.Instant;
+
+import org.springframework.security.oauth2.jose.jws.MacAlgorithm;
+import org.springframework.security.oauth2.jwt.JwsHeader;
+import org.springframework.security.oauth2.jwt.JwtClaimsSet;
+import org.springframework.security.oauth2.jwt.JwtEncoder;
+import org.springframework.security.oauth2.jwt.JwtEncoderParameters;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+/**
+ * Hands out the two tokens a signed-in app holds: a JWT access token that
+ * works for 15 minutes, and a random refresh token that the app trades for
+ * a new pair when the access token expires. Each refresh token works once.
+ */
+@Service
+public class TokenService {
+
+    public static final String ISSUER = "paydeck";
+    static final Duration ACCESS_TOKEN_LIFETIME = Duration.ofMinutes(15);
+    static final Duration REFRESH_TOKEN_LIFETIME = Duration.ofDays(30);
+
+    public record Tokens(String accessToken, String refreshToken, long expiresInSeconds) {
+    }
+
+    private final JwtEncoder jwtEncoder;
+    private final RefreshTokenRepository refreshTokens;
+
+    public TokenService(JwtEncoder jwtEncoder, RefreshTokenRepository refreshTokens) {
+        this.jwtEncoder = jwtEncoder;
+        this.refreshTokens = refreshTokens;
+    }
+
+    @Transactional
+    public Tokens issue(User user) {
+        Instant now = Instant.now();
+        JwtClaimsSet claims = JwtClaimsSet.builder()
+                .issuer(ISSUER)
+                .subject(user.getId().toString())
+                .issuedAt(now)
+                .expiresAt(now.plus(ACCESS_TOKEN_LIFETIME))
+                .claim("name", user.getDisplayName())
+                .build();
+        JwsHeader header = JwsHeader.with(MacAlgorithm.HS256).build();
+        String accessToken = jwtEncoder.encode(JwtEncoderParameters.from(header, claims)).getTokenValue();
+
+        String refreshToken = Secrets.randomToken();
+        refreshTokens.save(new RefreshToken(user.getId(), Secrets.sha256Hex(refreshToken),
+                now.plus(REFRESH_TOKEN_LIFETIME)));
+        return new Tokens(accessToken, refreshToken, ACCESS_TOKEN_LIFETIME.toSeconds());
+    }
+}
+```
+
+The plain refresh token leaves this method exactly once, in the response. The database only ever sees its hash.
+
+### Using a refresh token
+
+In `AuthService`, inject a `RefreshTokenRepository refreshTokens` (constructor parameter and field, next to `users`), import `java.util.UUID`, and add:
+
+```java
+    /**
+     * Uses up a refresh token and returns whose it was. A token that was
+     * already used means someone may have copied it, so every refresh token
+     * of that user stops working, on every device.
+     */
+    @Transactional(noRollbackFor = InvalidCredentialsException.class)
+    public User refresh(String refreshToken) {
+        RefreshToken stored = refreshTokens.findByTokenHashForUpdate(Secrets.sha256Hex(refreshToken))
+                .orElseThrow(AuthService::sessionEnded);
+        if (stored.isRevoked()) {
+            refreshTokens.revokeAllFor(stored.getUserId());
+            throw sessionEnded();
+        }
+        if (stored.isExpired()) {
+            throw sessionEnded();
+        }
+        stored.revoke();
+        return users.findById(stored.getUserId()).orElseThrow();
+    }
+
+    private static InvalidCredentialsException sessionEnded() {
+        return new InvalidCredentialsException("Your session has ended. Please sign in again.");
+    }
+```
+
+**`noRollbackFor`** is the subtle part. Normally an exception thrown out of a `@Transactional` method **undoes** everything it did (lesson 24.3). Here, the exception is the answer to the client, but the `revokeAllFor` before it must stay done. `noRollbackFor = InvalidCredentialsException.class` says: commit anyway when this exception is thrown. (The exercise shows what happens without it.)
+
+The token is found by its hash: the app sends the plain token, the server hashes it and looks for that hash.
+
+### The endpoint
+
+In `AuthController`, add a request record, put the refresh token in `AuthResponse`, add the endpoint, and update `signedIn`:
+
+```java
+    public record RefreshRequest(@NotBlank String refreshToken) {
+    }
+```
+
+```java
+    /** What signing up or in gives back: both tokens, and who they belong to. */
+    public record AuthResponse(String accessToken, String refreshToken, String tokenType, long expiresIn,
+                               UserResponse user) {
+    }
+```
+
+```java
+    /** Trades a refresh token for a new pair of tokens. The old refresh token stops working. */
+    @PostMapping("/refresh")
+    public AuthResponse refresh(@Valid @RequestBody RefreshRequest request) {
+        return signedIn(auth.refresh(request.refreshToken()));
+    }
+
+    private AuthResponse signedIn(User user) {
+        TokenService.Tokens issued = tokens.issue(user);
+        return new AuthResponse(issued.accessToken(), issued.refreshToken(), "Bearer", issued.expiresInSeconds(),
+                UserResponse.of(user));
+    }
+```
+
+`/api/auth/refresh` is under `/api/auth/**`, which `SecurityConfig` already lets through without an access token. It has to: the access token is the thing that expired.
+
+### Try it with curl
+
+Restart: `Migrating schema "public" to version "5 - create refresh tokens"`. Sign in, and the answer now has a `refreshToken`:
+
+```json
+{"accessToken":"eyJhbGciOiJIUzI1NiJ9...","refreshToken":"hEYvM7nbjPgIB-P3lt3LTPNOcxtlf7yV9Vxe05k4s30","tokenType":"Bearer","expiresIn":900,"user":{"id":"538436cd-19d2-43a4-b803-f91e16867977","email":"asha@example.com","displayName":"Asha Rao"}}
+```
+
+Play the thief:
+
+```sh
+REFRESH=$(curl -s -X POST localhost:8080/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"email": "asha@example.com", "password": "correct horse battery"}' | jq -r .refreshToken)
+NEW=$(curl -s -X POST localhost:8080/api/auth/refresh -H 'Content-Type: application/json' \
+  -d "{\"refreshToken\": \"$REFRESH\"}" | jq -r .refreshToken)
+curl -s -X POST localhost:8080/api/auth/refresh -H 'Content-Type: application/json' -d "{\"refreshToken\": \"$REFRESH\"}"
+curl -s -X POST localhost:8080/api/auth/refresh -H 'Content-Type: application/json' -d "{\"refreshToken\": \"$NEW\"}"
+```
+
+The first refresh works and gives `NEW`. The old token a second time:
+
+```
+{"detail":"Your session has ended. Please sign in again.","instance":"/api/auth/refresh","status":401,"title":"Cannot sign in","code":"INVALID_CREDENTIALS"}
+```
+
+And now `NEW`, which was never used, is refused with the same answer: reuse detection signed Asha out everywhere. In the database (`SELECT left(token_hash, 16) AS token_hash, expires_at, revoked_at FROM refresh_tokens ORDER BY created_at;`), every row has a `revoked_at`, and no row holds a token you could use:
+
+```
+    token_hash    |          expires_at           |          revoked_at
+------------------+-------------------------------+-------------------------------
+ d2effa33bf602867 | 2026-11-21 04:29:12.410162+00 | 2026-10-22 04:29:12.595709+00
+ a2818b74b0cd9df5 | 2026-11-21 04:29:12.613021+00 | 2026-10-22 04:29:20.088028+00
+```
+
+### Tests
+
+In `ApiTestSupport`, `TestUser` gets the refresh token too:
+
+```java
+    /** A signed-up user and their tokens. */
+    protected record TestUser(UUID id, String email, String accessToken, String refreshToken) {
+    }
+```
+
+and `register` reads it: `JsonPath.read(body, "$.accessToken"), JsonPath.read(body, "$.refreshToken"));`.
+
+`src/test/java/dev/paydeck/api/auth/RefreshTokenApiTest.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import com.jayway.jsonpath.JsonPath;
+import dev.paydeck.api.ApiTestSupport;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.ResultActions;
+
+class RefreshTokenApiTest extends ApiTestSupport {
+
+    @Test
+    void aRefreshTokenGivesANewPairOfTokensOnce() throws Exception {
+        TestUser asha = register("Asha");
+
+        String body = refresh(asha.refreshToken())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.user.email").value(asha.email()))
+                .andReturn().getResponse().getContentAsString();
+        String newAccessToken = JsonPath.read(body, "$.accessToken");
+        String newRefreshToken = JsonPath.read(body, "$.refreshToken");
+        assertThat(newRefreshToken).isNotEqualTo(asha.refreshToken());
+
+        mvc.perform(get("/api/me").header("Authorization", "Bearer " + newAccessToken))
+                .andExpect(status().isOk());
+        refresh(asha.refreshToken())
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("INVALID_CREDENTIALS"));
+    }
+
+    @Test
+    void reusingAnOldRefreshTokenSignsYouOutEverywhere() throws Exception {
+        TestUser asha = register("Asha");
+        String body = refresh(asha.refreshToken()).andReturn().getResponse().getContentAsString();
+        String newest = JsonPath.read(body, "$.refreshToken");
+
+        // Someone who copied the first token tries to use it.
+        refresh(asha.refreshToken()).andExpect(status().isUnauthorized());
+
+        // Now even the newest token is dead: Asha has to sign in again.
+        refresh(newest).andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void aMadeUpRefreshTokenIsRefused() throws Exception {
+        refresh("not-a-real-token").andExpect(status().isUnauthorized());
+    }
+
+    private ResultActions refresh(String refreshToken) throws Exception {
+        return mvc.perform(post("/api/auth/refresh")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"refreshToken": "%s"}
+                        """.formatted(refreshToken)));
+    }
+}
+```
+
+`./mvnw test`: 45 tests, all green.
+
+## Worked example: the app
+
+### Never send an old token to the sign-in endpoints
+
+Here is a trap worth knowing about. Spring Security checks **any** `Authorization` header it receives, even on public paths. Send an expired access token to `/api/auth/refresh` and the request is refused before the controller runs:
+
+```sh
+curl -s -X POST localhost:8080/api/auth/refresh -H "Authorization: Bearer <an expired token>" \
+  -H 'Content-Type: application/json' -d "{\"refreshToken\": \"$NEW\"}"
+```
+
+```
+{"type":"about:blank","title":"Not signed in","status":401,"detail":"Sign in to continue.","code":"NOT_SIGNED_IN"}
+```
+
+An app that adds its token to every request would therefore fail to refresh exactly when it needs to. (The course's own reference app had this bug; it was caught while writing this lesson.) So the sign-in calls opt out of the token.
+
+### The client: refresh once, then retry
+
+Replace everything in `src/api/client.ts` from `type RequestOptions` down to (not including) `newIdempotencyKey`:
+
+```ts
+type RequestOptions = {
+  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+  body?: unknown;
+  /** Send the same key again when retrying, so money never moves twice. */
+  idempotencyKey?: string;
+  /** False for signing in and out, which must never carry an old access token. */
+  withToken?: boolean;
+};
+
+/**
+ * Where requests get the access token, and a new one when it expires.
+ * AuthContext (src/auth/AuthContext.tsx) plugs itself in here.
+ */
+export type TokenSource = {
+  accessToken: () => string | null;
+  /** Trades the refresh token for new tokens. Resolves false if the person must sign in again. */
+  refresh: () => Promise<boolean>;
+};
+
+let tokens: TokenSource | null = null;
+
+export function setTokenSource(source: TokenSource | null) {
+  tokens = source;
+}
+
+/** Calls the PayDeck API and returns the JSON it answers, or throws an ApiError. */
+export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const token = options.withToken === false ? null : tokens?.accessToken() ?? null;
+  const response = await send(path, options, token);
+
+  // Access tokens last 15 minutes. When one has expired, get a new one and
+  // try once more, so the person never notices.
+  if (response.status === 401 && token !== null && tokens !== null && (await tokens.refresh())) {
+    return read<T>(await send(path, options, tokens.accessToken()));
+  }
+  return read<T>(response);
+}
+
+async function send(path: string, options: RequestOptions, token: string | null): Promise<Response> {
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+  }
+  if (options.idempotencyKey) {
+    headers['Idempotency-Key'] = options.idempotencyKey;
+  }
+  if (token !== null) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  try {
+    return await fetch(API_BASE_URL + path, {
+      method: options.method ?? 'GET',
+      headers,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    });
+  } catch {
+    throw new ApiError(0, 'No connection', 'Could not reach PayDeck. Check that the API is running.');
+  }
+}
+
+async function read<T>(response: Response): Promise<T> {
+  if (response.status === 204) {
+    return undefined as T;
+  }
+  const json = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new ApiError(
+      response.status,
+      json?.title ?? 'Something went wrong',
+      json?.detail ?? `The server answered ${response.status}`,
+      json?.code,
+      json?.fields,
+    );
+  }
+  return json as T;
+}
+```
+
+- `setAccessToken` and `setSessionEndedHandler` are gone: a **token source** replaces both. It answers "what is the access token now?" and "please get a new one".
+- `request` is split into `send` (make the HTTP call) and `read` (turn the answer into data or an `ApiError`), because a retry needs to send twice but read once.
+- **Retrying is safe**, even for money: a request refused with `401` never reached a controller, and a top-up retry carries the same `Idempotency-Key` anyway (lesson 24.5).
+- **Only once.** If the retry fails too, the error goes to the screen; an app that refreshes in a loop can hammer the server.
+
+In `src/api/auth.ts`, add `refreshToken: string;` to `AuthResponse`, give `register` and `login` the option `withToken: false`, and add:
+
+```ts
+export const refresh = (refreshToken: string) =>
+  request<AuthResponse>('/api/auth/refresh', { method: 'POST', body: { refreshToken }, withToken: false });
+```
+
+### AuthContext keeps both tokens
+
+Replace `src/auth/AuthContext.tsx` (`useAuth` at the bottom stays):
+
+```tsx
+import { useQueryClient } from '@tanstack/react-query';
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import * as authApi from '../api/auth';
+import { ApiError, setTokenSource } from '../api/client';
+import type { User } from '../types';
+import { clearToken, loadToken, saveToken } from './tokenStore';
+
+type Session =
+  | { status: 'loading' }
+  | { status: 'signedOut'; message?: string }
+  | { status: 'signedIn'; user: User };
+
+type Auth = {
+  session: Session;
+  signIn: (email: string, password: string) => Promise<void>;
+  signUp: (displayName: string, email: string, password: string) => Promise<void>;
+};
+
+const AuthContext = createContext<Auth | null>(null);
+
+/**
+ * Knows who is signed in. The access token stays in memory; the refresh
+ * token is saved in the Keychain or Keystore, so people stay signed in
+ * when they reopen the app.
+ */
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const queryClient = useQueryClient();
+  const [session, setSession] = useState<Session>({ status: 'loading' });
+  const accessToken = useRef<string | null>(null);
+  const refreshToken = useRef<string | null>(null);
+  const refreshing = useRef<Promise<boolean> | null>(null);
+
+  // Forgets both tokens and everything loaded with them, so the next person
+  // to sign in on this device never sees the last person's data.
+  async function forget(message?: string) {
+    accessToken.current = null;
+    refreshToken.current = null;
+    await clearToken().catch(() => {});
+    queryClient.clear();
+    setSession({ status: 'signedOut', message });
+  }
+
+  async function accept(response: authApi.AuthResponse) {
+    accessToken.current = response.accessToken;
+    refreshToken.current = response.refreshToken;
+    // If the Keychain fails, you stay signed in until the app closes.
+    await saveToken(response.refreshToken).catch(() => {});
+    setSession({ status: 'signedIn', user: response.user });
+  }
+
+  // When the access token expires, several requests fail at once. They all
+  // wait for the same refresh, because each refresh token works only once.
+  function refresh(): Promise<boolean> {
+    const token = refreshToken.current;
+    if (token === null) {
+      return Promise.resolve(false);
+    }
+    if (refreshing.current === null) {
+      refreshing.current = renew(token).finally(() => {
+        refreshing.current = null;
+      });
+    }
+    return refreshing.current;
+  }
+
+  async function renew(token: string): Promise<boolean> {
+    try {
+      await accept(await authApi.refresh(token));
+      return true;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        await forget('Your session has ended. Please sign in again.');
+      }
+      return false;
+    }
+  }
+
+  // Give the API client the current tokens. No dependency list: this runs
+  // after every render, so the client always has this render's functions.
+  // No clean-up either: the client must never be left without a source,
+  // even for a moment, or a request could go out without its token.
+  useEffect(() => {
+    setTokenSource({ accessToken: () => accessToken.current, refresh });
+  });
+
+  // When the app starts: trade the saved refresh token for fresh tokens.
+  useEffect(() => {
+    async function restore() {
+      refreshToken.current = await loadToken().catch(() => null);
+      const signedIn = await refresh();
+      if (!signedIn) {
+        setSession((current) => (current.status === 'loading' ? { status: 'signedOut' } : current));
+      }
+    }
+    restore();
+    // Only once, when the app starts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const auth: Auth = {
+    session,
+    signIn: async (email, password) => accept(await authApi.login(email, password)),
+    signUp: async (displayName, email, password) => accept(await authApi.register(email, password, displayName)),
+  };
+
+  return <AuthContext.Provider value={auth}>{children}</AuthContext.Provider>;
+}
+```
+
+- **`useRef`** (lesson 13.5) holds a value that survives re-renders without causing one. The tokens change behind the scenes; the screen does not need to redraw when they do, only when the **session** changes.
+- **One refresh for everyone.** When the token expires, the wallet's three requests (account, history, cards) all get `401` at once. If each refreshed, the second would arrive with a refresh token the first had just used up, reuse detection would fire, and you would be signed out. So the first caller starts `renew` and stores its promise in `refreshing`; the others get **the same promise** and wait for the same answer. `.finally` clears it when done.
+- **On start**, there is no `/api/me` check any more: refreshing **is** the check. A saved refresh token that works gives fresh tokens and the user; one that does not ends in the sign-in screen.
+- `tokenStore.ts` does not change. It just stores a different token now.
+- The `eslint-disable` comment: the linter warns that the effect uses `refresh` without listing it. Here that is intended: start-up happens once.
+
+### Try it
+
+Rebuild nothing (no native changes); reload. Sign in as Asha, then quit and reopen the app: still signed in, and now that lasts 30 days, not 15 minutes.
+
+To see a refresh without waiting 15 minutes, invalidate every access token at once: stop the API and start it with a different signing secret.
+
+```sh
+JWT_SECRET=another-secret-that-is-at-least-32-characters-long ./mvnw spring-boot:run
+```
+
+Tap **Activity** in the app. It shows the history as if nothing happened. In React Native DevTools' **Network** tab (press `j` in Metro) you can watch it: the requests answered `401`, one `POST /api/auth/refresh` answered `200`, and the same requests again with `200`. The refresh token lives in the database, not in the secret, so it still worked; the new access token is signed with the new secret. Restart the API normally afterwards (the same thing happens once more).
+
+<Exercise title="Why noRollbackFor?">
+In `AuthService.refresh`, change `@Transactional(noRollbackFor = InvalidCredentialsException.class)` to plain `@Transactional` and run `./mvnw test -Dtest=RefreshTokenApiTest`. Which test fails, with what message, and why? What would that mean for a real thief? Put it back.
+
+<Fragment slot="hint">Follow the reuse case: `revokeAllFor` runs, then `throw sessionEnded()`. What does a transaction do with its changes when an exception leaves the method?</Fragment>
+<Fragment slot="solution">
+
+```
+[ERROR]   RefreshTokenApiTest.reusingAnOldRefreshTokenSignsYouOutEverywhere:46 Status expected:<401> but was:<200>
+```
+
+The exception rolls the transaction back, and `revokeAllFor` is undone with it. The old token is still refused (it was already revoked earlier), so the thief's attempt fails, but Asha's newest token keeps working. Now flip it round: if the **thief** refreshed first, the thief holds the working token, and Asha's app turning up with the old one does nothing to stop them. Reuse detection only protects anyone if the revocation is saved. `noRollbackFor` makes it stick.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Refreshing once per failed request">
+Three requests, three refreshes, the second and third with a used token: reuse detection signs the person out. Share one refresh between everyone who is waiting.
+</Aside>
+
+<Aside type="caution" title="Sending the access token everywhere">
+An expired token on `/api/auth/refresh` gets `401` before the controller runs. Calls that sign in or refresh go without one.
+</Aside>
+
+<Aside type="caution" title="Long-lived tokens in plain text, anywhere">
+Not in AsyncStorage on the device (lesson 28.2), not unhashed in the database, not in logs. A refresh token is a 30-day password.
+</Aside>
+
+## Recap
+
+- Signing in now returns a 15-minute access token and a 30-day, single-use refresh token.
+- The API stores only SHA-256 hashes of refresh tokens, locks the row while using one, rotates it on every refresh, and revokes all of a user's tokens when a used one comes back (`noRollbackFor` keeps that revocation).
+- The app keeps the refresh token in the Keychain or Keystore and the access token in a ref.
+- On `401`, `request` asks the token source to refresh (one shared refresh for all waiting requests) and retries once.
+- Sign-in and refresh calls never carry an access token.
+
+<Quiz
+	questions={[
+		{
+			question: 'An old, already-used refresh token arrives at /api/auth/refresh. What does PayDeck do?',
+			options: ['Gives new tokens, since it was valid once', 'Refuses it and revokes every refresh token of that user', 'Refuses it and does nothing else'],
+			answer: 1,
+			explanation: 'Only a copy could be replaying a used token. Revoking everything shuts the copy out, at the cost of one sign-in for the real owner.',
+		},
+		{
+			question: 'Why is SHA-256 enough for refresh tokens, when passwords need BCrypt?',
+			options: ['Refresh tokens are shorter', 'They are 256 random bits, so they cannot be guessed however fast the hash is', 'SHA-256 is slower than BCrypt'],
+			answer: 1,
+			explanation: 'BCrypt\'s slowness protects guessable, human-chosen passwords. A random 256-bit token has nothing to guess.',
+		},
+		{
+			question: 'The wallet\'s three requests all get 401 at the same moment. How many refresh requests should the app send?',
+			options: ['Three, one each', 'One, which all three wait for', 'None; it should sign out'],
+			answer: 1,
+			explanation: 'Each refresh token works once. Extra refreshes would look like reuse and sign the person out.',
+		},
+	]}
+/>
+
+<MarkComplete />

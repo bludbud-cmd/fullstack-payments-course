@@ -1,0 +1,442 @@
+---
+title: "28.3 Protected screens"
+description: "Make the wallet reachable only when signed in: one gate in App.tsx, the account chosen from GET /api/me instead of a saved ID, a first-account screen for new people, and an automatic return to sign-in when the API stops accepting the token."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson the wallet can only be seen by someone who is signed in, it always shows **their** account (as the API says), new people open their first account right after signing up, and an expired session sends you back to the sign-in screen with a short explanation.
+
+## Why it matters
+
+A **protected screen** is one that only a signed-in person may see. Getting this wrong in an app looks like screens that flash someone else's data, a wallet stuck on an error after the token expires, or (worst) a path through the navigation that skips the sign-in screen. The safest design has **one** place that decides what a person may see, so there is nothing to forget.
+
+Remember the real protection is on the server: the API checks every request (Module 27). The app's job is to never **try** to show what the person cannot have, and to recover gracefully when the server says no.
+
+## The idea
+
+`App.tsx` becomes the single gate, with three outcomes:
+
+```
+             loading ──► spinner
+session ──►  signedOut ──► SignInScreen (and nothing else exists)
+             signedIn  ──► AccountGate ──► no account yet ──► OpenAccountScreen
+                                      └──► has one ──► the wallet (AppNavigator)
+```
+
+Because `AppNavigator` is only ever rendered in the last branch, no screen of the wallet can be reached any other way. There is no list of "protected" screens to keep up to date.
+
+Two more changes finish the job:
+
+1. **Which account?** Until now the device remembered an account ID it had opened (`AccountIdGate`, Module 26). Now the API knows which accounts are yours: `GET /api/me` lists them. `AccountGate` asks, and uses the first one. The saved ID and the "Use a different account" button go.
+2. **When the token stops working.** Any request answered `401` while a token was sent means the session is over. The client tells `AuthContext`, which forgets the token **and everything cached with it**, and shows the sign-in screen with "Your session has ended. Please sign in again."
+
+## Worked example
+
+### The client reports a refused token
+
+In `src/api/client.ts`, below `setAccessToken`:
+
+```ts
+// What to do when the API stops accepting the token: AuthContext signs out.
+let onSessionEnded: (() => void) | null = null;
+
+export function setSessionEndedHandler(handler: (() => void) | null) {
+  onSessionEnded = handler;
+}
+```
+
+And in `request`, just before `if (response.status === 204)`:
+
+```ts
+  // The token was refused: it has expired, so this person must sign in again.
+  if (response.status === 401 && accessToken !== null) {
+    onSessionEnded?.();
+  }
+```
+
+`onSessionEnded?.()` calls the function only if there is one (lesson 9.4's optional chaining works for calls too). A `401` **without** a token, such as a wrong password on the sign-in screen, is not a session ending, so it is left alone.
+
+### Forgetting, in one place
+
+Replace `src/auth/AuthContext.tsx`:
+
+```tsx
+import { useQueryClient } from '@tanstack/react-query';
+import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import * as authApi from '../api/auth';
+import { setAccessToken, setSessionEndedHandler } from '../api/client';
+import type { User } from '../types';
+import { clearToken, loadToken, saveToken } from './tokenStore';
+
+type Session =
+  | { status: 'loading' }
+  | { status: 'signedOut'; message?: string }
+  | { status: 'signedIn'; user: User };
+
+type Auth = {
+  session: Session;
+  signIn: (email: string, password: string) => Promise<void>;
+  signUp: (displayName: string, email: string, password: string) => Promise<void>;
+};
+
+const AuthContext = createContext<Auth | null>(null);
+
+/** Knows who is signed in, and gives every API request their token. */
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const queryClient = useQueryClient();
+  const [session, setSession] = useState<Session>({ status: 'loading' });
+
+  // Forgets the token and everything loaded with it, so the next person
+  // to sign in on this device never sees the last person's data.
+  async function forget(message?: string) {
+    setAccessToken(null);
+    await clearToken().catch(() => {});
+    queryClient.clear();
+    setSession({ status: 'signedOut', message });
+  }
+
+  // Any request answered 401 means the token stopped working. No dependency
+  // list: this runs after every render, so the client always calls this
+  // render's forget. No clean-up either: the client must never be left
+  // without a handler, even for a moment.
+  useEffect(() => {
+    setSessionEndedHandler(() => forget('Your session has ended. Please sign in again.'));
+  });
+
+  // When the app starts: if a token was saved last time, check it still works.
+  useEffect(() => {
+    async function restore() {
+      const saved = await loadToken().catch(() => null);
+      if (saved === null) {
+        setSession({ status: 'signedOut' });
+        return;
+      }
+      setAccessToken(saved);
+      try {
+        const me = await authApi.getMe();
+        setSession({ status: 'signedIn', user: me.user });
+      } catch {
+        // A 401 has already signed us out. Anything else (no connection, say): sign in again.
+        setAccessToken(null);
+        setSession((current) => (current.status === 'loading' ? { status: 'signedOut' } : current));
+      }
+    }
+    restore();
+  }, []);
+
+  async function accept(response: authApi.AuthResponse) {
+    setAccessToken(response.accessToken);
+    // If the Keychain fails, you stay signed in until the app closes.
+    await saveToken(response.accessToken).catch(() => {});
+    setSession({ status: 'signedIn', user: response.user });
+  }
+
+  const auth: Auth = {
+    session,
+    signIn: async (email, password) => accept(await authApi.login(email, password)),
+    signUp: async (displayName, email, password) => accept(await authApi.register(email, password, displayName)),
+  };
+
+  return <AuthContext.Provider value={auth}>{children}</AuthContext.Provider>;
+}
+```
+
+- **`queryClient.clear()`** empties TanStack Query's cache (lesson 26.3): balances, cards, history. That data belonged to the person whose session ended; nothing of it should survive into the next session on this device.
+- **`useQueryClient()`** works here because `AuthProvider` sits inside `QueryClientProvider` in `App.tsx`.
+- `restore` no longer needs its own `401` branch: the handler already did the forgetting.
+- **`setSession((current) => ...)`** is the "update from the current value" form of a state setter. If the handler has already signed us out with a message, we keep that message.
+
+### Who has which accounts
+
+`POST /api/accounts` takes only a currency since the Module 27 project. In `src/api/paydeck.ts`:
+
+```ts
+export const openAccount = (currency: Currency) =>
+  request<Account>('/api/accounts', { method: 'POST', body: { currency } });
+```
+
+In `src/api/hooks.ts`, import `useAccountId` from `'../state/AccountContext'` instead of `AccountIdContext`, import the auth calls with `import * as authApi from './auth';`, add a key `me: ['me'] as const` to `keys`, and add two hooks:
+
+```ts
+/** Who is signed in, and the accounts they own. */
+export function useMe() {
+  return useQuery({ queryKey: keys.me, queryFn: authApi.getMe });
+}
+
+export function useOpenAccount() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: api.openAccount,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.me }),
+  });
+}
+```
+
+Opening an account changes what `/api/me` returns, so it is invalidated: TanStack Query fetches it again, and the new account appears.
+
+Delete `src/state/AccountIdContext.tsx` and create `src/state/AccountContext.tsx`:
+
+```tsx
+import { createContext, useContext, type ComponentType, type ReactNode } from 'react';
+import { ScrollView, StyleSheet } from 'react-native';
+import { useMe } from '../api/hooks';
+import { QueryState } from '../components/QueryState';
+
+const AccountIdContext = createContext<string | null>(null);
+
+type AccountGateProps = {
+  /** The screen for someone who has no account yet. */
+  openAccount: ComponentType;
+  children: ReactNode;
+};
+
+/** Asks the API which account is yours. Someone who has just signed up opens one first. */
+export function AccountGate({ openAccount: OpenAccount, children }: AccountGateProps) {
+  const me = useMe();
+  if (me.data === undefined) {
+    return (
+      <ScrollView contentContainerStyle={styles.page}>
+        <QueryState queries={[me]} />
+      </ScrollView>
+    );
+  }
+  const account = me.data.accounts[0];
+  if (account === undefined) {
+    return <OpenAccount />;
+  }
+  return <AccountIdContext.Provider value={account.id}>{children}</AccountIdContext.Provider>;
+}
+
+export function useAccountId(): string {
+  const accountId = useContext(AccountIdContext);
+  if (accountId === null) {
+    throw new Error('useAccountId must be used inside <AccountGate>');
+  }
+  return accountId;
+}
+
+const styles = StyleSheet.create({
+  page: { flexGrow: 1, justifyContent: 'center' },
+});
+```
+
+Every screen keeps calling `useAccountId()` exactly as before; only where the ID comes from has changed.
+
+### The first account
+
+Rename `src/screens/WelcomeScreen.tsx` to `OpenAccountScreen.tsx`. It no longer asks for a name (the API uses the one from sign-up) and no longer reports back an ID:
+
+```tsx
+import { useState } from 'react';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useOpenAccount } from '../api/hooks';
+import { useAuth } from '../auth/AuthContext';
+import { Button } from '../components/Button';
+import type { Currency } from '../money';
+
+const CURRENCIES: Currency[] = ['USD', 'EUR', 'GBP', 'INR'];
+
+/** Shown to someone who has signed up but has no account yet. */
+export function OpenAccountScreen() {
+  const { session } = useAuth();
+  const openAccount = useOpenAccount();
+  const [currency, setCurrency] = useState<Currency>('USD');
+  const name = session.status === 'signedIn' ? session.user.displayName : '';
+
+  return (
+    <ScrollView contentContainerStyle={styles.page}>
+      <Text accessibilityRole="header" style={styles.title}>
+        Welcome to PayDeck, {name}
+      </Text>
+      <Text style={styles.muted}>Choose the currency of your account.</Text>
+      <View style={styles.row}>
+        {CURRENCIES.map((code) => (
+          <View key={code} style={styles.choice}>
+            <Button
+              title={code}
+              variant={code === currency ? 'primary' : 'secondary'}
+              onPress={() => setCurrency(code)}
+            />
+          </View>
+        ))}
+      </View>
+      {openAccount.error !== null && <Text style={styles.error}>{openAccount.error.message}</Text>}
+      <Button
+        title={openAccount.isPending ? 'Opening…' : 'Open my account'}
+        onPress={() => openAccount.mutate(currency)}
+        disabled={openAccount.isPending}
+      />
+    </ScrollView>
+  );
+}
+```
+
+(Keep the `styles` from `WelcomeScreen`.) After the account opens, `/api/me` is fetched again, `AccountGate` finds the account, and the wallet appears by itself. No screen has to "go" anywhere.
+
+### The gate
+
+Replace `App.tsx`:
+
+```tsx
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { useState } from 'react';
+import { ActivityIndicator, StyleSheet, View } from 'react-native';
+import { AuthProvider, useAuth } from './src/auth/AuthContext';
+import { AppNavigator } from './src/navigation/AppNavigator';
+import { OpenAccountScreen } from './src/screens/OpenAccountScreen';
+import { SignInScreen } from './src/screens/SignInScreen';
+import { AccountGate } from './src/state/AccountContext';
+
+export default function App() {
+  const [queryClient] = useState(() => new QueryClient());
+  return (
+    <QueryClientProvider client={queryClient}>
+      <AuthProvider>
+        <Root />
+      </AuthProvider>
+    </QueryClientProvider>
+  );
+}
+
+/**
+ * The only place that decides what someone may see. Signed out: the
+ * sign-in screen and nothing else. Signed in: their own wallet.
+ */
+function Root() {
+  const { session } = useAuth();
+  if (session.status === 'loading') {
+    return (
+      <View style={styles.centre}>
+        <ActivityIndicator accessibilityLabel="Loading" color="#3c4fe0" />
+      </View>
+    );
+  }
+  if (session.status === 'signedOut') {
+    return <SignInScreen message={session.message} />;
+  }
+  return (
+    <AccountGate openAccount={OpenAccountScreen}>
+      <AppNavigator />
+    </AccountGate>
+  );
+}
+
+const styles = StyleSheet.create({
+  centre: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+});
+```
+
+`SignInScreen` takes the message: change its first line to `export function SignInScreen({ message }: { message?: string }) {` and show it under the title:
+
+```tsx
+      {message !== undefined && <Text style={styles.muted}>{message}</Text>}
+```
+
+### The You screen
+
+`ProfileScreen` used `useForgetAccount`, which no longer exists. It now shows who is signed in:
+
+```tsx
+import { Text } from 'react-native';
+import { useAccount } from '../api/hooks';
+import { useAuth } from '../auth/AuthContext';
+import { QueryState } from '../components/QueryState';
+import { Screen } from '../components/Screen';
+
+export function ProfileScreen() {
+  const { session } = useAuth();
+  const account = useAccount();
+
+  return (
+    <Screen title="You">
+      {session.status === 'signedIn' && (
+        <>
+          <Text>{session.user.displayName}</Text>
+          <Text>{session.user.email}</Text>
+        </>
+      )}
+      {account.data === undefined ? (
+        <QueryState queries={[account]} />
+      ) : (
+        <Text>
+          {account.data.currency} account opened on {account.data.createdAt.slice(0, 10)}
+        </Text>
+      )}
+    </Screen>
+  );
+}
+```
+
+`npx tsc --noEmit` should find nothing; if it complains about `AccountIdContext` or `WelcomeScreen`, some file still imports them.
+
+### Try it
+
+- Sign up as someone new, Dan Okafor. You see **Welcome to PayDeck, Dan Okafor**. Choose **GBP** and open: the wallet says **Hi, Dan Okafor** and **£0.00**. **You** shows his email and "GBP account opened on" today's date.
+- Sign in as Asha: straight to her wallet, the account she opened in the Module 27 project. Nothing was saved on the device to make that happen.
+- Wait until the access token expires (15 minutes) and tap **Activity**: the sign-in screen appears with "Your session has ended. Please sign in again."
+
+The last one is correct but unfriendly: in a banking app you would be signed out every 15 minutes. That is the next lesson.
+
+<Exercise title="Find the back door">
+A screen is only protected if there is no other way to it. Look at `AppNavigator` and `Root`, and answer: is there any route, button or Android back-button press that shows a wallet screen while signed out? Then test the most likely one: sign in, open **Cards**, wait for the session to end (or stop and restart the API with a different `JWT_SECRET`, which makes every token invalid at once), and press the Android back button.
+
+<Fragment slot="hint">Restarting the API with `JWT_SECRET=a-completely-different-secret-of-32-chars ./mvnw spring-boot:run` makes every old token fail its signature check (lesson 27.5), so you do not have to wait 15 minutes.</Fragment>
+<Fragment slot="solution">
+
+There is none. `AppNavigator`, and with it every wallet screen and its back stack, exists only inside the `signedIn` branch of `Root`. When the session ends, `Root` renders `SignInScreen` instead, and the whole navigator, history included, is gone. Pressing back on the sign-in screen closes the app (Android's default when no screen handles the button), because there is nothing to go back to.
+
+That is the advantage of one gate at the top over checking "am I signed in?" in each screen: a forgotten check is impossible.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Checking sign-in in each screen">
+`if (!signedIn) navigate('signIn')` at the top of every screen works until someone adds a screen and forgets the line. Decide once, above the navigator.
+</Aside>
+
+<Aside type="caution" title="Keeping the cache after the session ends">
+Without `queryClient.clear()`, cached balances and cards from the last session stay in memory. Whatever the next person sees should come from the API, asked with their token.
+</Aside>
+
+<Aside type="caution" title="Treating every 401 as an expired session">
+A wrong password is also a `401`. Only a `401` for a request that **carried a token** means the session ended; otherwise the sign-in screen would sign you out while you are signing in.
+</Aside>
+
+## Recap
+
+- `Root` in `App.tsx` is the only gate: `loading` shows a spinner, `signedOut` only the sign-in screen, `signedIn` the wallet.
+- `AccountGate` gets your accounts from `GET /api/me`; a new person sees `OpenAccountScreen` first.
+- The saved account ID, `AccountIdGate` and "Use a different account" are gone: the server decides what is yours.
+- A `401` on a request with a token calls the session-ended handler, which clears the token and the query cache and shows a message.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why is AppNavigator rendered only inside the signed-in branch of Root?',
+			options: ['It loads faster', 'So no wallet screen, or its back history, can exist while signed out', 'Because it needs the access token as a prop'],
+			answer: 1,
+			explanation: 'One gate above the navigator means there is nothing for an individual screen to forget.',
+		},
+		{
+			question: 'How does the app now know which account to show?',
+			options: ['From an ID saved in AsyncStorage', 'From GET /api/me, which lists the accounts the signed-in person owns', 'From the access token\'s payload'],
+			answer: 1,
+			explanation: 'The server owns that fact since Module 27. A saved ID could belong to someone else.',
+		},
+		{
+			question: 'Signing in with a wrong password answers 401. Why does that not trigger "Your session has ended"?',
+			options: ['Because the handler only runs on GET requests', 'Because that request carried no access token', 'Because 401 errors are ignored'],
+			answer: 1,
+			explanation: 'The handler runs only when a token was sent and refused. A sign-in attempt has no token yet.',
+		},
+	]}
+/>
+
+<MarkComplete />

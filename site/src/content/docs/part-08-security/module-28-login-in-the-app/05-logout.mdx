@@ -1,0 +1,285 @@
+---
+title: "28.5 Logout"
+description: "Sign out properly: the API revokes the refresh token, and the app forgets both tokens and every cached balance and card, so the next person on the device starts clean."
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson the **You** screen has a **Sign out** button. It tells the API to revoke the refresh token, wipes the token from the Keychain or Keystore, and empties the app's cache, so whoever signs in next sees only their own money.
+
+## Why it matters
+
+People share computers, hand in phones for repair and sell old ones. "Sign out" is a promise that nothing of their session is left behind. A sign-out that only hides the wallet keeps that promise in appearance only: the refresh token in secure storage still works for 30 days, and the balances are still in memory.
+
+## The idea
+
+Signing out has three parts, and each one closes a different door:
+
+1. **The API revokes the refresh token.** Even if someone copied it, it no longer buys new access tokens. This is the part that only the server can do, and the reason lesson 28.4 records refresh tokens in a table.
+2. **The app deletes its copy** from the Keychain or Keystore, so reopening the app does not sign you back in.
+3. **The app forgets everything loaded with the token**: the access token in memory and TanStack Query's cache. You already wrote this as `forget` in lesson 28.3.
+
+What signing out **cannot** do is end the current access token. A JWT is checked by its signature and its expiry, not by asking the database (lesson 27.5), so a copy of it keeps working for at most 15 minutes. That is the price of tokens the API can check without a database, and the reason access tokens are short.
+
+The API's logout endpoint answers `204 No Content` even for a token it has never seen. The client's goal ("this token must not work any more") is met either way, and the answer tells someone trying tokens nothing.
+
+## Worked example: the API
+
+### The service
+
+In `AuthService`, below `refresh`:
+
+```java
+    /** Signing out: this refresh token stops working. Unknown tokens are ignored. */
+    @Transactional
+    public void logout(String refreshToken) {
+        refreshTokens.findByTokenHashForUpdate(Secrets.sha256Hex(refreshToken)).ifPresent(RefreshToken::revoke);
+    }
+```
+
+The token arrives as plain text and is looked up by its hash, exactly as in `refresh`. The row is locked (`ForUpdate`) so a refresh happening at the same moment cannot slip past. `ifPresent(RefreshToken::revoke)` sets `revoked_at` if the token exists and does nothing otherwise. `revoke` (lesson 28.4) only sets the time if it is not set yet, so signing out twice changes nothing.
+
+### The endpoint
+
+In `AuthController`, below `refresh`. It takes the same body as `/refresh`, so it reuses `RefreshRequest`:
+
+```java
+    /** Signs out: the refresh token stops working, so this device cannot get new access tokens. */
+    @PostMapping("/logout")
+    public ResponseEntity<Void> logout(@Valid @RequestBody RefreshRequest request) {
+        auth.logout(request.refreshToken());
+        return ResponseEntity.noContent().build();
+    }
+```
+
+Add `import org.springframework.http.ResponseEntity;` if your editor does not. `/api/auth/logout` is under `/api/auth/**`, which `SecurityConfig` already lets through without an access token (lesson 27.5). It must: an app whose access token has just expired should still be able to sign out.
+
+### Try it with curl
+
+```sh
+R=$(curl -s -X POST localhost:8080/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"asha@example.com","password":"correct horse battery"}' | jq -r .refreshToken)
+curl -si -X POST localhost:8080/api/auth/logout -H 'Content-Type: application/json' \
+  -d "{\"refreshToken\":\"$R\"}" | head -1
+curl -s -X POST localhost:8080/api/auth/refresh -H 'Content-Type: application/json' \
+  -d "{\"refreshToken\":\"$R\"}"
+```
+
+```
+HTTP/1.1 204
+{"detail":"Your session has ended. Please sign in again.","instance":"/api/auth/refresh","status":401,"title":"Cannot sign in","code":"INVALID_CREDENTIALS"}
+```
+
+Signed out, and the refresh token is dead. A made-up token gets `204` too:
+
+```sh
+curl -si -X POST localhost:8080/api/auth/logout -H 'Content-Type: application/json' \
+  -d '{"refreshToken":"nonsense"}' | head -1
+```
+
+```
+HTTP/1.1 204
+```
+
+### The test
+
+In `RefreshTokenApiTest`:
+
+```java
+    @Test
+    void afterSigningOutTheRefreshTokenIsUseless() throws Exception {
+        TestUser asha = register("Asha");
+
+        mvc.perform(post("/api/auth/logout")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"refreshToken": "%s"}
+                                """.formatted(asha.refreshToken())))
+                .andExpect(status().isNoContent());
+
+        refresh(asha.refreshToken()).andExpect(status().isUnauthorized());
+    }
+```
+
+`./mvnw test`: 46 tests, all green.
+
+## Worked example: the app
+
+### The API call
+
+In `src/api/auth.ts`, below `refresh`:
+
+```ts
+export const logout = (refreshToken: string) =>
+  request<void>('/api/auth/logout', { method: 'POST', body: { refreshToken }, withToken: false });
+```
+
+`withToken: false`, like the other calls under `/api/auth` (lesson 28.4): an expired access token in the header would get `401` before the controller ran.
+
+### signOut in AuthContext
+
+Add `signOut` to the `Auth` type:
+
+```tsx
+type Auth = {
+  session: Session;
+  signIn: (email: string, password: string) => Promise<void>;
+  signUp: (displayName: string, email: string, password: string) => Promise<void>;
+  signOut: () => Promise<void>;
+};
+```
+
+and to the `auth` object at the bottom of `AuthProvider`:
+
+```tsx
+  const auth: Auth = {
+    session,
+    signIn: async (email, password) => accept(await authApi.login(email, password)),
+    signUp: async (displayName, email, password) => accept(await authApi.register(email, password, displayName)),
+    signOut: async () => {
+      const token = refreshToken.current;
+      if (token !== null) {
+        // Tell the API to forget the refresh token too. If that fails (no
+        // connection, say), signing out of this device still works.
+        await authApi.logout(token).catch(() => {});
+      }
+      await forget();
+    },
+  };
+```
+
+- **The API first, then `forget`.** `forget` sets `refreshToken.current` to `null`, so the token has to be sent before that.
+- **`.catch(() => {})`**: if the API cannot be reached, the person still gets signed out of this device. Someone tapping **Sign out** on a train must not be told "you cannot leave". The refresh token then stays valid on the server until it expires, but no copy of it remains on the device.
+- **`forget()` with no message**: the sign-in screen appears without "Your session has ended"; the person chose this.
+
+`forget`, from lesson 28.3, does the rest: both refs to `null`, `clearToken()` for the Keychain or Keystore, `queryClient.clear()` for the cache, and `signedOut`. Every screen below `AccountGate` disappears at once, because `Root` in `App.tsx` now renders `SignInScreen`.
+
+### The button
+
+In `src/screens/ProfileScreen.tsx`, take `signOut` from `useAuth`, import `Button`, and add the button at the end of the screen:
+
+```tsx
+import { Text } from 'react-native';
+import { useAccount } from '../api/hooks';
+import { useAuth } from '../auth/AuthContext';
+import { Button } from '../components/Button';
+import { QueryState } from '../components/QueryState';
+import { Screen } from '../components/Screen';
+
+export function ProfileScreen() {
+  const { session, signOut } = useAuth();
+  const account = useAccount();
+
+  return (
+    <Screen title="You">
+      {session.status === 'signedIn' && (
+        <>
+          <Text>{session.user.displayName}</Text>
+          <Text>{session.user.email}</Text>
+        </>
+      )}
+      {account.data === undefined ? (
+        <QueryState queries={[account]} />
+      ) : (
+        <Text>
+          {account.data.currency} account opened on {account.data.createdAt.slice(0, 10)}
+        </Text>
+      )}
+      <Button title="Sign out" variant="secondary" onPress={signOut} />
+    </Screen>
+  );
+}
+```
+
+### Try it
+
+1. Sign in as Asha and open **You**. Tap **Sign out**: the sign-in screen appears, with no message.
+2. Quit the app (**Cmd+Q**, or swipe it away on Android) and reopen it: you stay on the sign-in screen. The Keychain or Keystore item is gone, so there was nothing to restore.
+3. With the app in Metro's React Native DevTools (press `j`), look at the **Network** tab while you sign out: one `POST /api/auth/logout` answered `204`.
+4. Create a new account, Eli Novak. You see **Welcome to PayDeck, Eli Novak** and nothing of Asha's: no balance, no cards. Without `queryClient.clear()`, the cached answer to `/api/me` would still hold Asha's accounts, and the app would show Eli her wallet until his own request came back.
+
+<Exercise title="What logout does not end">
+Add a test to `RefreshTokenApiTest` called `signingOutTwiceIsHarmlessAndTheAccessTokenLivesOn`: register Asha, sign out with her refresh token **twice** (both should answer `204`), then call `GET /api/me` with her **access** token. What status do you expect, and what does the result tell you about how quickly signing out takes effect?
+
+<Fragment slot="hint">Copy the `refresh` helper at the bottom of the class into a `logout` helper. `mvc.perform(get("/api/me").with(as(asha)))` sends her access token.</Fragment>
+<Fragment slot="hint2">The access token is a JWT. What does the API check when it receives one: the database, or the signature and expiry?</Fragment>
+<Fragment slot="solution">
+
+```java
+    @Test
+    void signingOutTwiceIsHarmlessAndTheAccessTokenLivesOn() throws Exception {
+        TestUser asha = register("Asha");
+
+        logout(asha.refreshToken()).andExpect(status().isNoContent());
+        logout(asha.refreshToken()).andExpect(status().isNoContent());
+
+        mvc.perform(get("/api/me").with(as(asha))).andExpect(status().isOk());
+    }
+
+    private ResultActions logout(String refreshToken) throws Exception {
+        return mvc.perform(post("/api/auth/logout")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"refreshToken": "%s"}
+                        """.formatted(refreshToken)));
+    }
+```
+
+```
+Tests run: 6, Failures: 0, Errors: 0, Skipped: 0
+```
+
+`/api/me` answers `200`. The access token is still a valid, signed JWT that has not expired, and the API never asks the database about it. So signing out takes effect **completely** only when the access token expires, at most 15 minutes later. On the device that does not matter (the app has forgotten the token); it matters only if someone had copied it. If 15 minutes were too long, the fix would be shorter access tokens, not a database lookup on every request.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Signing out only in the app">
+Clearing the Keychain but never telling the API leaves the refresh token valid for up to 30 days. If it was ever copied (a backup, a log), the copy still works.
+</Aside>
+
+<Aside type="caution" title="Refusing to sign out when offline">
+`await authApi.logout(token)` without the `.catch` throws when there is no connection, and `forget` never runs. Revoking on the server is a bonus; forgetting on the device is the part that must always happen.
+</Aside>
+
+<Aside type="caution" title="Forgetting the cache">
+Clearing the tokens but not the TanStack Query cache shows the last person's balance to the next one, for as long as it takes the new requests to come back.
+</Aside>
+
+## Recap
+
+- `POST /api/auth/logout` with the refresh token revokes it and answers `204`, even for unknown tokens.
+- The app sends the refresh token (without an access token), then `forget`s: refs, Keychain or Keystore, and the query cache.
+- If the API cannot be reached, the device is signed out anyway.
+- An access token keeps working until it expires; that is why it lives only 15 minutes.
+
+<Quiz
+	questions={[
+		{
+			question: 'Asha taps Sign out while her phone is offline. What should happen?',
+			options: ['An error: try again when online', 'She is signed out of the device; the server is told if it can be reached', 'Nothing until the connection is back'],
+			answer: 1,
+			explanation: 'Forgetting the tokens on the device must always happen. Revoking on the server is attempted, and its failure is ignored.',
+		},
+		{
+			question: 'Right after logout, someone uses a copy of Asha\'s access token. What happens?',
+			options: ['401, since she signed out', 'It works until it expires, at most 15 minutes', 'It works for 30 days'],
+			answer: 1,
+			explanation: 'Access tokens are checked by signature and expiry only. Logout revokes the refresh token, so no new access tokens can be made.',
+		},
+		{
+			question: 'Why does the logout endpoint answer 204 for a token it does not know?',
+			options: ['It is a bug', 'The goal, that the token does not work, is met either way, and the answer reveals nothing', 'Because 404 is not allowed for POST'],
+			answer: 1,
+			explanation: 'An unknown token already cannot be used. Answering differently would let someone test which tokens exist.',
+		},
+	]}
+/>
+
+<MarkComplete />

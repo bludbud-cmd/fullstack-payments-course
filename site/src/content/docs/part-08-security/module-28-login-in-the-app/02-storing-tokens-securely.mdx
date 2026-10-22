@@ -1,0 +1,239 @@
+---
+title: "28.2 Storing tokens in the Android Keystore and the macOS Keychain"
+description: "Keep people signed in when they close the app by saving their token in the operating system's secure storage with react-native-keychain, never in AsyncStorage, and check it is still valid when the app starts."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson PayDeck remembers that you are signed in after you close and reopen it, because it keeps your token in the macOS Keychain or, on Android, encrypted with a key from the Android Keystore.
+
+## Why it matters
+
+Nobody wants to type their password every time they open a banking app. But whatever the app saves to stay signed in is, to a thief, as good as the password: copy it, and you are that person. So **where** it is saved matters. Phones and computers have a special safe for exactly this, and this lesson uses it.
+
+## The idea
+
+### Why not AsyncStorage?
+
+In lesson 14.5 you saved cards with AsyncStorage. That is fine for cards, but AsyncStorage is a plain file (on Android, a small database) inside the app's folder, **not encrypted**. Anyone who gets a copy of the app's files (a backup, a rooted phone, malware with file access) can read every value in it.
+
+### The operating system's safe
+
+- **macOS (and iOS): the Keychain.** The same place Safari keeps your saved passwords. The system encrypts it and only gives an item back to the app that saved it.
+- **Android: the Keystore.** It holds **encryption keys**, often inside a separate secure chip, and never lets the key itself out: apps can only ask it to encrypt or decrypt. The library below creates a key there, encrypts the token with it (AES), and saves only the encrypted bytes.
+
+One library speaks to both: **react-native-keychain**. You give it a name for the item (`service`) and a value; it picks the right safe for the platform.
+
+### What to keep, and checking it on start
+
+For now you save the access token from lesson 28.1. When the app starts, it reads the saved token and asks `GET /api/me` whether it still works. If it does, you are signed in. If the API answers `401`, the token has expired (after 15 minutes, lesson 27.5), so the app throws it away and shows the sign-in screen.
+
+Fifteen minutes is not much of "staying signed in". Lesson 28.4 fixes that by saving a long-lived **refresh token** in exactly the same place instead. The storage code you write now does not change.
+
+## Worked example
+
+### Install the library
+
+In your PayDeck folder:
+
+```sh
+npm install react-native-keychain@10.0.0
+cd macos && pod install && cd ..
+```
+
+The library contains native code (Objective-C for the Mac, Kotlin for Android), so the apps must be **rebuilt**, not just reloaded: stop Metro, then run `npx react-native run-macos` and `npx react-native run-android` again (lesson 11.2). Android needs no extra step; React Native links the library by itself.
+
+### Saving, loading, forgetting
+
+Create `src/auth/tokenStore.ts`:
+
+```ts
+import * as Keychain from 'react-native-keychain';
+
+// Whoever holds this token can use PayDeck as you, so it is kept in the
+// macOS Keychain or, on Android, encrypted with a key from the Keystore.
+// Never in AsyncStorage, which any code in the app (or anyone with the
+// phone's files) can read as plain text.
+const SERVICE = 'dev.paydeck.token';
+
+export async function saveToken(token: string): Promise<void> {
+  await Keychain.setGenericPassword('paydeck', token, { service: SERVICE });
+}
+
+export async function loadToken(): Promise<string | null> {
+  const saved = await Keychain.getGenericPassword({ service: SERVICE });
+  return saved ? saved.password : null;
+}
+
+export async function clearToken(): Promise<void> {
+  await Keychain.resetGenericPassword({ service: SERVICE });
+}
+```
+
+The Keychain was designed for usernames and passwords, hence the names: a **generic password** is a username and a secret. PayDeck puts a fixed username, `paydeck`, and the token as the secret. `getGenericPassword` answers `false` when nothing is saved. The `service` name keeps PayDeck's item apart from anything else the app saves later.
+
+### Asking the API who you are
+
+Add to `src/api/auth.ts` (and import `Account` from `../types` next to `User`):
+
+```ts
+/** Who is signed in, and the accounts they own. */
+export type Me = {
+  user: User;
+  accounts: Account[];
+};
+
+export const getMe = () => request<Me>('/api/me');
+```
+
+### Saving on sign-in, checking on start
+
+Replace `src/auth/AuthContext.tsx`:
+
+```tsx
+import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import * as authApi from '../api/auth';
+import { ApiError, setAccessToken } from '../api/client';
+import type { User } from '../types';
+import { clearToken, loadToken, saveToken } from './tokenStore';
+
+type Session = { status: 'loading' } | { status: 'signedOut' } | { status: 'signedIn'; user: User };
+
+type Auth = {
+  session: Session;
+  signIn: (email: string, password: string) => Promise<void>;
+  signUp: (displayName: string, email: string, password: string) => Promise<void>;
+};
+
+const AuthContext = createContext<Auth | null>(null);
+
+/** Knows who is signed in, and gives every API request their token. */
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [session, setSession] = useState<Session>({ status: 'loading' });
+
+  // When the app starts: if a token was saved last time, check it still works.
+  useEffect(() => {
+    async function restore() {
+      const saved = await loadToken().catch(() => null);
+      if (saved === null) {
+        setSession({ status: 'signedOut' });
+        return;
+      }
+      setAccessToken(saved);
+      try {
+        const me = await authApi.getMe();
+        setSession({ status: 'signedIn', user: me.user });
+      } catch (e) {
+        setAccessToken(null);
+        if (e instanceof ApiError && e.status === 401) {
+          await clearToken().catch(() => {}); // Expired: no use keeping it.
+        }
+        setSession({ status: 'signedOut' });
+      }
+    }
+    restore();
+  }, []);
+
+  async function accept(response: authApi.AuthResponse) {
+    setAccessToken(response.accessToken);
+    // If the Keychain fails, you stay signed in until the app closes.
+    await saveToken(response.accessToken).catch(() => {});
+    setSession({ status: 'signedIn', user: response.user });
+  }
+
+  const auth: Auth = {
+    session,
+    signIn: async (email, password) => accept(await authApi.login(email, password)),
+    signUp: async (displayName, email, password) => accept(await authApi.register(email, password, displayName)),
+  };
+
+  return <AuthContext.Provider value={auth}>{children}</AuthContext.Provider>;
+}
+```
+
+(`useAuth` stays as it was.)
+
+- **A third state, `loading`**: at start-up the app does not yet know whether you are signed in. Showing the sign-in screen for half a second and then jumping to the wallet would look broken.
+- **`useEffect(..., [])`** runs once, after the first render (lesson 10.5). `restore` is an `async` function inside it because the effect itself must not be `async`.
+- **`.catch(() => null)` and `.catch(() => {})`** on the Keychain calls: if secure storage fails (it can, for example on an emulator image without a lock screen), the app still works; you just have to sign in again next time. Failing to save must not stop someone from signing in.
+- **Only a `401` deletes the token.** With no connection, the token may still be good; keep it and try again next time.
+
+In `App.tsx`, `Root` must handle the new state. Add before the `signedOut` check:
+
+```tsx
+  if (session.status === 'loading') {
+    return null; // A moment while the saved token is checked.
+  }
+```
+
+### Try it
+
+Rebuild and sign in as Asha. Quit the app completely (**Cmd+Q** on the Mac; on Android, swipe it away from the recent apps) and open it again: you go straight to the wallet.
+
+Wait more than 15 minutes, then open the app: the saved token has expired, the API answers `401`, and you see the sign-in screen again.
+
+<Aside type="note" title="If saving fails on the Mac">
+If you stay signed out after reopening PayDeck on the Mac, and the debug log mentions error `-34018` ("missing entitlement"), open `macos/PayDeck.xcworkspace` in Xcode, select the macOS target, and under **Signing & Capabilities** add **Keychain Sharing**. That gives the app the right to keep Keychain items. Then rebuild.
+</Aside>
+
+<Exercise title="Prove it is not in AsyncStorage">
+Lesson 14.5 used `getItem` and `setItem`; `AsyncStorage.getAllKeys()` lists every key the app has saved. After signing in, list them with `AsyncStorage.getAllKeys()` and log them. Is the token there? Then, for comparison, think about what someone with a copy of the app's files would find in each place.
+
+<Fragment slot="hint">Put `AsyncStorage.getAllKeys().then((keys) => console.log(keys));` in a `useEffect` in `ProfileScreen` for a moment, open **You**, and look in React Native DevTools (press `j` in Metro). Remove it afterwards.</Fragment>
+<Fragment slot="solution">
+
+You see only `paydeck.accountId` (from Part 7): the token is not there. Someone with a copy of the app's files finds the account ID in AsyncStorage, which is no secret on its own (the API refuses it to anyone else since Module 27). On the Mac the token is in the Keychain, encrypted by the system and handed back only to PayDeck. On Android, what lies in the app's files is ciphertext, and the key to decrypt it never leaves the Keystore.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Tokens in AsyncStorage">
+It works, which is the problem: nothing warns you. Anything that lets someone sign in as you goes in the Keychain or Keystore.
+</Aside>
+
+<Aside type="caution" title="Reloading instead of rebuilding">
+After installing a library with native code, pressing `r` in Metro is not enough: the JavaScript loads but the native part is not in the installed app, so the first Keychain call fails (lesson 11.4: native changes need a rebuild). Rebuild the app.
+</Aside>
+
+<Aside type="caution" title="Throwing a token away on any error">
+If the app clears the saved token whenever `/api/me` fails, a train tunnel signs people out. Clear it only when the API says the token is no good: `401`.
+</Aside>
+
+## Recap
+
+- AsyncStorage is not encrypted: never keep tokens there.
+- react-native-keychain saves to the macOS Keychain, and on Android encrypts with a key kept in the Keystore.
+- `tokenStore.ts` has `saveToken`, `loadToken` and `clearToken`, all under one `service` name.
+- On start the session is `loading`; a saved token is checked with `/api/me`, and only a `401` throws it away.
+- Native libraries need a rebuild, not a reload.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why is AsyncStorage the wrong place for a token?',
+			options: ['It is too small', 'It is not encrypted, so anyone with the app\'s files can read the token', 'It is slow'],
+			answer: 1,
+			explanation: 'AsyncStorage is plain storage. Fine for preferences, never for anything that lets someone act as you.',
+		},
+		{
+			question: 'On Android, what does the Keystore actually hold?',
+			options: ['The token, as plain text', 'The encryption key, which never leaves it; the encrypted token is saved separately', 'A copy of the password'],
+			answer: 1,
+			explanation: 'The library encrypts the token with a Keystore key. Without that key, the saved bytes are useless.',
+		},
+		{
+			question: 'The app starts, and /api/me fails because there is no connection. What should happen to the saved token?',
+			options: ['Delete it', 'Keep it: only a 401 means it no longer works', 'Save it in AsyncStorage instead'],
+			answer: 1,
+			explanation: 'A network failure says nothing about the token. Throwing it away would sign people out for no reason.',
+		},
+	]}
+/>
+
+<MarkComplete />
