@@ -1,0 +1,236 @@
+---
+title: "30.8 PCI DSS and why we never store card numbers"
+description: "What PCI DSS is, which card data it protects, why PayDeck keeps only the last four digits, how Stripe keeps real card numbers away from PayDeck's servers, and a Java check that scans a database dump for anything that looks like a card number."
+sidebar:
+  order: 8
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can explain what PCI DSS is and why it shapes how payment apps are built, show that PayDeck's database holds no card numbers, and prove it with a small Java program that searches a database dump.
+
+## Why it matters
+
+Card numbers are the most stolen thing on the internet, because they can be turned into money. So the card industry has its own security rules, and any business that stores, processes or sends card numbers must follow them. Those rules are long and expensive to meet. The simplest and safest way to meet most of them is to **never touch card numbers at all**. PayDeck was designed that way from the first card you issued in Module 23, and Part 9 keeps it that way when real payments arrive.
+
+## The idea
+
+### PCI DSS
+
+**PCI DSS**, the Payment Card Industry Data Security Standard, is a set of security requirements written by the PCI Security Standards Council, which the big card brands (Visa, Mastercard, American Express, Discover and JCB) founded. The current version is **4.0.1**. It is not a law, but card brands and banks require it in their contracts: a business that accepts cards agrees to follow it, and one that suffers a breach while not following it can face fines and lose the ability to take cards.
+
+It has twelve top-level requirements, grouped around familiar ideas: firewalls and secure configuration, protecting stored card data, encrypting it in transit, managing vulnerabilities, restricting access ("need to know"), identifying and authenticating people, physical security, logging and monitoring, testing, and having a security policy. You have met most of these ideas in this module.
+
+### What counts as card data
+
+PCI DSS protects two kinds of data:
+
+**Cardholder data:**
+
+- the **PAN**, the primary account number: the long number on the front of the card, usually 16 digits (between 12 and 19 in general);
+- the cardholder's name, the expiry date and the service code, **when stored together with the PAN**.
+
+**Sensitive authentication data:**
+
+- the full data from the magnetic stripe or chip;
+- the **card verification code**: the 3 or 4 digits printed on the card (CVV2, CVC2 and so on);
+- PINs and PIN blocks.
+
+Sensitive authentication data must **never be stored after a payment is authorized**, not even encrypted. The PAN may be stored, but only if it is protected, for example encrypted with carefully managed keys, and every system that stores, processes or transmits it, and every system connected to those, falls inside the audit. That area is called the **cardholder data environment**, and keeping it small is the whole game.
+
+### PayDeck's choice: last four only
+
+PayDeck stores, for each card, a nickname, a status, a limit and `last4`. The last four digits are enough to say "the card ending 1669" on screen and in support calls, and they cannot be used to pay. Showing the last four digits with the rest masked is allowed by PCI DSS; the full number is not needed for anything PayDeck does.
+
+Remember the comment on `Card` from Module 23: "We only keep the last four digits; a full card number never reaches PayDeck's database." That is a design decision (OWASP A06, lesson 30.6), not an accident.
+
+### Who holds the real numbers, then?
+
+In the real world, the companies that hold card numbers are the ones whose business it is, and who pay for the security and the audits:
+
+- **Accepting card payments** (Part 9): when someone tops up their wallet with a card, they type the number into a payment page that **Stripe** hosts, not into PayDeck. Stripe gives PayDeck back a payment ID and the outcome. The card number never touches PayDeck's API, so PayDeck's servers stay outside the cardholder data environment. A merchant that sends all card entry to such a provider usually qualifies for the shortest PCI self-assessment questionnaire, called **SAQ A**.
+- **Issuing cards** (like PayDeck's virtual cards): a real issuer works with a card issuing processor, which creates the card numbers and keeps them. The app shows the full number only inside a secure element supplied by that processor, straight from the processor to the screen, so the issuer's own servers never see it.
+
+This idea has a name: **tokenization**. The sensitive value lives in one heavily protected place; everyone else holds a **token**, a meaningless reference to it (a payment ID, a card ID). A stolen token is useless on its own.
+
+### Proving it
+
+"We never store card numbers" is a claim, and claims should be checked. Card numbers have a property that makes them findable: their last digit is a **check digit**, calculated with the **Luhn algorithm** from the other digits, so that a mistyped digit is usually caught. Any run of 13 to 19 digits that passes the Luhn check is worth a look. Most random long numbers fail it: about nine in ten.
+
+## Worked example
+
+### Look at the table
+
+```sh
+docker compose exec postgres psql -U paydeck -c "\d cards"
+```
+
+```
+                               Table "public.cards"
+        Column        |           Type           | Collation | Nullable | Default 
+----------------------+--------------------------+-----------+----------+---------
+ id                   | uuid                     |           | not null | 
+ account_id           | uuid                     |           | not null | 
+ nickname             | character varying(50)    |           | not null | 
+ last4                | character varying(4)     |           | not null | 
+ status               | character varying(10)    |           | not null | 
+ spending_limit_cents | bigint                   |           |          | 
+ created_at           | timestamp with time zone |           | not null | 
+```
+
+(followed by the indexes and constraints). There is nowhere to put a card number: `last4` holds at most four characters.
+
+### A card number finder
+
+The Luhn check, in words: starting from the **rightmost** digit, double every second digit; if doubling gives more than 9, subtract 9; add everything up. A valid card number's total ends in 0.
+
+Take Stripe's well-known test card, `4242 4242 4242 4242`. From the right, the digits are 2, 4, 2, 4, and so on. The 4s are in the doubled positions and become 8; the 2s stay 2. Eight 8s and eight 2s: 64 + 16 = 80, which ends in 0. Valid. Change the last digit to 1 and the total is 79: invalid, a typo caught.
+
+Write it as a simple source file (lesson 15.2), `scripts/FindCardNumbers.java` in the API folder:
+
+```java
+// Reads text and reports anything that looks like a full card number:
+// 13 to 19 digits in a row that also pass the Luhn check.
+// Usage: docker compose exec -T postgres pg_dump -U paydeck paydeck | java scripts/FindCardNumbers.java
+
+import java.io.IOException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/** The check digit test every card number passes, and most random numbers do not. */
+boolean passesLuhn(String digits) {
+    int total = 0;
+    for (int i = 0; i < digits.length(); i++) {
+        int digit = digits.charAt(digits.length() - 1 - i) - '0';
+        if (i % 2 == 1) {
+            digit *= 2;
+            if (digit > 9) {
+                digit -= 9;
+            }
+        }
+        total += digit;
+    }
+    return total % 10 == 0;
+}
+
+void main() throws IOException {
+    String text = new String(System.in.readAllBytes());
+    Matcher matcher = Pattern.compile("(?<![0-9])[0-9]{13,19}(?![0-9])").matcher(text);
+    int candidates = 0;
+    int cardLike = 0;
+    while (matcher.find()) {
+        candidates++;
+        if (passesLuhn(matcher.group())) {
+            cardLike++;
+            IO.println("Looks like a card number: " + matcher.group());
+        }
+    }
+    IO.println(candidates + " long numbers, " + cardLike + " pass the Luhn check");
+}
+```
+
+New pieces:
+
+- `System.in.readAllBytes()` reads everything piped into the program. Reading can fail, which is why `main` says `throws IOException`.
+- `digits.charAt(...) - '0'` turns a digit character into its number: characters are numbers underneath, and `'7' - '0'` is 7.
+- The regular expression finds runs of 13 to 19 digits. `(?<![0-9])` and `(?![0-9])` mean "not straight after a digit" and "not straight before one", so a 25-digit run is not counted as several 19-digit ones.
+
+Test it on the test card and a typo of it:
+
+```sh
+echo "test 4242424242424242 and 4242424242424241" | java scripts/FindCardNumbers.java
+```
+
+```
+Looks like a card number: 4242424242424242
+2 long numbers, 1 pass the Luhn check
+```
+
+### Scan the database
+
+`pg_dump` writes out the whole database as text: every table, every row. `-T` lets `docker compose exec` pass that text through a pipe:
+
+```sh
+docker compose exec -T postgres pg_dump -U paydeck paydeck | java scripts/FindCardNumbers.java
+```
+
+```
+10 long numbers, 0 pass the Luhn check
+```
+
+Your count of long numbers will differ. Where do they come from, if not cards? Search the dump with `grep -E '[0-9]{13,19}'` and you find timestamps inside test users' emails (`cara-1792643588136@example.com`) and runs of digits inside password hashes and refresh-token hashes. That is why the Luhn check matters: without it, every scan would cry wolf, and people stop reading alarms that always ring.
+
+And the code, every file Git tracks:
+
+```sh
+git ls-files -z | xargs -0 cat | java scripts/FindCardNumbers.java
+```
+
+```
+0 long numbers, 0 pass the Luhn check
+```
+
+`git ls-files -z` lists tracked files separated by a zero byte, and `xargs -0 cat` prints them all, even if a name contains a space.
+
+<Exercise title="Where else could a card number hide?">
+PayDeck's tables are clean. List three other places a full card number could end up in a payment app, even though no table has a column for it, and for each say how PayDeck's design (or Part 9's Stripe Checkout) keeps it out. Then check one of them: scan the API's own log, `java scripts/FindCardNumbers.java < your-log-file`, after a session of using the app.
+
+<Fragment slot="hint">Think about what gets written down without anyone deciding to: logs, error messages, free-text fields, support conversations.</Fragment>
+<Fragment slot="solution">
+
+1. **Logs.** A request body logged "for debugging" would contain whatever was typed. PayDeck never logs request bodies, and its API never receives card numbers, because the number is typed into Stripe's page.
+2. **Free-text fields.** A customer might type a card number into a card's nickname or a transfer description. Those are free text, so a scan of the dump is the honest check; a stricter app could refuse long digit runs that pass Luhn in those fields.
+3. **Error messages and audit details.** A `detail` that echoes the input back ("1111 2222 3333 4444 is not a valid card") would store it. PayDeck's errors describe the problem, not the value, and the audit log never stores input (lesson 30.5).
+
+Others: screenshots in support tickets, analytics tools, crash reports. A scan of a log file should report `0 pass the Luhn check`; if it ever does not, find where the number came from before anything else.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Storing the CVV &quot;just for one-click payments&quot;">
+Never, not even encrypted. Sensitive authentication data must not be kept after authorization. Repeat payments use a token from the payment provider instead.
+</Aside>
+
+<Aside type="caution" title="Collecting card numbers in your own form &quot;and sending them straight on&quot;">
+Even if you never store it, a number that passes through your server brings that server, and everything connected to it, into the audit. Let the provider's page or component collect it.
+</Aside>
+
+<Aside type="caution" title="Real card numbers in tests">
+Use the provider's test numbers, such as Stripe's `4242 4242 4242 4242`. A real number in a test file is a real number in Git.
+</Aside>
+
+## Recap
+
+- **PCI DSS** is the card industry's security standard (currently 4.0.1); anyone who stores, processes or sends card numbers must meet it.
+- Card data is the **PAN** (with name, expiry, service code) and **sensitive authentication data** (stripe or chip data, CVV, PIN). Sensitive authentication data is never stored after authorization.
+- The easiest compliance is to keep card numbers out of your systems: PayDeck stores only `last4`, and card entry goes to Stripe (**tokenization**).
+- Card numbers end in a **Luhn** check digit, which turns "long numbers" into "numbers that look like cards" when you scan for leaks.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which of these may never be stored after a payment is authorized, even encrypted?',
+			options: ['The last four digits', 'The 3-digit code on the back of the card', 'The cardholder\'s name on its own'],
+			answer: 1,
+			explanation: 'The card verification code is sensitive authentication data. It may be used to authorize a payment and then must be discarded.',
+		},
+		{
+			question: 'Why does PayDeck send people to a Stripe-hosted page to type their card number?',
+			options: ['It looks nicer', 'So the number never reaches PayDeck\'s servers, keeping them outside the cardholder data environment', 'Because React Native has no text inputs'],
+			answer: 1,
+			explanation: 'If the number never passes through PayDeck, PayDeck\'s systems are not in scope for most of PCI DSS.',
+		},
+		{
+			question: 'A scan finds 4242424242424241 in a log. Does it pass the Luhn check?',
+			options: ['Yes', 'No'],
+			answer: 1,
+			explanation: 'The total is 79, which does not end in 0. 4242424242424242 passes (80).',
+		},
+	]}
+/>
+
+<MarkComplete />

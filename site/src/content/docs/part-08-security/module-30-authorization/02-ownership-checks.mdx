@@ -430,7 +430,7 @@ curl -s localhost:8080/api/accounts/$A -H "Authorization: Bearer $SAM"
 
 ```sh
 curl -s -X POST localhost:8080/api/accounts/$A/top-ups -H "Authorization: Bearer $SAM" \
-  -H "Idempotency-Key: $(python3 -c 'import uuid; print(uuid.uuid4())')" \
+  -H "Idempotency-Key: $(uuidgen)" \
   -H 'Content-Type: application/json' -d '{"amountCents": 1000, "description": "Just testing"}'
 ```
 
