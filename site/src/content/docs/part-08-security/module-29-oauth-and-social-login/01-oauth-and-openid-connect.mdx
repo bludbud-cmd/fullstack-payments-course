@@ -1,0 +1,224 @@
+---
+title: "29.1 OAuth 2.0 and OpenID Connect explained"
+description: "Who is who in \"Sign in with Google\": the client, the authorization server, codes, scopes, ID tokens and Google's public keys, and why PayDeck keeps its own tokens after Google has said who someone is."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can explain, step by step, what happens when someone taps "Continue with Google", and which parts are OAuth 2.0 and which are OpenID Connect. There is no code yet: the next three lessons build it.
+
+## Why it matters
+
+Every new password is a burden. People reuse them, forget them, and type them into look-alike sites. "Sign in with Google" lets PayDeck skip all of that: Google, which already knows the person, vouches for them. But a sign-in button is also an easy place to make a serious mistake, such as trusting an email address Google never checked, or sending a secret to the wrong app. Understanding the moving parts is how you avoid that.
+
+## The idea
+
+### OAuth 2.0: permission without the password
+
+OAuth 2.0 was designed for **permission**. Before it, an app that wanted to read your Gmail contacts asked for your Google password. With OAuth, the app sends you to Google, Google asks *you* "Allow PayDeck to see your email address?", and the app gets a limited key instead of your password. A hotel's valet key works the same way: it starts the car but does not open the boot.
+
+OAuth names four roles. For PayDeck:
+
+| Role | Who it is in PayDeck | What it does |
+|------|------------------------|--------------|
+| **Resource owner** | The person signing in | Says yes or no on Google's page |
+| **Client** | The PayDeck **API** | Asks for permission, and gets the answer |
+| **Authorization server** | Google's sign-in service, `accounts.google.com` | Checks the person's Google password and asks for consent |
+| **Resource server** | Google's APIs | Holds the data the permission is for |
+
+The client is the PayDeck API, not the app. That choice comes up again below.
+
+### Scopes: what is being asked for
+
+A **scope** names one kind of permission. PayDeck asks for three:
+
+- `openid`: "I want to know who this is." This one switches on OpenID Connect.
+- `profile`: their name (and picture).
+- `email`: their email address, and whether Google has checked it belongs to them.
+
+Google shows the person what these mean before they agree. Ask for the least you need: a sign-in button that wants access to someone's Drive files is a red flag.
+
+### The authorization code flow
+
+The most common OAuth flow, and the one PayDeck uses, goes like this. The **browser** carries messages between the PayDeck API and Google, by following redirects:
+
+1. The app opens the browser at the API: "sign this person in with Google".
+2. The API redirects the browser to Google's **authorization endpoint**, with PayDeck's **client ID** (public: it just says "this is PayDeck"), the scopes, and where to come back to.
+3. Google signs the person in (password, two-factor, whatever they have set up) and asks for consent.
+4. Google redirects the browser back to the API with a **code**: a short-lived, single-use ticket.
+5. The API sends the code, plus its **client secret**, straight to Google's **token endpoint**. Not through the browser: server to server.
+6. Google answers with tokens, including an **ID token** that says who the person is.
+
+Why the detour through a code? The browser's address bar, its history and other software on the computer may see the code in step 4. That is fine, because a code alone is useless: trading it in step 5 needs the client secret, which only the API has. The valuable tokens never pass through the browser.
+
+### OpenID Connect: identity on top
+
+OAuth 2.0 only answers "may this app do X?". It does not, by itself, say who the person is. **OpenID Connect** (OIDC) is a thin layer on top that adds exactly that: when the scope includes `openid`, the token response contains an **ID token**.
+
+An ID token is a JWT, the same format as PayDeck's access tokens (lesson 27.5). Its claims look like this (the values here are made up):
+
+```json
+{
+  "iss": "https://accounts.google.com",
+  "aud": "123456789012-abc123.apps.googleusercontent.com",
+  "sub": "110248495921238986420",
+  "email": "chen.wei@gmail.com",
+  "email_verified": true,
+  "name": "Chen Wei",
+  "iat": 1792645200,
+  "exp": 1792648800,
+  "nonce": "5X3qRZ…"
+}
+```
+
+- **`iss`** (issuer): who made the token. Must be Google.
+- **`aud`** (audience): who it is for. Must be PayDeck's client ID; a token Google made for another app is not for us.
+- **`sub`** (subject): Google's ID for this person. It **never changes**, even if they change their email address. PayDeck stores it to recognise them next time.
+- **`email`** and **`email_verified`**: their email, and whether Google has checked that they control it. Lesson 29.4 shows why the second one matters so much.
+- **`exp`**: an ID token is checked once, at sign-in, and is short-lived.
+- **`nonce`**: a random value the API put in step 2. Finding it in the token proves the token was made for this sign-in, not replayed from an old one.
+
+### Checking Google's signature
+
+PayDeck signs its own JWTs with one shared secret (HMAC, lesson 27.5): the same secret makes and checks the signature, so only PayDeck can check them. Google cannot share a secret with every website in the world, so it uses **public-key** signatures (RS256): Google signs with a **private key** nobody else has, and publishes the matching **public keys** so anyone can check. The public keys can check signatures but cannot make them.
+
+Where are those keys? Google publishes a **discovery document** at a fixed address, which lists all its endpoints, including the JWKS (JSON Web Key Set) with the public keys. Spring Security reads both for you, which is why the code in lesson 29.3 is short.
+
+### `state`: the sign-in must be yours
+
+One more value travels with the browser: **`state`**, a random value the API sends in step 2 and expects back in step 4. If a callback arrives with a code but the wrong `state`, someone is trying to slip their own code into your browser, so that you end up signed in as *them* (and, say, add your card to their account). Spring Security creates and checks `state` and `nonce` for you; you will see both in the redirects in lesson 29.3.
+
+### Why PayDeck keeps its own tokens
+
+After step 6, PayDeck knows who the person is. From there, nothing changes: the API gives out its **own** access and refresh tokens (Module 28), and Google is not involved again until the next sign-in. That keeps everything you built in Module 28 (refresh, logout, sign out everywhere) working the same for everyone, however they signed in. Google's tokens are thrown away.
+
+### Why the app does not talk to Google itself
+
+Steps 5 and 6 need the client secret. An app cannot keep a secret: anyone can download it and unpack it. So the **API** is the OAuth client, and the secret stays on the server. The app's only job is to open the browser and, at the end, receive the result. That last hop, from the API back to the app, needs its own protection, because on a phone another app can register to open the same kind of link. Lesson 29.2 adds it: **PKCE**.
+
+## Worked example: Google's discovery document
+
+Google's discovery document is public. Read it with curl and jq (lesson 19.5):
+
+```sh
+curl -s https://accounts.google.com/.well-known/openid-configuration \
+  | jq '{issuer, authorization_endpoint, token_endpoint, jwks_uri, scopes_supported,
+         id_token_signing_alg_values_supported, code_challenge_methods_supported}'
+```
+
+```json
+{
+  "issuer": "https://accounts.google.com",
+  "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+  "token_endpoint": "https://oauth2.googleapis.com/token",
+  "jwks_uri": "https://www.googleapis.com/oauth2/v3/certs",
+  "scopes_supported": [
+    "openid",
+    "email",
+    "profile"
+  ],
+  "id_token_signing_alg_values_supported": [
+    "RS256"
+  ],
+  "code_challenge_methods_supported": [
+    "plain",
+    "S256"
+  ]
+}
+```
+
+Everything from the steps above is here: where to send the browser (`authorization_endpoint`), where the API trades the code (`token_endpoint`), the public keys (`jwks_uri`), the scopes, the signing algorithm, and support for PKCE (`code_challenge_methods_supported`), which you meet next lesson.
+
+Now the keys themselves:
+
+```sh
+curl -s https://www.googleapis.com/oauth2/v3/certs | jq '.keys | length, (.[0] | {kty, alg, use})'
+```
+
+```
+2
+{
+  "kty": "RSA",
+  "alg": "RS256",
+  "use": "sig"
+}
+```
+
+Two RSA public keys, for signatures. Google has two so it can switch to a new key without breaking tokens signed with the old one; each ID token names its key in a `kid` header. Your numbers and key IDs may differ: Google changes keys regularly.
+
+<Exercise title="Read the claims">
+The discovery document also lists the **claims** an ID token can contain (`claims_supported`) and the endpoint that answers "who is this?" for an access token (`userinfo_endpoint`). Print both. Which claims would PayDeck need to sign someone up, and which one must it use to recognise them next time?
+
+<Fragment slot="hint">`jq -c '.userinfo_endpoint, .claims_supported'` prints both, each on one line.</Fragment>
+<Fragment slot="solution">
+
+```sh
+curl -s https://accounts.google.com/.well-known/openid-configuration | jq -c '.userinfo_endpoint, .claims_supported'
+```
+
+```
+"https://openidconnect.googleapis.com/v1/userinfo"
+["aud","email","email_verified","exp","family_name","given_name","iat","iss","name","picture","sub"]
+```
+
+To sign someone up, PayDeck needs `sub`, `email`, `email_verified` and `name`. To recognise them next time it must use **`sub`**: people can change the email address on a Google account, and an address can even be given to someone else later, but `sub` belongs to one Google account forever.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Using OAuth access tokens as proof of identity">
+An OAuth access token says "the bearer may do X", not "the bearer is Y". An app that accepts any Google access token as a sign-in can be fooled with a token someone obtained for a completely different app. Identity comes from the ID token, checked for issuer, audience, expiry and signature.
+</Aside>
+
+<Aside type="caution" title="Putting the client secret in the app">
+Anything inside an app can be read by anyone who downloads it. The client secret belongs on the server, which is why PayDeck's API, not the app, talks to Google.
+</Aside>
+
+<Aside type="caution" title="Recognising people by email">
+Emails change hands. Store and match on `sub`.
+</Aside>
+
+## Recap
+
+- OAuth 2.0 gives permission; OpenID Connect adds identity, as a signed **ID token**.
+- In PayDeck the **API** is the client. The browser carries a short-lived **code** from Google to the API, and the API trades it, with its secret, for tokens.
+- The ID token's `iss`, `aud`, `exp`, `nonce` and signature must all be checked; Spring Security does this using Google's discovery document and public keys.
+- `state` makes sure the sign-in finishing in this browser is the one that started there.
+- Recognise people by `sub`, not email. After Google says who someone is, PayDeck hands out its own tokens.
+
+<Quiz
+	questions={[
+		{
+			question: 'What does the "openid" scope add to OAuth?',
+			options: ['Access to Google Drive', 'An ID token that says who the person is', 'A longer-lived access token'],
+			answer: 1,
+			explanation: 'OpenID Connect is switched on by the openid scope, and its whole point is the ID token.',
+		},
+		{
+			question: 'Why can the code safely travel through the browser?',
+			options: ['It is encrypted', 'It is useless without the client secret, which only the server has, and it expires quickly', 'Browsers never show it'],
+			answer: 1,
+			explanation: 'The code is only a ticket. Trading it for tokens needs the secret, server to server.',
+		},
+		{
+			question: 'Which claim should PayDeck store to recognise a Google user next time?',
+			options: ['email', 'name', 'sub'],
+			answer: 2,
+			explanation: 'sub is Google\'s permanent ID for the account. Emails and names can change.',
+		},
+		{
+			question: 'How can PayDeck check a signature made with Google\'s private key?',
+			options: ['With Google\'s published public keys', 'By asking Google for the private key', 'With PayDeck\'s JWT secret'],
+			answer: 0,
+			explanation: 'Public-key signatures (RS256) are checked with public keys, which Google publishes at its jwks_uri.',
+		},
+	]}
+/>
+
+<MarkComplete />

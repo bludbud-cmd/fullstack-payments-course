@@ -1,0 +1,204 @@
+---
+title: "30.6 OWASP Top 10"
+description: "Walk through the OWASP Top 10:2025, the best-known list of web application security risks, see where PayDeck already defends itself, try a few attacks on your own API, and read a dependency audit."
+sidebar:
+  order: 6
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can name the ten risk categories in the OWASP Top 10, point to where PayDeck defends against each one, and run three quick checks of your own: an injection attempt, a broken request, and a dependency audit.
+
+## Why it matters
+
+You have already defended PayDeck against most of this list, often without the official names. Knowing the names matters for two reasons. Security reviews, job interviews and bug reports use them ("this is an A01"). And a checklist written from thousands of real breaches is the best way to find the gaps you did not think of.
+
+## The idea
+
+### What OWASP is
+
+**OWASP**, the Open Worldwide Application Security Project, is a non-profit community that publishes free security guidance. Its best-known document, the **OWASP Top 10**, lists the ten most important categories of security risk in web applications, based on data from real applications and a survey of security professionals. It is updated every few years; the current edition is **2025**. Each category has a code such as **A01:2025**.
+
+The Top 10 is an awareness document, not a complete standard: it tells you where most real problems are. For a full checklist, OWASP also publishes the Application Security Verification Standard (ASVS).
+
+### The list, and PayDeck
+
+| | Category | What it means | Where PayDeck stands |
+|---|----------|---------------|------------------------|
+| A01 | **Broken Access Control** | Users can act outside what they should: see others' data, use admin functions | `AccessPolicy` (30.2), the `/api/admin` rule (30.1), `@PreAuthorize` (30.3), and tests that send forbidden requests |
+| A02 | **Security Misconfiguration** | Unsafe defaults, debug features left on, too much detail in errors | Health details hidden in production (Module 21 project); `ProductionSettingsCheck` (next lesson) |
+| A03 | **Software Supply Chain Failures** | Vulnerable or malicious libraries, build tools, or packages | Lockfiles and audits, below |
+| A04 | **Cryptographic Failures** | Weak or missing encryption and hashing | BCrypt for passwords (27.1); a long JWT secret (27.5); HTTPS on the real server (Part 10) |
+| A05 | **Injection** | Untrusted input interpreted as code: SQL, commands | JPA queries with parameters, never string building; tried below |
+| A06 | **Insecure Design** | The design itself is unsafe, however well it is coded | Staff cannot move money (30.2); idempotency keys (24.5); PKCE (29.2) |
+| A07 | **Authentication Failures** | Weak sign-in: guessable passwords, no protection from guessing, sessions that never end | Password length rules (27.4); same answer and timing for wrong email or password (27.4); short access tokens, rotating refresh tokens (28.4) |
+| A08 | **Software or Data Integrity Failures** | Trusting data or code whose integrity was never checked | Every token's signature is checked (27.5, 29.1); webhooks will be verified (Module 31) |
+| A09 | **Security Logging and Alerting Failures** | Attacks go unnoticed: nothing is recorded, or nobody looks | The audit log (30.5) |
+| A10 | **Mishandling of Exceptional Conditions** | Errors and unusual cases handled unsafely: crashing, leaking details, or "failing open" | Errors become clean `ProblemDetail` answers (22.4); missing claims count as "no" (29.4, 30.1) |
+
+A few of these deserve more words.
+
+**A01 is first for a reason.** Broken access control is found in more applications than any other category. It is rarely clever: it is a missing check. Lessons 30.1 to 30.3 were all about it.
+
+**A06 is about decisions, not code.** No amount of careful coding fixes a design where support staff can move money. That is why the rules table in lesson 30.2 was decided first and coded second.
+
+**A07: PayDeck has a known gap.** Nothing stops someone from trying thousands of passwords against one account. The audit log would show it, but would not stop it. Real services add **rate limiting** (only a few attempts per minute per account and per address) and sometimes a temporary lock. Usually that is done by the service in front of the API, such as a load balancer or API gateway, when PayDeck is hosted online in Part 10. Knowing your gaps, and writing them down, is part of security work.
+
+**A10: fail closed.** When something unexpected happens, a security check should answer "no". You did this twice: Google's `email_verified` missing counts as false (29.4), and a token with no role counts as `CUSTOMER` (30.1). The opposite, "failing open", is how a crash in a permission check becomes a way in.
+
+## Worked example
+
+Run the API, sign in as Sam, and keep his token in `$SAM`.
+
+### A05: an injection attempt
+
+The classic SQL injection puts SQL into a form field. If the API built its query by gluing strings together:
+
+```java
+// NEVER do this
+String sql = "select * from users where email = '" + email + "'";
+```
+
+then searching for `x' OR '1'='1` would produce `where email = 'x' OR '1'='1'`, which is true for every row: the search would return every user in PayDeck.
+
+Try it on the staff search. `--data-urlencode` sends the quotes and spaces safely in the URL:
+
+```sh
+curl -s -G localhost:8080/api/admin/users --data-urlencode "email=x' OR '1'='1" \
+  -H "Authorization: Bearer $SAM"
+```
+
+```json
+[]
+```
+
+Nobody has that strange email, so the answer is empty. `findByEmail` is a Spring Data method, and like every JPA query it sends the email to PostgreSQL as a **parameter**, separately from the SQL. The database never reads it as code, whatever it contains. The same is true of `@Query` methods with `:name` parameters. Injection comes back the moment someone builds a query, or a shell command, out of strings.
+
+### A10: a broken request
+
+Send a sign-in whose JSON stops halfway:
+
+```sh
+curl -s -X POST localhost:8080/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"email": "asha@example.com", "password": '
+```
+
+```json
+{"timestamp":"2026-10-22T05:36:26.501Z","status":400,"error":"Bad Request","path":"/api/auth/login"}
+```
+
+And an account ID that is not a UUID:
+
+```sh
+curl -s localhost:8080/api/accounts/not-a-uuid -H "Authorization: Bearer $SAM"
+```
+
+```json
+{"timestamp":"2026-10-22T05:36:26.530Z","status":400,"error":"Bad Request","path":"/api/accounts/not-a-uuid"}
+```
+
+Both are a plain `400` with no stack trace, no class names and no SQL. These two come from Spring Boot's own error page rather than PayDeck's `ProblemDetail` handler, which is why they look different, and Spring Boot leaves out error details by default. That default is a good one: keep it. A stack trace tells an attacker which libraries and versions you run.
+
+### A03: auditing dependencies
+
+The PayDeck app depends on about nine hundred npm packages, almost all of them indirectly. `npm audit` compares the exact versions in `package-lock.json` with a public database of known vulnerabilities. In the app folder:
+
+```sh
+npm audit --omit=dev
+```
+
+The report is long. Its shape, from the app as it stood when this lesson was written:
+
+```
+# npm audit report
+
+braces  *
+Severity: high
+braces vulnerable to stack-exhaustion denial of service through deeply nested patterns - https://github.com/advisories/GHSA-vfj7-8cjw-p6xm
+fix available via `npm audit fix --force`
+Will install react-native-macos@0.81.9, which is a breaking change
+node_modules/braces
+  micromatch  >=0.2.0
+  Depends on vulnerable versions of braces
+  ...
+
+33 vulnerabilities (8 moderate, 25 high)
+```
+
+Your numbers will be different: new advisories are published every week, and fixes arrive in new versions. What matters is how you read it:
+
+- **What is affected, and how?** `braces` matches file name patterns. The advisory is a denial of service from "deeply nested patterns": a pattern built to make it run out of stack. The patterns it sees come from the build tools (Metro, Jest, the React Native command line) running on **your** Mac, with your own project's settings. It is not part of the app that ships to phones, and no customer can send it a pattern.
+- **What does the fix cost?** `npm audit fix --force` would install a different major version of `react-native-macos`: a breaking change, for a risk that does not apply. Do not run `--force` without reading what it will do.
+- **What do you do?** Keep React Native and its tools up to date as part of normal upgrades, which brings the fixed versions in. Fix straight away anything that does reach users: code that runs in the app or the API and handles input from outside.
+
+For the API, GitHub's **Dependabot** watches `pom.xml` and `package.json` in a repository and opens pull requests when a dependency has a known vulnerability. You switch it on in your repository's settings on GitHub, in the code security section. The lockfile (`package-lock.json`) and the versions chosen by Spring Boot's parent pom (lesson 21.2) make sure everyone builds with exactly the versions that were checked.
+
+<Exercise title="Name the category">
+Each of these is a real kind of incident. Give each one its OWASP Top 10:2025 code and name, and say which part of PayDeck (if any) protects against it.
+
+1. A shopping app's API returns any order's address if you change the order number in the URL.
+2. An API's error page shows the full Java stack trace, including the database driver version.
+3. A popular npm package is taken over, and a new version steals environment variables during installation.
+4. A permission check throws an exception when the user record is missing, and the code's `catch` block lets the request continue.
+5. A website lets you try passwords forever without slowing down.
+
+<Fragment slot="hint">Look at the "What it means" column. Number 4 is about what happens when something unexpected goes wrong.</Fragment>
+<Fragment slot="solution">
+
+1. **A01 Broken Access Control** (an IDOR). PayDeck: `AccessPolicy`, which answers 404 to strangers.
+2. **A02 Security Misconfiguration**. PayDeck: Spring Boot's default of no error details, and `ProblemDetail` messages that say only what the caller did wrong (22.4).
+3. **A03 Software Supply Chain Failures**. PayDeck: lockfiles, `npm audit`, Dependabot; and not giving build machines more secrets than they need (next lesson).
+4. **A10 Mishandling of Exceptional Conditions**: the check "fails open". PayDeck's checks fail closed: an unknown account is `404`, a missing role is `CUSTOMER`, a missing `email_verified` is false.
+5. **A07 Authentication Failures**. PayDeck: records every failure in the audit log, but does **not** yet limit attempts. That is the known gap, closed in front of the API with rate limiting.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Treating the Top 10 as a complete checklist">
+It names the most common categories, not every risk. Use it to start reviews and conversations; use the ASVS when you need a full list.
+</Aside>
+
+<Aside type="caution" title="Running npm audit fix --force without reading">
+It can install new major versions that break your app, to fix issues that may not affect you. Read the advisory, decide, then upgrade on purpose.
+</Aside>
+
+<Aside type="caution" title="Building queries from strings">
+Every time. Use repository methods, or `@Query` with named parameters.
+</Aside>
+
+## Recap
+
+- The **OWASP Top 10:2025**: A01 Broken Access Control, A02 Security Misconfiguration, A03 Software Supply Chain Failures, A04 Cryptographic Failures, A05 Injection, A06 Insecure Design, A07 Authentication Failures, A08 Software or Data Integrity Failures, A09 Security Logging and Alerting Failures, A10 Mishandling of Exceptional Conditions.
+- PayDeck already defends against most of them; its known gap is limiting sign-in attempts.
+- Parameters, not string building, stop injection.
+- Errors should say what went wrong for the caller and nothing about the inside of the server.
+- Read audit reports and decide; do not force fixes blindly.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which category is number one in the OWASP Top 10:2025?',
+			options: ['Injection', 'Broken Access Control', 'Cryptographic Failures'],
+			answer: 1,
+			explanation: 'A01:2025 is Broken Access Control: missing or wrong checks on what a user may do.',
+		},
+		{
+			question: 'Why does searching for x\' OR \'1\'=\'1 return [] from PayDeck?',
+			options: ['PayDeck removes quotes', 'The email is sent to the database as a parameter, never as part of the SQL', 'PostgreSQL ignores OR'],
+			answer: 1,
+			explanation: 'JPA queries use parameters, so input is always treated as a value, never as code.',
+		},
+		{
+			question: 'A permission check crashes and the request is allowed through. What is this called?',
+			options: ['Failing open', 'Failing closed', 'Defence in depth'],
+			answer: 0,
+			explanation: 'Failing open turns an error into access. Security checks should fail closed: when in doubt, no.',
+		},
+	]}
+/>
+
+<MarkComplete />

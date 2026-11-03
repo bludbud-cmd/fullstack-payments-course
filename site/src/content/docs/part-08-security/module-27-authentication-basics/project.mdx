@@ -1,0 +1,547 @@
+---
+title: "Mini-project: Login API"
+description: "Make every PayDeck account belong to the person who opened it: a CurrentUser parameter for controllers, one OwnedAccounts check used by every endpoint, GET /api/me listing your own accounts, and tests proving nobody can touch someone else's money."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+After lesson 27.5 nobody can use PayDeck without signing in. But once signed in, **anyone can use any account**: Bea can read Asha's balance, freeze Asha's card, or send Asha's money to herself, as long as she knows the account's ID. Signing in answered "who are you?"; this project answers "what is yours?". When you finish, every account belongs to the person who opened it, and the API behaves as if other people's accounts do not exist.
+
+## The tasks
+
+1. **Owners.** Add a migration `V4__accounts_belong_to_users.sql` that gives `accounts` an `owner_user_id` column referring to `users (id)`, with an index. It must be allowed to be empty, because the system accounts have no owner. Add the field to `Account`, and give `Account.openCustomerAccount` the owner's user ID as its first parameter.
+2. **Opening an account.** `POST /api/accounts` takes only `{"currency": "USD"}`. The account belongs to whoever is signed in, and its `ownerName` is their display name.
+3. **A `CurrentUser` parameter.** Instead of `@AuthenticationPrincipal Jwt` everywhere, any controller method can take a `CurrentUser user` parameter: a record holding the signed-in person's ID.
+4. **One ownership check.** Write `OwnedAccounts.require(accountId, user)`, which returns the account if it is a customer account owned by `user`, and otherwise throws the usual `NotFoundException("Account", accountId)`. Use it in every endpoint that touches an account:
+   - reading an account, its history and its cards, issuing a card;
+   - top-ups;
+   - transfers, for the **from** account only (you may send money to anyone's account);
+   - every `/api/cards/{id}` endpoint, through the card's account. Someone else's card answers `404 Card ... was not found`.
+5. **`GET /api/me`** answers `{"user": {...}, "accounts": [...]}`: who you are, and only your own accounts, oldest first, with their balances.
+6. **Tests.** Fix the existing tests, then write `account/OwnershipApiTest` with five tests: someone else cannot see your account, its history or its cards; cannot move your money (and your balance is unchanged); you **can** send money to someone else's account; someone else cannot freeze your card; `/api/me` lists only your own accounts.
+7. **Check that the tests bite.** Remove the ownership check from `transfer`, run the tests, and make sure one fails. Put it back.
+8. Add a sign-in request to `http/paydeck.http` and send the token with the other requests. Commit.
+
+<Aside type="note" title="Why 404 and not 403?">
+`403 Forbidden` would be honest ("this exists, but it is not yours"), and that is exactly the problem: it would let anyone check whether an account or card ID exists. Answering `404`, the same as for an ID that was never used, tells a stranger nothing. GitHub does the same for private repositories. Module 30 uses `403` where the person is allowed to know the thing exists, such as a cardholder trying to change a limit on a card they hold.
+</Aside>
+
+<Exercise title="Build it">
+Do the eight tasks. Restart the API after the migration and try it with two people, Asha and Bea, using `curl` before writing the tests.
+
+<Fragment slot="hint">For `CurrentUser`, write a class that implements both `HandlerMethodArgumentResolver` (it says "I can fill parameters of type `CurrentUser`" and fills them) and `WebMvcConfigurer` (whose `addArgumentResolvers` registers it), and mark it `@Configuration`. Inside, `SecurityContextHolder.getContext().getAuthentication().getPrincipal()` is the checked `Jwt`. For `/api/me`, a derived query `findByOwnerUserIdOrderByCreatedAt` (lesson 23.2) gives the accounts.</Fragment>
+<Fragment slot="hint2">`MoneyControllerTest` now needs `OwnedAccounts` instead of `AccountRepository` as a `@MockitoBean`. Its `jwt()` also needs a subject that is a UUID, because `CurrentUser` reads one: `jwt().jwt(token -> token.subject(UUID.randomUUID().toString()))`. In `ApiTestSupport.openAccount`, send only the currency.</Fragment>
+<Fragment slot="solution">
+
+### The migration and the entity
+
+`src/main/resources/db/migration/V4__accounts_belong_to_users.sql`:
+
+```sql
+-- Every new customer account belongs to the user who opened it. Accounts
+-- opened before sign-in existed (and the SYSTEM accounts) have no owner,
+-- so nobody can see them any more.
+ALTER TABLE accounts ADD COLUMN owner_user_id UUID REFERENCES users (id);
+CREATE INDEX accounts_owner_user_id ON accounts (owner_user_id);
+```
+
+The index makes "find Asha's accounts" fast when there are millions of accounts. `REFERENCES users (id)` is a foreign key (lesson 20.2): an account cannot point at a user who does not exist.
+
+In `Account.java`:
+
+```java
+    /** The user who opened the account. Empty for system accounts. */
+    private UUID ownerUserId;
+```
+
+```java
+    public static Account openCustomerAccount(UUID ownerUserId, String ownerName, SupportedCurrency currency) {
+        Account account = new Account();
+        account.ownerUserId = ownerUserId;
+        account.ownerName = ownerName;
+```
+
+```java
+    public UUID getOwnerUserId() {
+        return ownerUserId;
+    }
+```
+
+And in `AccountRepository`:
+
+```java
+    List<Account> findByOwnerUserIdOrderByCreatedAt(UUID ownerUserId);
+```
+
+### Who is calling
+
+`src/main/java/dev/paydeck/api/auth/CurrentUser.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import java.util.UUID;
+
+import org.springframework.security.oauth2.jwt.Jwt;
+
+/**
+ * Who is making this request, read from their access token. Controllers ask
+ * for it as a parameter; see {@link CurrentUserArgumentResolver}.
+ */
+public record CurrentUser(UUID id) {
+
+    public static CurrentUser from(Jwt jwt) {
+        return new CurrentUser(UUID.fromString(jwt.getSubject()));
+    }
+}
+```
+
+`src/main/java/dev/paydeck/api/auth/CurrentUserArgumentResolver.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import java.util.List;
+
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.MethodParameter;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.web.bind.support.WebDataBinderFactory;
+import org.springframework.web.context.request.NativeWebRequest;
+import org.springframework.web.method.support.HandlerMethodArgumentResolver;
+import org.springframework.web.method.support.ModelAndViewContainer;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+
+/** Lets any controller method take a {@link CurrentUser} parameter. */
+@Configuration
+public class CurrentUserArgumentResolver implements HandlerMethodArgumentResolver, WebMvcConfigurer {
+
+    @Override
+    public boolean supportsParameter(MethodParameter parameter) {
+        return parameter.getParameterType() == CurrentUser.class;
+    }
+
+    @Override
+    public CurrentUser resolveArgument(MethodParameter parameter, ModelAndViewContainer container,
+                                       NativeWebRequest request, WebDataBinderFactory binderFactory) {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication != null && authentication.getPrincipal() instanceof Jwt jwt) {
+            return CurrentUser.from(jwt);
+        }
+        // SecurityConfig only lets signed-in requests reach these controllers.
+        throw new IllegalStateException("No signed-in user for " + parameter.getMethod());
+    }
+
+    @Override
+    public void addArgumentResolvers(List<HandlerMethodArgumentResolver> resolvers) {
+        resolvers.add(this);
+    }
+}
+```
+
+Spring MVC fills controller parameters with **argument resolvers**: one reads `@PathVariable`s, another `@RequestBody`, and so on. This one adds `CurrentUser` to the list. The **security context** is where Spring Security keeps the checked token for the current request. `instanceof Jwt jwt` checks that the principal is a `Jwt` and, if it is, gives it to you as a variable called `jwt`, in one go.
+
+Why not keep `@AuthenticationPrincipal Jwt`? Because then every controller would parse `sub` itself and depend on the token format. Module 29 adds a second way to sign in and Module 30 adds roles; with `CurrentUser`, those changes happen in one place.
+
+### The ownership check
+
+`src/main/java/dev/paydeck/api/account/OwnedAccounts.java`:
+
+```java
+package dev.paydeck.api.account;
+
+import java.util.UUID;
+
+import dev.paydeck.api.auth.CurrentUser;
+import dev.paydeck.api.common.NotFoundException;
+import org.springframework.stereotype.Component;
+
+/**
+ * The one place that decides whether someone may use an account: only its
+ * owner may. Everyone else gets "not found", so they cannot even tell that
+ * the account exists.
+ */
+@Component
+public class OwnedAccounts {
+
+    private final AccountRepository accounts;
+
+    public OwnedAccounts(AccountRepository accounts) {
+        this.accounts = accounts;
+    }
+
+    public Account require(UUID accountId, CurrentUser user) {
+        return accounts.findById(accountId)
+                .filter(account -> account.getKind() == AccountKind.CUSTOMER)
+                .filter(account -> user.id().equals(account.getOwnerUserId()))
+                .orElseThrow(() -> new NotFoundException("Account", accountId));
+    }
+}
+```
+
+It replaces the three copies of "find the account, check it is a customer account" that the controllers had. One rule in one place is one rule to get right, and one place for Module 30 to extend.
+
+### The controllers
+
+`AccountController`:
+
+```java
+    /** The account is opened for whoever is signed in, under their name. */
+    public record OpenAccountRequest(@NotNull SupportedCurrency currency) {
+    }
+```
+
+```java
+    private final AccountRepository accounts;
+    private final OwnedAccounts owned;
+    private final UserRepository users;
+    private final LedgerService ledger;
+
+    public AccountController(AccountRepository accounts, OwnedAccounts owned, UserRepository users,
+                             LedgerService ledger) {
+        this.accounts = accounts;
+        this.owned = owned;
+        this.users = users;
+        this.ledger = ledger;
+    }
+
+    @PostMapping
+    @Transactional
+    public ResponseEntity<AccountResponse> open(CurrentUser user, @Valid @RequestBody OpenAccountRequest request) {
+        String name = users.findById(user.id()).orElseThrow().getDisplayName();
+        Account account = accounts.save(Account.openCustomerAccount(user.id(), name, request.currency()));
+        return ResponseEntity.created(URI.create("/api/accounts/" + account.getId()))
+                .body(toResponse(account, 0));
+    }
+
+    @GetMapping("/{id}")
+    @Transactional(readOnly = true)
+    public AccountResponse get(CurrentUser user, @PathVariable UUID id) {
+        return toResponse(owned.require(id, user), ledger.balanceOf(id));
+    }
+
+    public static AccountResponse toResponse(Account account, long balanceCents) {
+```
+
+`toResponse` becomes `public` so that `/api/me` can use it.
+
+`MoneyController` takes `OwnedAccounts` instead of `AccountRepository`:
+
+```java
+    @PostMapping("/api/accounts/{accountId}/top-ups")
+    public ResponseEntity<TransactionResponse> topUp(
+            CurrentUser user,
+            @PathVariable UUID accountId,
+            @RequestHeader("Idempotency-Key") @Size(min = 1, max = 100) String idempotencyKey,
+            @Valid @RequestBody TopUpRequest request) {
+        owned.require(accountId, user);
+        MovementResult result = money.topUp(accountId, request.amountCents(), request.description().strip(),
+                idempotencyKey);
+        return respond(result, request.amountCents());
+    }
+
+    @PostMapping("/api/transfers")
+    public ResponseEntity<TransactionResponse> transfer(
+            CurrentUser user,
+            @RequestHeader("Idempotency-Key") @Size(min = 1, max = 100) String idempotencyKey,
+            @Valid @RequestBody TransferRequest request) {
+        // You may only send money from your own account. Anyone's account can receive it.
+        owned.require(request.fromAccountId(), user);
+        MovementResult result = money.transfer(request.fromAccountId(), request.toAccountId(),
+                request.amountCents(), request.description().strip(), idempotencyKey);
+        return respond(result, request.amountCents());
+    }
+
+    @GetMapping("/api/accounts/{accountId}/transactions")
+    public List<AccountActivity> history(CurrentUser user, @PathVariable UUID accountId) {
+        owned.require(accountId, user);
+        return ledger.activityOf(accountId);
+    }
+```
+
+`CardController` also takes `OwnedAccounts` instead of `AccountRepository`. `issue` and `list` call `owned.require(accountId, user)` where they used to call `requireCustomerAccount` (which is deleted), every method gets a `CurrentUser user` parameter, and `find` checks the card's account:
+
+```java
+    /** A card is yours if its account is yours. Anyone else's card is "not found". */
+    private Card find(UUID id, CurrentUser user) {
+        Card card = cards.findById(id).orElseThrow(() -> new NotFoundException("Card", id));
+        try {
+            owned.require(card.getAccountId(), user);
+        } catch (NotFoundException notYours) {
+            throw new NotFoundException("Card", id);
+        }
+        return card;
+    }
+```
+
+Catching the account's "not found" and throwing the card's keeps the message about the thing that was asked for. Every `find(id)` becomes `find(id, user)`.
+
+### Who am I, and what is mine?
+
+`MeController` now answers with your accounts too:
+
+```java
+/** "Who am I, and what is mine?" The app calls this right after signing in. */
+@RestController
+public class MeController {
+
+    public record MeResponse(UserResponse user, List<AccountResponse> accounts) {
+    }
+
+    private final UserRepository users;
+    private final AccountRepository accounts;
+    private final LedgerService ledger;
+
+    public MeController(UserRepository users, AccountRepository accounts, LedgerService ledger) {
+        this.users = users;
+        this.accounts = accounts;
+        this.ledger = ledger;
+    }
+
+    @GetMapping("/api/me")
+    @Transactional(readOnly = true)
+    public MeResponse me(CurrentUser current) {
+        UserResponse user = UserResponse.of(users.findById(current.id()).orElseThrow());
+        List<AccountResponse> owned = accounts.findByOwnerUserIdOrderByCreatedAt(current.id()).stream()
+                .map(account -> AccountController.toResponse(account, ledger.balanceOf(account.getId())))
+                .toList();
+        return new MeResponse(user, owned);
+    }
+}
+```
+
+This is how the app will find out which account to show after signing in, instead of asking the person to paste an ID.
+
+### Try it with two people
+
+Restart; Flyway applies `4 - accounts belong to users`. Sign Bea up too (`POST /api/auth/register` with `bea@example.com`), and keep both tokens:
+
+```sh
+ASHA=$(curl -s -X POST localhost:8080/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"email": "asha@example.com", "password": "correct horse battery"}' | jq -r .accessToken)
+BEA=$(curl -s -X POST localhost:8080/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"email": "bea@example.com", "password": "correct horse battery"}' | jq -r .accessToken)
+```
+
+Asha opens an account:
+
+```sh
+curl -i -X POST localhost:8080/api/accounts -H "Authorization: Bearer $ASHA" \
+  -H 'Content-Type: application/json' -d '{"currency": "USD"}'
+```
+
+```
+HTTP/1.1 201
+Location: /api/accounts/20f0ebd9-5f0d-4685-b788-d6c386e6ac85
+Content-Type: application/json
+
+{"id":"20f0ebd9-5f0d-4685-b788-d6c386e6ac85","ownerName":"Asha Rao","currency":"USD","balanceCents":0,"createdAt":"2026-10-22T04:12:17.778063Z"}
+```
+
+The name came from her sign-up. Her `/api/me`:
+
+```json
+{"user":{"id":"538436cd-19d2-43a4-b803-f91e16867977","email":"asha@example.com","displayName":"Asha Rao"},"accounts":[{"id":"20f0ebd9-5f0d-4685-b788-d6c386e6ac85","ownerName":"Asha Rao","currency":"USD","balanceCents":0,"createdAt":"2026-10-22T04:12:17.778063Z"}]}
+```
+
+Bea asks for Asha's account:
+
+```sh
+curl -i localhost:8080/api/accounts/20f0ebd9-5f0d-4685-b788-d6c386e6ac85 -H "Authorization: Bearer $BEA"
+```
+
+```
+HTTP/1.1 404
+Content-Type: application/problem+json
+
+{"detail":"Account 20f0ebd9-5f0d-4685-b788-d6c386e6ac85 was not found","instance":"/api/accounts/20f0ebd9-5f0d-4685-b788-d6c386e6ac85","status":404,"title":"Not found"}
+```
+
+Exactly what an ID that never existed gets. Bea's `/api/me` has `"accounts":[]`. And the accounts you opened in Parts 6 and 7, before anyone could sign in, have no owner, so they answer `404` to everyone now. That is fine: they were practice data.
+
+### The tests
+
+In `ApiTestSupport.openAccount`, send only the currency:
+
+```java
+                        .content("""
+                                {"currency": "%s"}
+                                """.formatted(currency)))
+```
+
+In `AuthApiTest`, the user is now inside `user`: `jsonPath("$.user.email")` and `jsonPath("$.user.displayName")`.
+
+In `MoneyControllerTest`, mock `OwnedAccounts` instead of `AccountRepository`, and give the made-up token a UUID subject:
+
+```java
+    @MockitoBean
+    OwnedAccounts owned;
+```
+
+```java
+                .with(jwt().jwt(token -> token.subject(UUID.randomUUID().toString())))
+```
+
+A Mockito mock's `require` returns `null` and throws nothing, so the controller carries on as before: this test is still only about HTTP.
+
+`src/test/java/dev/paydeck/api/account/OwnershipApiTest.java`:
+
+```java
+package dev.paydeck.api.account;
+
+import static org.hamcrest.Matchers.hasSize;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import java.util.UUID;
+
+import com.jayway.jsonpath.JsonPath;
+import dev.paydeck.api.ApiTestSupport;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.ResultActions;
+
+/** Bea is signed in too, but Asha's money and cards are none of her business. */
+class OwnershipApiTest extends ApiTestSupport {
+
+    @Test
+    void someoneElseCannotSeeYourAccountOrItsHistory() throws Exception {
+        UUID ashas = openAccount("Asha", "USD");
+        TestUser bea = register("Bea");
+
+        mvc.perform(get("/api/accounts/{id}", ashas).with(as(bea))).andExpect(status().isNotFound());
+        mvc.perform(get("/api/accounts/{id}/transactions", ashas).with(as(bea))).andExpect(status().isNotFound());
+        mvc.perform(get("/api/accounts/{id}/cards", ashas).with(as(bea))).andExpect(status().isNotFound());
+    }
+
+    @Test
+    void someoneElseCannotMoveYourMoney() throws Exception {
+        UUID ashas = openAccount("Asha", "USD");
+        UUID beas = openAccount("Bea", "USD");
+        topUp(ashas, 10_000);
+
+        transfer(beas, ashas, beas, 5_000).andExpect(status().isNotFound());
+
+        mvc.perform(get("/api/accounts/{id}", ashas).with(asOwnerOf(ashas)))
+                .andExpect(jsonPath("$.balanceCents").value(10_000));
+    }
+
+    @Test
+    void youCanSendMoneyToSomeoneElsesAccount() throws Exception {
+        UUID ashas = openAccount("Asha", "USD");
+        UUID beas = openAccount("Bea", "USD");
+        topUp(ashas, 10_000);
+
+        transfer(ashas, ashas, beas, 2_500).andExpect(status().isCreated());
+
+        mvc.perform(get("/api/accounts/{id}", beas).with(asOwnerOf(beas)))
+                .andExpect(jsonPath("$.balanceCents").value(2_500));
+    }
+
+    @Test
+    void someoneElseCannotFreezeYourCard() throws Exception {
+        UUID ashas = openAccount("Asha", "USD");
+        String issued = mvc.perform(post("/api/accounts/{id}/cards", ashas).with(asOwnerOf(ashas))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"nickname": "Everyday"}
+                                """))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        String card = JsonPath.read(issued, "$.id");
+
+        mvc.perform(post("/api/cards/{id}/freeze", card).with(as(register("Bea"))))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void meListsOnlyYourOwnAccounts() throws Exception {
+        UUID ashas = openAccount("Asha", "USD");
+        openAccount("Bea", "EUR");
+
+        mvc.perform(get("/api/me").with(asOwnerOf(ashas)))
+                .andExpect(jsonPath("$.user.displayName").value("Asha"))
+                .andExpect(jsonPath("$.accounts", hasSize(1)))
+                .andExpect(jsonPath("$.accounts[0].id").value(ashas.toString()));
+    }
+
+    /** Sends a transfer as the owner of {@code sender}. */
+    private ResultActions transfer(UUID sender, UUID from, UUID to, long amountCents) throws Exception {
+        return mvc.perform(post("/api/transfers").with(asOwnerOf(sender))
+                .header("Idempotency-Key", UUID.randomUUID().toString())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"fromAccountId": "%s", "toAccountId": "%s", "amountCents": %d, "description": "Test"}
+                        """.formatted(from, to, amountCents)));
+    }
+}
+```
+
+`./mvnw test`:
+
+```
+[INFO] Tests run: 42, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
+With the `owned.require(request.fromAccountId(), user)` line removed from `transfer`:
+
+```
+[ERROR] OwnershipApiTest.someoneElseCannotMoveYourMoney:36 Status expected:<404> but was:<201>
+```
+
+Without that one line, Bea could empty Asha's account. The test notices; put the line back.
+
+### The try-it file
+
+In `http/paydeck.http`, sign in first and use the token everywhere. REST Client can put part of a response into a variable:
+
+```http
+### Sign in
+# @name login
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "asha@example.com",
+  "password": "correct horse battery"
+}
+
+###
+@token = {{login.response.body.$.accessToken}}
+
+### Open an account
+# @name account
+POST {{baseUrl}}/api/accounts
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "currency": "USD"
+}
+```
+
+Add `Authorization: Bearer {{token}}` to every other request in the file. Send **Sign in** again whenever you get a `401`: the token lasts 15 minutes.
+
+### What to notice
+
+- **Authentication** (lesson 27.5) checks the token; **authorization** (this project) checks what the token's owner may touch. Both are needed: before this project, every signed-in stranger was trusted with everything.
+- **One check, used everywhere.** `OwnedAccounts` is the only code that knows the rule. A new endpoint that forgets to call it is the classic bug (OWASP's number one, "broken access control", Module 30), which is why `OwnershipApiTest` tests every kind of request.
+- **The client cannot choose its owner.** The owner comes from the token, never from the request body. If the body had an `ownerUserId`, anyone could open an account in someone else's name.
+</Fragment>
+</Exercise>
+
+<Aside type="caution" title="The Part 7 app is locked out for now">
+PayDeck on your Mac and the emulator now see `401` for every request, and their screens show "Sign in to continue." with **Try again**. That is correct: they have no way to sign in yet. Module 28 adds the sign-in screen, keeps the token safely on the device, and asks `/api/me` for the account, so the "paste an account ID" step disappears.
+</Aside>
+
+<MarkComplete />

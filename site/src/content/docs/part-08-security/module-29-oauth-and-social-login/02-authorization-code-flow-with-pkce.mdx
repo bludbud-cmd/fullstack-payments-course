@@ -1,0 +1,545 @@
+---
+title: "29.2 Authorization code flow with PKCE"
+description: "Protect the last hop of a sign-in, from the API back to the app, with PKCE: the app keeps a secret verifier, sends only its hash, and a one-time login code is worthless to anyone who intercepts it without the verifier."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson the API can hand out a **one-time login code** and trade it for PayDeck tokens at `POST /api/auth/token`, but only for the app that holds the matching **PKCE code verifier**. The app can make verifiers and challenges. Lesson 29.3 connects both ends to Google.
+
+## Why it matters
+
+At the end of "Sign in with Google", the PayDeck API has to tell the app "this is Chen; here is how to get her tokens". It does that by sending the browser to a link only PayDeck opens: `paydeck://auth?code=...`. But "only PayDeck opens" is a hope, not a guarantee. On Android, any installed app can say it handles `paydeck://` links too, and the system may hand the link to it. Whatever travels in that link must be useless to an app that is not the one that started the sign-in.
+
+## The idea
+
+### PKCE in one picture
+
+**PKCE** (Proof Key for Code Exchange, said "pixie") is a small addition to the code flow from lesson 29.1:
+
+1. Before opening the browser, the app makes a random secret, the **code verifier**: 32 random bytes written as 43 characters. It keeps it in memory.
+2. It computes the **code challenge**: the SHA-256 hash of the verifier, in base64url. It sends only the challenge, in the address it opens.
+3. The API remembers the challenge with the sign-in. When it later creates a login code, it stores the challenge with it.
+4. The code comes back to the app in the `paydeck://` link.
+5. The app sends the code **and the verifier** to `POST /api/auth/token`. The API hashes the verifier and compares the result with the stored challenge.
+
+An app that intercepts the link in step 4 has the code but not the verifier, which never left the real app. A hash cannot be turned back into what was hashed (lesson 27.1), so the challenge it may also have seen does not help.
+
+### Why both PKCE and a code?
+
+The code is a reference to "Chen has just signed in", stored in the database. It is:
+
+- **random** (256 bits, like refresh tokens), so it cannot be guessed;
+- **stored as a hash**, like refresh tokens, so a database leak does not leak usable codes;
+- **short-lived**: two minutes, enough to come back from the browser;
+- **single-use**, and a **wrong verifier uses it up too**, so an attacker gets no second guess.
+
+PKCE is the same mechanism Google offers to apps that talk to it directly (you saw `code_challenge_methods_supported` in its discovery document). PayDeck uses it for its own hop, from API to app.
+
+### base64url
+
+Base64 turns bytes into text using 64 characters: `A`–`Z`, `a`–`z`, `0`–`9`, `+` and `/`, with `=` at the end as padding. `+`, `/` and `=` mean something in web addresses, so **base64url** uses `-` and `_` instead and drops the padding. Java has it built in (`Base64.getUrlEncoder().withoutPadding()`), which you already use for refresh tokens. In the app you write it yourself, in a dozen lines.
+
+## Worked example: the API
+
+### The table
+
+`src/main/resources/db/migration/V6__create_login_codes.sql`:
+
+```sql
+-- One-time codes the API gives the app after "Sign in with Google". A code
+-- is useless without the PKCE code verifier that only the app knows; we keep
+-- the code's hash and the verifier's hash (the code challenge).
+CREATE TABLE login_codes (
+    id              UUID PRIMARY KEY,
+    user_id         UUID         NOT NULL REFERENCES users (id),
+    code_hash       VARCHAR(64)  NOT NULL UNIQUE,
+    code_challenge  VARCHAR(128) NOT NULL,
+    expires_at      TIMESTAMPTZ  NOT NULL,
+    used_at         TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ  NOT NULL
+);
+```
+
+### Two more helpers
+
+In `Secrets.java`, replace `sha256Hex` with these four methods. `sha256Hex` keeps working as before; the hashing itself moves into a private `sha256` that both public methods share:
+
+```java
+    /** What we store instead of a token: if the database leaks, the hashes are useless. */
+    static String sha256Hex(String value) {
+        return HexFormat.of().formatHex(sha256(value));
+    }
+
+    /** The PKCE "S256" code challenge for a code verifier: base64url(SHA-256(verifier)). */
+    static String pkceChallenge(String codeVerifier) {
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(sha256(codeVerifier));
+    }
+
+    /** Compares two secrets without revealing, through timing, how many characters matched. */
+    static boolean constantTimeEquals(String a, String b) {
+        return MessageDigest.isEqual(a.getBytes(StandardCharsets.UTF_8), b.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static byte[] sha256(String value) {
+        try {
+            return MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("Every Java runtime has SHA-256", e);
+        }
+    }
+```
+
+`String.equals` stops at the first character that differs, so it answers slightly faster the earlier the difference is. With enough tries, someone could measure that and work out a secret one character at a time. `MessageDigest.isEqual` always looks at every byte. The same idea as the dummy hash in lesson 27.4: the time an answer takes must not give anything away.
+
+### The entity and repository
+
+`src/main/java/dev/paydeck/api/auth/LoginCode.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import java.time.Instant;
+import java.util.UUID;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+
+/**
+ * A one-time code the API gives the app after "Sign in with Google". It is
+ * only worth anything together with the PKCE code verifier the app kept.
+ */
+@Entity
+@Table(name = "login_codes")
+public class LoginCode {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private UUID id;
+
+    @Column(nullable = false)
+    private UUID userId;
+
+    @Column(nullable = false)
+    private String codeHash;
+
+    @Column(nullable = false)
+    private String codeChallenge;
+
+    @Column(nullable = false)
+    private Instant expiresAt;
+
+    private Instant usedAt;
+
+    @Column(nullable = false)
+    private Instant createdAt;
+
+    protected LoginCode() {
+        // For JPA
+    }
+
+    public LoginCode(UUID userId, String codeHash, String codeChallenge, Instant expiresAt) {
+        this.userId = userId;
+        this.codeHash = codeHash;
+        this.codeChallenge = codeChallenge;
+        this.expiresAt = expiresAt;
+        this.createdAt = Instant.now();
+    }
+
+    public boolean isUsable() {
+        return usedAt == null && Instant.now().isBefore(expiresAt);
+    }
+
+    public void markUsed() {
+        usedAt = Instant.now();
+    }
+
+    public UUID getUserId() {
+        return userId;
+    }
+
+    public String getCodeChallenge() {
+        return codeChallenge;
+    }
+}
+```
+
+`src/main/java/dev/paydeck/api/auth/LoginCodeRepository.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import java.util.Optional;
+import java.util.UUID;
+
+import jakarta.persistence.LockModeType;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Query;
+
+public interface LoginCodeRepository extends JpaRepository<LoginCode, UUID> {
+
+    /** Locks the row, so a code cannot be used twice at the same moment. */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select c from LoginCode c where c.codeHash = :codeHash")
+    Optional<LoginCode> findByCodeHashForUpdate(String codeHash);
+}
+```
+
+The same lock as for refresh tokens (lesson 28.4), for the same reason.
+
+### Making and using codes
+
+In `AuthService`, add the repository to the fields and the constructor:
+
+```java
+    private final UserRepository users;
+    private final RefreshTokenRepository refreshTokens;
+    private final LoginCodeRepository loginCodes;
+    private final PasswordEncoder passwordEncoder;
+```
+
+```java
+    public AuthService(UserRepository users, RefreshTokenRepository refreshTokens, LoginCodeRepository loginCodes,
+                       PasswordEncoder passwordEncoder) {
+        this.users = users;
+        this.refreshTokens = refreshTokens;
+        this.loginCodes = loginCodes;
+        this.passwordEncoder = passwordEncoder;
+        this.dummyHash = passwordEncoder.encode("not-a-real-password");
+    }
+```
+
+a constant at the top of the class (with `import java.time.Duration;` and `import java.time.Instant;`):
+
+```java
+    /** Long enough to come back from the browser, too short to be worth stealing. */
+    static final Duration LOGIN_CODE_LIFETIME = Duration.ofMinutes(2);
+```
+
+and, above `sessionEnded`:
+
+```java
+    /** A one-time code for this user, which only works with the verifier behind {@code codeChallenge}. */
+    @Transactional
+    public String createLoginCode(UUID userId, String codeChallenge) {
+        String code = Secrets.randomToken();
+        loginCodes.save(new LoginCode(userId, Secrets.sha256Hex(code), codeChallenge,
+                Instant.now().plus(LOGIN_CODE_LIFETIME)));
+        return code;
+    }
+
+    /**
+     * Uses up a login code and returns whose it was, if the code verifier
+     * matches the challenge it was created with. A wrong verifier uses the
+     * code up too, so nobody gets a second guess.
+     */
+    @Transactional(noRollbackFor = InvalidCredentialsException.class)
+    public User redeemLoginCode(String code, String codeVerifier) {
+        LoginCode stored = loginCodes.findByCodeHashForUpdate(Secrets.sha256Hex(code))
+                .filter(LoginCode::isUsable)
+                .orElseThrow(AuthService::linkExpired);
+        stored.markUsed();
+        if (!Secrets.constantTimeEquals(Secrets.pkceChallenge(codeVerifier), stored.getCodeChallenge())) {
+            throw linkExpired();
+        }
+        return users.findById(stored.getUserId()).orElseThrow();
+    }
+
+    private static InvalidCredentialsException linkExpired() {
+        return new InvalidCredentialsException("This sign-in link has expired. Please try again.");
+    }
+```
+
+- **`.filter(LoginCode::isUsable)`** turns a used or expired code into "not found". All three cases get the same answer, so the answer does not tell anyone which codes exist.
+- **`markUsed()` comes before the check**, and `noRollbackFor` (lesson 28.4) keeps that change when the exception is thrown.
+- The message is about a "link" because that is what the person experienced: they tapped through Google and came back.
+
+### The endpoint
+
+In `AuthController`, a request type next to the others:
+
+```java
+    /** The one-time code from "Sign in with Google", and the PKCE code verifier only the app knows. */
+    public record CodeExchangeRequest(@NotBlank String code,
+                                      @NotBlank @Size(min = 43, max = 128) String codeVerifier) {
+    }
+```
+
+and the endpoint, above `signedIn`:
+
+```java
+    /** The last step of "Sign in with Google": trades a one-time code and its verifier for tokens. */
+    @PostMapping("/token")
+    public AuthResponse token(@Valid @RequestBody CodeExchangeRequest request) {
+        return signedIn(auth.redeemLoginCode(request.code(), request.codeVerifier()));
+    }
+```
+
+The PKCE standard allows verifiers of 43 to 128 characters; anything shorter is too easy to guess. The answer is the same `AuthResponse` as signing in with a password, so everything after it works the same.
+
+### Tests
+
+The PKCE standard (RFC 7636) contains a worked example: a verifier and the challenge it must give. If your code produces the same challenge, it is right. `src/test/java/dev/paydeck/api/auth/LoginCodeApiTest.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import dev.paydeck.api.ApiTestSupport;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.ResultActions;
+
+class LoginCodeApiTest extends ApiTestSupport {
+
+    // The example from the PKCE standard, RFC 7636, Appendix B.
+    private static final String VERIFIER = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    private static final String CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+    @Autowired
+    AuthService auth;
+
+    @Test
+    void theChallengeIsComputedAsTheStandardSays() {
+        assertThat(Secrets.pkceChallenge(VERIFIER)).isEqualTo(CHALLENGE);
+    }
+
+    @Test
+    void aCodeAndItsVerifierGiveTokensOnce() throws Exception {
+        TestUser asha = register("Asha");
+        String code = auth.createLoginCode(asha.id(), CHALLENGE);
+
+        exchange(code, VERIFIER)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.user.email").value(asha.email()))
+                .andExpect(jsonPath("$.refreshToken").isString());
+
+        exchange(code, VERIFIER)
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.detail").value("This sign-in link has expired. Please try again."));
+    }
+
+    @Test
+    void aStolenCodeIsUselessWithoutTheVerifier() throws Exception {
+        TestUser asha = register("Asha");
+        String code = auth.createLoginCode(asha.id(), CHALLENGE);
+
+        exchange(code, "an-attacker-who-saw-the-code-but-not-the-verifier-0123")
+                .andExpect(status().isUnauthorized());
+
+        // The wrong guess used the code up: the real app cannot use it either.
+        exchange(code, VERIFIER).andExpect(status().isUnauthorized());
+    }
+
+    private ResultActions exchange(String code, String verifier) throws Exception {
+        return mvc.perform(post("/api/auth/token")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"code": "%s", "codeVerifier": "%s"}
+                        """.formatted(code, verifier)));
+    }
+}
+```
+
+The tests create codes by calling `AuthService` directly, because nothing hands them out yet; lesson 29.3 does that after Google. `./mvnw test`: 50 tests, all green.
+
+You can check the standard's example in the terminal too. `openssl dgst -sha256 -binary` hashes, `base64` encodes, and `tr` turns base64 into base64url:
+
+```sh
+printf %s "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk" | openssl dgst -sha256 -binary | base64 | tr '+/' '-_' | tr -d '='
+```
+
+```
+E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM
+```
+
+## Worked example: the app
+
+### Two libraries
+
+```sh
+npm install js-sha256@0.11.1 react-native-get-random-values@2.0.0
+cd macos && pod install && cd ..
+```
+
+- **js-sha256** computes SHA-256 in plain JavaScript.
+- **react-native-get-random-values** gives JavaScript `crypto.getRandomValues`, backed by the operating system's secure random number generator. `Math.random()` is **not** good enough for secrets: it is designed to be fast, not unpredictable.
+
+The second one contains native code, so rebuild both apps (lesson 28.2).
+
+### Verifier and challenge
+
+`src/auth/pkce.ts`:
+
+```ts
+// Gives Hermes crypto.getRandomValues, backed by the phone's or Mac's secure random generator.
+import 'react-native-get-random-values';
+import { sha256 } from 'js-sha256';
+
+// Added by react-native-get-random-values; TypeScript does not know about it.
+declare const crypto: { getRandomValues<T extends Uint8Array>(array: T): T };
+
+const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+/** Base64 with URL-safe characters and no padding, as PKCE requires. */
+export function base64Url(bytes: Uint8Array): string {
+  let out = '';
+  // Every 3 bytes (24 bits) become 4 characters of 6 bits each.
+  for (let i = 0; i < bytes.length; i += 3) {
+    const n = (bytes[i] << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0);
+    // The last group may have only 1 or 2 bytes: 2 or 3 characters, no '=' padding.
+    const chars = Math.min(4, Math.ceil(((bytes.length - i) * 8) / 6));
+    for (let c = 0; c < chars; c++) {
+      out += ALPHABET[(n >> (18 - 6 * c)) & 63];
+    }
+  }
+  return out;
+}
+
+/** A secret only this app knows: 32 random bytes, 43 characters. */
+export function newCodeVerifier(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return base64Url(bytes);
+}
+
+/** What the app sends first: the SHA-256 of the verifier. The verifier itself comes later. */
+export function codeChallenge(verifier: string): string {
+  return base64Url(new Uint8Array(sha256.arrayBuffer(verifier)));
+}
+```
+
+`base64Url` is the only tricky part, and it is pure arithmetic on bits:
+
+- `<<` shifts bits left, `>>` shifts them right, `|` combines them and `& 63` keeps the lowest 6 bits (63 is `111111` in binary).
+- Three bytes, 8 bits each, are packed into one 24-bit number `n`, then read back out 6 bits at a time; each 6-bit value (0 to 63) picks one character of `ALPHABET`.
+- At the end there may be only one or two bytes left, which need two or three characters. That is what `chars` works out.
+
+You do not need to be able to write this from memory. You need to know what it does and to test it against the standard.
+
+### Testing it
+
+The tests run in Node, which already has `crypto.getRandomValues`, so the native library is replaced by an empty module. Add to `jest.setup.js`:
+
+```js
+// Node, which runs the tests, already has crypto.getRandomValues.
+jest.mock('react-native-get-random-values', () => ({}));
+```
+
+`__tests__/pkce.test.ts`:
+
+```ts
+import { base64Url, codeChallenge, newCodeVerifier } from '../src/auth/pkce';
+
+// The example from the PKCE standard, RFC 7636, Appendix B.
+it('computes the challenge as the standard says', () => {
+  expect(codeChallenge('dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk')).toBe(
+    'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM',
+  );
+});
+
+it('makes a different 43-character verifier every time', () => {
+  const a = newCodeVerifier();
+  const b = newCodeVerifier();
+  expect(a).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(a).not.toBe(b);
+});
+
+it('encodes like base64url without padding', () => {
+  expect(base64Url(new Uint8Array([251, 255]))).toBe('-_8');
+});
+```
+
+```sh
+npx jest __tests__/pkce
+```
+
+```
+  ✓ computes the challenge as the standard says
+  ✓ makes a different 43-character verifier every time
+  ✓ encodes like base64url without padding
+
+Tests:       3 passed, 3 total
+```
+
+The last test is chosen so that both special characters appear: the bytes 251 and 255 are `+/8=` in ordinary base64, and `-_8` in base64url.
+
+<Exercise title="Burn after reading">
+In `aStolenCodeIsUselessWithoutTheVerifier`, the real app's correct verifier is refused after an attacker's wrong one. That makes sign-in fail for the real person, which seems unkind. Why is it still the right choice? Then change `redeemLoginCode` to plain `@Transactional` and run `./mvnw test -Dtest=LoginCodeApiTest`. What fails, and what does that mean? Put `noRollbackFor` back.
+
+<Fragment slot="hint">If a wrong verifier did not use the code up, how many guesses would an attacker who intercepted the link get within the code's two minutes? And what does a transaction do with your changes when an exception leaves the method?</Fragment>
+<Fragment slot="solution">
+
+If a wrong verifier left the code usable, an attacker who intercepted the link could keep guessing for two minutes. Guessing a 256-bit verifier is hopeless anyway, but "one attempt per code" means you never have to rely on that: the cost to the real person is tapping "Continue with Google" once more, in an attack that should never happen.
+
+With plain `@Transactional`:
+
+```
+[ERROR]   LoginCodeApiTest.aStolenCodeIsUselessWithoutTheVerifier:52 Status expected:<401> but was:<200>
+```
+
+The exception rolls the transaction back, `markUsed()` is undone, and the code is still usable after the wrong guess: the correct verifier then gets tokens. `noRollbackFor` keeps the "used" mark even though the method ends with an exception.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Math.random() for secrets">
+`Math.random()` is predictable enough that its output can sometimes be reconstructed. Verifiers, tokens and codes come from the system's secure generator: `crypto.getRandomValues` in the app, `SecureRandom` in Java.
+</Aside>
+
+<Aside type="caution" title="Sending the verifier first">
+The browser address carries the **challenge**. If you send the verifier there, anyone who sees the address has everything they need.
+</Aside>
+
+<Aside type="caution" title="Saving the verifier">
+The verifier lives in memory for the minute or so a sign-in takes. Writing it to AsyncStorage gives other code on the device a chance to read it, for no benefit.
+</Aside>
+
+## Recap
+
+- PKCE: the app keeps a random **verifier**, sends its SHA-256 **challenge**, and proves itself later with the verifier.
+- A login code is random, stored as a hash, valid for two minutes, single-use, and burned by a wrong verifier.
+- `POST /api/auth/token` trades a code and verifier for the usual PayDeck tokens.
+- Secrets are compared in constant time and generated with a secure random generator.
+- Test crypto code against the standard's published examples.
+
+<Quiz
+	questions={[
+		{
+			question: 'An app on the phone intercepts paydeck://auth?code=... What else would it need to get tokens?',
+			options: ['Nothing', 'The code verifier, which never left the real app', 'The code challenge'],
+			answer: 1,
+			explanation: 'The API only exchanges a code together with the verifier whose hash matches the stored challenge.',
+		},
+		{
+			question: 'What is the code challenge?',
+			options: ['The verifier, encrypted', 'base64url(SHA-256(verifier))', 'A random number from the API'],
+			answer: 1,
+			explanation: 'A hash cannot be reversed, so sending the challenge reveals nothing about the verifier.',
+		},
+		{
+			question: 'Why compare the challenge with MessageDigest.isEqual instead of equals?',
+			options: ['It is faster', 'It takes the same time however many characters match, so timing gives nothing away', 'equals does not work on strings'],
+			answer: 1,
+			explanation: 'String.equals stops at the first difference. Measured often enough, that difference in time can leak a secret.',
+		},
+	]}
+/>
+
+<MarkComplete />

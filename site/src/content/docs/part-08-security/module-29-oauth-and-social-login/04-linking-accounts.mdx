@@ -1,0 +1,225 @@
+---
+title: "29.4 Linking accounts"
+description: "Let someone who signed up with a password also use Google, by linking on a verified email address only, and see the account takeover that linking on an unverified email would allow."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson, signing in with Google using the same email as an existing PayDeck account opens **that** account, instead of refusing. And PayDeck never trusts an email address that Google has not checked.
+
+## Why it matters
+
+People forget how they signed up. Asha created her PayDeck account with a password months ago; today she taps **Continue with Google** out of habit. Lesson 29.3 told her to go away and use her password. Linking the two is friendlier, but it is also exactly the kind of convenience attackers look for: "sign in as anyone whose email you can claim" is a complete account takeover.
+
+## The idea
+
+### The attack linking must not allow
+
+Imagine PayDeck linked on email alone. Mallory wants Asha's money. She creates an account with some sign-in provider using the address `asha@example.com`. She does not control that mailbox, so the provider cannot confirm it, but it lets her sign up anyway and simply marks the email as **unverified**. Mallory taps **Continue with Google** (or another provider) on PayDeck, the provider says "this is asha@example.com", and PayDeck opens Asha's account for her.
+
+That is why ID tokens carry **`email_verified`** (lesson 29.1). It says: "we have checked that this person controls this mailbox", for example by sending a link to it. PayDeck's rule:
+
+1. **Known Google ID (`sub`)?** That person. The email does not matter at all.
+2. **Otherwise, is the email verified?** If not, refuse. Never link, and never create an account with it either: an unverified email may belong to someone else, who would then find it already taken.
+3. **Verified, and a PayDeck account has that email?** Link: remember this Google ID on that account, and sign them in.
+4. **Verified and new?** Sign them up, as in lesson 29.3.
+
+Google verifies the address of every Gmail account, and most Google accounts on other addresses too, so in practice almost everyone gets through step 2. The rule matters for the rare account that is not, and for every other provider you might add one day.
+
+### After linking
+
+Linking stores the Google ID on the existing user. From then on step 1 finds Asha directly, even if she later changes the email on her Google account. Her password keeps working too: she now has two ways in to the same account, the same wallet and the same cards.
+
+## Worked example
+
+### The service
+
+In `User.java`:
+
+```java
+    /** From now on, this Google account signs in as this user too. */
+    public void linkGoogle(String googleSubject) {
+        this.googleSubject = googleSubject;
+    }
+```
+
+In `AuthService`, replace `signInWithGoogle`:
+
+```java
+    /**
+     * Called once Google has told us who someone is. Finds them by their
+     * Google ID; or, if Google has checked that the email is theirs, by email,
+     * linking Google to their PayDeck account; or signs them up.
+     */
+    @Transactional
+    public User signInWithGoogle(String googleSubject, String email, boolean emailVerified, String name) {
+        Optional<User> known = users.findByGoogleSubject(googleSubject);
+        if (known.isPresent()) {
+            return known.get();
+        }
+        if (!emailVerified) {
+            throw new InvalidCredentialsException("Google has not verified this email address.");
+        }
+        String normalized = User.normalizeEmail(email);
+        Optional<User> sameEmail = users.findByEmail(normalized);
+        if (sameEmail.isPresent()) {
+            sameEmail.get().linkGoogle(googleSubject);
+            return sameEmail.get();
+        }
+        String displayName = name == null || name.isBlank() ? normalized : name;
+        return users.save(User.withGoogle(normalized, displayName, googleSubject));
+    }
+```
+
+The four steps from above, in order. `linkGoogle` changes a managed entity inside a transaction, so dirty checking saves it when the transaction ends (lesson 23.2); there is no `save` call. `ConflictException` is no longer used here.
+
+### The success handler
+
+In `GoogleSignIn.onSuccess`, pass Google's `email_verified` claim and handle the new refusal:
+
+```java
+        OidcUser google = (OidcUser) authentication.getPrincipal();
+        try {
+            User user = auth.signInWithGoogle(google.getSubject(), google.getEmail(),
+                    Boolean.TRUE.equals(google.getEmailVerified()), google.getFullName());
+            String code = auth.createLoginCode(user.getId(), challenge);
+            response.sendRedirect(withParam(redirectUri, "code", code));
+        } catch (InvalidCredentialsException e) {
+            response.sendRedirect(withParam(redirectUri, "error", "email_not_verified"));
+        }
+```
+
+Replace the `ConflictException` import with `dev.paydeck.api.common.InvalidCredentialsException`.
+
+`getEmailVerified()` returns a `Boolean` object, which is `null` if the claim is missing. `Boolean.TRUE.equals(...)` is `true` only for an actual `true`: missing counts as **not verified**. When in doubt, refuse.
+
+### The app
+
+In `AuthContext`'s `finishGoogleSignIn`, the errors are now:
+
+```tsx
+      setGoogleError(
+        params.error === 'email_not_verified'
+          ? 'Google has not verified that email address.'
+          : 'Google sign-in was cancelled.',
+      );
+```
+
+### Tests
+
+In `GoogleSignInTest`, the existing calls get `true` for "verified", for example:
+
+```java
+        User chen = auth.signInWithGoogle(subject, "chen-" + subject + "@gmail.com", true, "Chen Wei");
+```
+
+and `anEmailThatHasAPasswordIsNotTakenOver` (with its `ConflictException` import) is replaced by two tests:
+
+```java
+    @Test
+    void googleIsLinkedToTheAccountWithTheSameVerifiedEmail() throws Exception {
+        TestUser asha = register("Asha");
+        String subject = UUID.randomUUID().toString();
+
+        assertThat(auth.signInWithGoogle(subject, asha.email(), true, "Asha R").getId()).isEqualTo(asha.id());
+        // From now on her Google ID finds her, and her password still works.
+        assertThat(auth.signInWithGoogle(subject, "asha-at-google@gmail.com", true, "Asha R").getId())
+                .isEqualTo(asha.id());
+        assertThat(auth.login(asha.email(), PASSWORD).getId()).isEqualTo(asha.id());
+    }
+
+    @Test
+    void anUnverifiedEmailIsNeverTrusted() throws Exception {
+        TestUser asha = register("Asha");
+
+        // Someone made a Google account with Asha's email but never proved it is theirs.
+        assertThatThrownBy(() -> auth.signInWithGoogle(UUID.randomUUID().toString(), asha.email(), false, "Mallory"))
+                .isInstanceOf(InvalidCredentialsException.class);
+    }
+```
+
+Import `dev.paydeck.api.common.InvalidCredentialsException`. The second check in the first test is the important one: after linking, the email no longer matters, only `sub`. `./mvnw test`: 58 tests, all green.
+
+### Try it
+
+Restart the API with `.env`. On the Mac:
+
+1. Sign up with a **password**, using the email address of your Google test account. Open an account and top it up a little, so you can recognise the wallet.
+2. Sign out. Tap **Continue with Google** and choose the same Google account.
+3. You land in the **same** wallet, with the same balance. You did not see "Welcome to PayDeck", because you are not new.
+4. Sign out and sign in with the password: still the same wallet.
+
+Look at the table (the password-hash column is long, so only ask whether it is there):
+
+```sh
+docker compose exec postgres psql -U paydeck -c \
+  "select email, password_hash is not null as has_password, google_subject from users order by created_at"
+```
+
+Your account now has both `has_password` `t` and a `google_subject`: one person, two ways in. Someone who only ever used Google has `has_password` `f`.
+
+<Exercise title="Remove the check">
+In `signInWithGoogle`, comment out the three lines that refuse an unverified email and run `./mvnw test -Dtest=GoogleSignInTest`. What fails? Then answer: with that check gone, what exactly would Mallory need in order to take over Asha's PayDeck account? Put the check back.
+
+<Fragment slot="hint">Mallory needs a sign-in provider account that claims to be `asha@example.com`. Does she need Asha's password? Her phone? Access to her mailbox?</Fragment>
+<Fragment slot="solution">
+
+```
+[ERROR]   GoogleSignInTest.anUnverifiedEmailIsNeverTrusted:64 
+Expecting code to raise a throwable.
+```
+
+Without the check, Mallory needs nothing of Asha's: no password, no phone, no access to her mailbox. Only an account at the provider that **claims** Asha's address, which an unverified account does. PayDeck would link it to Asha's account and give Mallory her money. The `email_verified` check is what turns "claims this address" into "controls this mailbox".
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Linking on email without email_verified">
+The takeover above. Every provider's documentation for "Sign in with ..." warns about it, and it still happens in real apps.
+</Aside>
+
+<Aside type="caution" title="Matching returning users by email">
+Once linked, use `sub`. If you looked people up by email first, a Google account whose address changed would sign in as whoever has the new address.
+</Aside>
+
+<Aside type="note" title="PayDeck's own emails are not verified">
+Password sign-up (lesson 27.4) never checks that you control the email you type. So someone could sign up with a password using **your** address before you ever use PayDeck; when you later continue with Google, you would be linked into their account, and they would still know its password. Real banks prevent this by sending a code to the address before an account becomes usable. PayDeck keeps sign-up simple for the course, but now you know what that shortcut costs and what the fix is.
+</Aside>
+
+## Recap
+
+- Find Google users by `sub` first; their email only matters the first time.
+- Link to an existing account, or create a new one, only when `email_verified` is `true`; a missing claim counts as `false`.
+- A linked account has two ways in, password and Google, to the same wallet.
+- An unverified email lets anyone claim any address, which makes linking on it an account takeover.
+
+<Quiz
+	questions={[
+		{
+			question: 'Google says: sub 1234 (unknown to PayDeck), email asha@example.com, email_verified false. Asha has a PayDeck account. What should happen?',
+			options: ['Link to Asha\'s account', 'Create a new account with that email', 'Refuse'],
+			answer: 2,
+			explanation: 'An unverified email proves nothing. Linking would hand over Asha\'s account; creating one would take her address.',
+		},
+		{
+			question: 'Asha has linked Google. She changes her Google account\'s email to asha.rao@gmail.com and signs in with Google. What happens?',
+			options: ['She is refused', 'She is found by her Google ID, and gets her own account', 'A new account is created'],
+			answer: 1,
+			explanation: 'sub never changes, and it is checked first.',
+		},
+		{
+			question: 'getEmailVerified() returns null. What should PayDeck assume?',
+			options: ['Verified', 'Not verified', 'Ask the user'],
+			answer: 1,
+			explanation: 'Boolean.TRUE.equals(null) is false. When a security check cannot be answered, the answer is no.',
+		},
+	]}
+/>
+
+<MarkComplete />

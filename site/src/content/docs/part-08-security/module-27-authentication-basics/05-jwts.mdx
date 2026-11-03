@@ -1,0 +1,740 @@
+---
+title: "27.5 JWTs"
+description: "Hand out a signed JSON Web Token when someone signs in, check it on every request with Spring Security's resource server, answer 401 in PayDeck's error format, and see for yourself what a token contains and why it cannot be changed."
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson signing up or in gives back an **access token**, every PayDeck endpoint except signing in refuses requests without a valid one, and `GET /api/me` answers "who am I?" from the token alone.
+
+## Why it matters
+
+In lesson 27.2 you chose tokens over sessions. This lesson makes the choice real. Once it is done, the API is finally closed: nobody can read an account or move money without signing in first. The format you use, **JWT** (JSON Web Token, said "jot"), is the most common token format on the web. Google, Apple, Auth0, AWS and most banks' APIs use it, so reading one is a skill you will use well beyond PayDeck.
+
+## The idea
+
+### What a JWT looks like
+
+A JWT is three pieces of text joined by dots:
+
+```
+eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJwYXlkZWNrIiwibmFtZSI6IkFzaGEgUmFvIiwic3ViIjoiNTM4NDM2Y2Qt...In0.XbNUIL9X0vv3-zoR14ykrrfO7Sb5LNLC3ypoMpnu0Fw
+└──────── header ───────┘ └────────────────────────── payload ──────────────────────────┘ └──────────────── signature ─────────────────┘
+```
+
+- The **header** is a little JSON object that says how the token is signed: `{"alg":"HS256"}`.
+- The **payload** is a JSON object of **claims**: statements about the person. PayDeck's tokens carry five:
+
+  | Claim | Meaning | Example |
+  |---|---|---|
+  | `iss` (issuer) | Who made the token | `"paydeck"` |
+  | `sub` (subject) | Who the token is about: the user's ID | `"538436cd-19d2-..."` |
+  | `iat` (issued at) | When it was made, in seconds since 1 January 1970 | `1792641899` |
+  | `exp` (expires) | When it stops working | `1792642799` (15 minutes later) |
+  | `name` | The display name, so the app can greet you without asking | `"Asha Rao"` |
+
+- The **signature** proves the first two parts were made by PayDeck and have not been changed.
+
+The header and payload are not encrypted. They are only **Base64URL**-encoded: written using letters, digits, `-` and `_`, so the token can travel safely in a header. Anyone can decode them. That is why lesson 27.2 said never to put secrets in a token.
+
+### How the signature works
+
+**HS256** means HMAC with SHA-256. HMAC is like the SHA-256 hashing of lesson 27.1, with a **secret key** mixed in:
+
+```
+signature = HMAC-SHA256(secret, header + "." + payload)
+```
+
+Only someone who knows the secret can compute the right signature. When a token comes back, the server computes the signature again from the header and payload it received. If anyone changed a single character of the payload (say, to put Bea's ID in `sub`), the signatures no longer match and the token is refused. So the server can **trust** what the token says without looking anything up.
+
+The secret is therefore the master key of the whole API: whoever has it can make tokens for anyone. It must be long, random, and kept out of the code on a real server. You will put it in a setting that an environment variable can replace.
+
+### Spring Security's resource server
+
+In OAuth language (Module 29), an API that accepts tokens is a **resource server**. Spring Security has one built in. Switch it on, give it the key, and on every request it:
+
+1. Reads the `Authorization: Bearer <token>` header.
+2. Checks the signature, the issuer and the expiry time.
+3. If all is well, records who is signed in (as a `Jwt` object) for the rest of the request.
+4. If not, refuses with `401` before your controller ever runs.
+
+## Worked example
+
+### Swap the dependency
+
+In `pom.xml`, replace `spring-boot-starter-security` with the resource-server starter, which includes it, and add Spring Security's test helpers:
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-security-oauth2-resource-server</artifactId>
+</dependency>
+```
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-security-test</artifactId>
+    <scope>test</scope>
+</dependency>
+```
+
+### The secret
+
+Add to `application.yml`, under `paydeck:`:
+
+```yaml
+  auth:
+    # Signs access tokens. Anyone who knows it can sign in as anyone, so set a
+    # long random JWT_SECRET on a real server. This default is for your own Mac only.
+    jwt-secret: ${JWT_SECRET:change-me-this-is-only-for-local-development}
+```
+
+`${JWT_SECRET:...}` means "the `JWT_SECRET` environment variable if there is one, otherwise the text after the colon". Part 10 sets a real one on the server.
+
+A record reads the setting, as `paydeck.environment` did in lesson 21.4. `src/main/java/dev/paydeck/api/auth/AuthProperties.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+
+/** The {@code paydeck.auth.*} settings from application.yml. */
+@ConfigurationProperties("paydeck.auth")
+public record AuthProperties(String jwtSecret) {
+}
+```
+
+### Making tokens
+
+`src/main/java/dev/paydeck/api/auth/TokenService.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import java.time.Duration;
+import java.time.Instant;
+
+import org.springframework.security.oauth2.jose.jws.MacAlgorithm;
+import org.springframework.security.oauth2.jwt.JwsHeader;
+import org.springframework.security.oauth2.jwt.JwtClaimsSet;
+import org.springframework.security.oauth2.jwt.JwtEncoder;
+import org.springframework.security.oauth2.jwt.JwtEncoderParameters;
+import org.springframework.stereotype.Service;
+
+/** Hands out access tokens: signed JWTs that say who someone is, for 15 minutes. */
+@Service
+public class TokenService {
+
+    public static final String ISSUER = "paydeck";
+    static final Duration ACCESS_TOKEN_LIFETIME = Duration.ofMinutes(15);
+
+    public record AccessToken(String value, long expiresInSeconds) {
+    }
+
+    private final JwtEncoder jwtEncoder;
+
+    public TokenService(JwtEncoder jwtEncoder) {
+        this.jwtEncoder = jwtEncoder;
+    }
+
+    public AccessToken issue(User user) {
+        Instant now = Instant.now();
+        JwtClaimsSet claims = JwtClaimsSet.builder()
+                .issuer(ISSUER)
+                .subject(user.getId().toString())
+                .issuedAt(now)
+                .expiresAt(now.plus(ACCESS_TOKEN_LIFETIME))
+                .claim("name", user.getDisplayName())
+                .build();
+        JwsHeader header = JwsHeader.with(MacAlgorithm.HS256).build();
+        String value = jwtEncoder.encode(JwtEncoderParameters.from(header, claims)).getTokenValue();
+        return new AccessToken(value, ACCESS_TOKEN_LIFETIME.toSeconds());
+    }
+}
+```
+
+`JwtClaimsSet` builds the payload, `JwsHeader` the header, and the `JwtEncoder` (a bean you are about to add) signs them and joins the three parts. **JWS** means "JSON Web Signature", the signed kind of JWT.
+
+### Answering 401 in PayDeck's format
+
+Spring Security turns requests away in a **filter**, before they reach any controller, so `ApiExceptionHandler` (lesson 22.4) never sees them. Two small handlers make those answers look like every other PayDeck error. `src/main/java/dev/paydeck/api/auth/ProblemResponses.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import java.io.IOException;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.security.web.AuthenticationEntryPoint;
+import org.springframework.security.web.access.AccessDeniedHandler;
+import tools.jackson.databind.json.JsonMapper;
+
+/**
+ * Spring Security turns requests away before they reach a controller, so
+ * ApiExceptionHandler never sees them. These answer in the same problem-details format.
+ */
+final class ProblemResponses {
+
+    private static final JsonMapper JSON = JsonMapper.builder().build();
+
+    private ProblemResponses() {
+    }
+
+    /** No token, or a token that is expired or forged: 401, and the app should sign in again. */
+    static AuthenticationEntryPoint notSignedIn() {
+        return (request, response, e) -> write(response, HttpStatus.UNAUTHORIZED, "Not signed in",
+                "Sign in to continue.", "NOT_SIGNED_IN");
+    }
+
+    /** Signed in, but not allowed to use this endpoint: 403. */
+    static AccessDeniedHandler notAllowed() {
+        return (request, response, e) -> write(response, HttpStatus.FORBIDDEN, "Not allowed",
+                "Your account is not allowed to do this.", "FORBIDDEN");
+    }
+
+    private static void write(HttpServletResponse response, HttpStatus status, String title, String detail,
+                              String code) throws IOException {
+        Map<String, Object> problem = new LinkedHashMap<>();
+        problem.put("type", "about:blank");
+        problem.put("title", title);
+        problem.put("status", status.value());
+        problem.put("detail", detail);
+        problem.put("code", code);
+        response.setStatus(status.value());
+        response.setContentType(MediaType.APPLICATION_PROBLEM_JSON_VALUE);
+        if (status == HttpStatus.UNAUTHORIZED) {
+            response.setHeader("WWW-Authenticate", "Bearer");
+        }
+        JSON.writeValue(response.getOutputStream(), problem);
+    }
+}
+```
+
+- An **`AuthenticationEntryPoint`** is what Spring Security calls when someone is **not signed in**; an **`AccessDeniedHandler`** when they are signed in but **not allowed**. Both are interfaces with one method, so a lambda (lesson 17.4) can be one.
+- `WWW-Authenticate: Bearer` is the standard way for a `401` to say which kind of sign-in it wants.
+- The app reads `detail` and `code`, exactly as it does for other errors.
+
+### Locking the API
+
+Replace `SecurityConfig.java` with the finished version:
+
+```java
+package dev.paydeck.api.auth;
+
+import java.nio.charset.StandardCharsets;
+
+import javax.crypto.SecretKey;
+import javax.crypto.spec.SecretKeySpec;
+
+import com.nimbusds.jose.jwk.source.ImmutableSecret;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.crypto.factory.PasswordEncoderFactories;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.oauth2.jose.jws.MacAlgorithm;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.jwt.JwtEncoder;
+import org.springframework.security.oauth2.jwt.JwtValidators;
+import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
+import org.springframework.security.oauth2.jwt.NimbusJwtEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+
+/**
+ * Who may call what. Every request needs a valid access token except
+ * signing up and in, the API docs and the health check.
+ */
+@Configuration
+@EnableConfigurationProperties(AuthProperties.class)
+public class SecurityConfig {
+
+    @Bean
+    SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+                // CSRF attacks ride on cookies that a browser sends by itself. PayDeck's
+                // apps send a token in a header instead, so CSRF protection is not needed.
+                .csrf(csrf -> csrf.disable())
+                // Remember nothing between requests: each one carries its own token.
+                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .httpBasic(basic -> basic.disable())
+                .formLogin(form -> form.disable())
+                .authorizeHttpRequests(requests -> requests
+                        .requestMatchers("/api/auth/**").permitAll()
+                        .requestMatchers("/actuator/health", "/docs/**", "/swagger-ui/**", "/v3/api-docs/**",
+                                "/error").permitAll()
+                        .anyRequest().authenticated())
+                // Read "Authorization: Bearer <token>" and check the token on every request.
+                .oauth2ResourceServer(server -> server
+                        .authenticationEntryPoint(ProblemResponses.notSignedIn())
+                        .accessDeniedHandler(ProblemResponses.notAllowed())
+                        .jwt(jwt -> {
+                        }))
+                .exceptionHandling(errors -> errors
+                        .authenticationEntryPoint(ProblemResponses.notSignedIn())
+                        .accessDeniedHandler(ProblemResponses.notAllowed()));
+        return http.build();
+    }
+
+    /** BCrypt, stored with a {bcrypt} prefix so the algorithm can be changed later. */
+    @Bean
+    PasswordEncoder passwordEncoder() {
+        return PasswordEncoderFactories.createDelegatingPasswordEncoder();
+    }
+
+    /** The secret that signs and checks access tokens (HMAC with SHA-256). */
+    @Bean
+    SecretKey jwtSigningKey(AuthProperties properties) {
+        byte[] secret = properties.jwtSecret().getBytes(StandardCharsets.UTF_8);
+        if (secret.length < 32) {
+            throw new IllegalStateException("paydeck.auth.jwt-secret (JWT_SECRET) must be at least 32 characters");
+        }
+        return new SecretKeySpec(secret, "HmacSHA256");
+    }
+
+    @Bean
+    JwtEncoder jwtEncoder(SecretKey jwtSigningKey) {
+        return new NimbusJwtEncoder(new ImmutableSecret<>(jwtSigningKey));
+    }
+
+    /** Accepts only tokens that PayDeck signed, and that have not expired. */
+    @Bean
+    JwtDecoder jwtDecoder(SecretKey jwtSigningKey) {
+        NimbusJwtDecoder decoder = NimbusJwtDecoder.withSecretKey(jwtSigningKey)
+                .macAlgorithm(MacAlgorithm.HS256)
+                .build();
+        decoder.setJwtValidator(JwtValidators.createDefaultWithIssuer(TokenService.ISSUER));
+        return decoder;
+    }
+}
+```
+
+What changed since lesson 27.3:
+
+- **`.anyRequest().authenticated()`**: the temporary `permitAll` is gone. Everything not listed above it needs a signed-in person.
+- **`.oauth2ResourceServer(...jwt...)`** switches on the token checking, and uses the two handlers for its answers. `exceptionHandling` uses them too, for requests that arrive with no token at all.
+- **`jwtSigningKey`** turns the secret into a key, and refuses to start with one shorter than 32 bytes: HS256 needs at least 256 bits.
+- **`jwtEncoder`** signs tokens (for `TokenService`); **`jwtDecoder`** checks them. `macAlgorithm(HS256)` accepts only that algorithm, and `createDefaultWithIssuer` checks the expiry and that `iss` is `"paydeck"`.
+- Because a `JwtDecoder` now exists, Spring Security stops creating its default user, and the "generated security password" line disappears from the log.
+
+### Giving out tokens
+
+In `AuthController`, add a response record and let both endpoints answer with it:
+
+```java
+    /** What signing up or in gives back: the access token, and who it belongs to. */
+    public record AuthResponse(String accessToken, String tokenType, long expiresIn, UserResponse user) {
+    }
+
+    private final AuthService auth;
+    private final TokenService tokens;
+
+    public AuthController(AuthService auth, TokenService tokens) {
+        this.auth = auth;
+        this.tokens = tokens;
+    }
+
+    @PostMapping("/register")
+    public ResponseEntity<AuthResponse> register(@Valid @RequestBody RegisterRequest request) {
+        User user = auth.register(request.email(), request.password(), request.displayName().strip());
+        return ResponseEntity.status(HttpStatus.CREATED).body(signedIn(user));
+    }
+
+    @PostMapping("/login")
+    public AuthResponse login(@Valid @RequestBody LoginRequest request) {
+        return signedIn(auth.login(request.email(), request.password()));
+    }
+
+    private AuthResponse signedIn(User user) {
+        TokenService.AccessToken token = tokens.issue(user);
+        return new AuthResponse(token.value(), "Bearer", token.expiresInSeconds(), UserResponse.of(user));
+    }
+```
+
+`tokenType` and `expiresIn` (in seconds) are the names the OAuth standard uses, so any client library understands them. Signing up signs you in straight away.
+
+### Who am I?
+
+`src/main/java/dev/paydeck/api/auth/MeController.java`:
+
+```java
+package dev.paydeck.api.auth;
+
+import java.util.UUID;
+
+import dev.paydeck.api.auth.AuthController.UserResponse;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+/** "Who am I?" Answers with the user the access token belongs to. */
+@RestController
+public class MeController {
+
+    private final UserRepository users;
+
+    public MeController(UserRepository users) {
+        this.users = users;
+    }
+
+    @GetMapping("/api/me")
+    @Transactional(readOnly = true)
+    public UserResponse me(@AuthenticationPrincipal Jwt jwt) {
+        UUID userId = UUID.fromString(jwt.getSubject());
+        return UserResponse.of(users.findById(userId).orElseThrow());
+    }
+}
+```
+
+**`@AuthenticationPrincipal Jwt jwt`** asks Spring Security for the checked token of whoever is calling. The **principal** is security's word for "who is signed in". `jwt.getSubject()` is the `sub` claim: the user's ID. The controller never sees the raw header or the signature; by the time it runs, the token is known to be genuine.
+
+### Try it
+
+Restart and sign in:
+
+```sh
+curl -s -X POST localhost:8080/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"email": "asha@example.com", "password": "correct horse battery"}'
+```
+
+```json
+{"accessToken":"eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJwYXlkZWNrIiwibmFtZSI6IkFzaGEgUmFvIiwic3ViIjoiNTM4NDM2Y2QtMTlkMi00M2E0LWI4MDMtZjkxZTE2ODY3OTc3IiwiZXhwIjoxNzkyNjQyNzk5LCJpYXQiOjE3OTI2NDE4OTl9.XbNUIL9X0vv3-zoR14ykrrfO7Sb5LNLC3ypoMpnu0Fw","tokenType":"Bearer","expiresIn":900,"user":{"id":"538436cd-19d2-43a4-b803-f91e16867977","email":"asha@example.com","displayName":"Asha Rao"}}
+```
+
+Keep the token in a shell variable, so you do not have to paste it every time:
+
+```sh
+TOKEN=$(curl -s -X POST localhost:8080/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"email": "asha@example.com", "password": "correct horse battery"}' | jq -r .accessToken)
+```
+
+Now look inside it with `jq` (lesson 19.5). `split(".")` cuts it into its three parts; the two `gsub`s turn Base64URL back into ordinary Base64, which `@base64d` decodes:
+
+```sh
+echo "$TOKEN" | jq -R 'split(".") | .[0], .[1] | gsub("-";"+") | gsub("_";"/") | @base64d | fromjson'
+```
+
+```json
+{
+  "alg": "HS256"
+}
+{
+  "iss": "paydeck",
+  "name": "Asha Rao",
+  "sub": "538436cd-19d2-43a4-b803-f91e16867977",
+  "exp": 1792642799,
+  "iat": 1792641899
+}
+```
+
+`exp` minus `iat` is 900 seconds: 15 minutes. Anyone holding the token can read all of this, which is fine, because none of it is secret.
+
+Ask who you are, with and without the token:
+
+```sh
+curl -i localhost:8080/api/me -H "Authorization: Bearer $TOKEN"
+```
+
+```
+HTTP/1.1 200
+Content-Type: application/json
+
+{"id":"538436cd-19d2-43a4-b803-f91e16867977","email":"asha@example.com","displayName":"Asha Rao"}
+```
+
+```sh
+curl -i localhost:8080/api/me
+```
+
+```
+HTTP/1.1 401
+WWW-Authenticate: Bearer
+Content-Type: application/problem+json
+
+{"type":"about:blank","title":"Not signed in","status":401,"detail":"Sign in to continue.","code":"NOT_SIGNED_IN"}
+```
+
+The same `401` now protects every account, card and money endpoint.
+
+Finally, try to cheat. Decode the payload, put someone else's ID in `sub`, encode it again, and send it with the **original** signature:
+
+```sh
+IFS=. read -r HEADER PAYLOAD SIGNATURE <<< "$TOKEN"
+FORGED=$(echo "$PAYLOAD" | jq -R -j 'gsub("-";"+") | gsub("_";"/") | @base64d | fromjson
+  | .sub = "00000000-0000-0000-0000-000000000001" | tojson' | base64 | tr '+/' '-_' | tr -d '=\n')
+curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/api/me -H "Authorization: Bearer $HEADER.$FORGED.$SIGNATURE"
+```
+
+```
+401
+```
+
+`IFS=. read -r A B C` splits the token at the dots into three variables. With `--logging.level.org.springframework.security=DEBUG` (lesson 27.3), the log says why:
+
+```
+... Signed JWT rejected: Invalid signature
+```
+
+The signature was computed over the original payload, so it no longer matches. Without the secret there is no way to make a matching one.
+
+### Fixing the tests
+
+Run `./mvnw test`. Of the 34 tests, 20 now fail: every request the tests send is refused, because none of them carries a token. Sixteen get `401`. The four in `MoneyControllerTest` get `403`: a `@WebMvcTest` does not load your `SecurityConfig` unless asked, so it uses Spring Security's defaults, whose CSRF protection refuses every `POST`.
+
+Give `ApiTestSupport` a way to sign people up and send requests as them:
+
+```java
+    protected static final String PASSWORD = "correct horse battery";
+
+    /** A signed-up user and their access token. */
+    protected record TestUser(UUID id, String email, String accessToken) {
+    }
+
+    @Autowired
+    protected MockMvc mvc;
+
+    /** Who opened each account, so requests about it can be sent as them. */
+    private final Map<UUID, TestUser> owners = new ConcurrentHashMap<>();
+
+    /** Signs up someone new. Every call gets a fresh email, so tests never clash. */
+    protected TestUser register(String name) throws Exception {
+        String email = name.toLowerCase() + "-" + UUID.randomUUID() + "@example.com";
+        String body = mvc.perform(post("/api/auth/register")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"email": "%s", "password": "%s", "displayName": "%s"}
+                                """.formatted(email, PASSWORD, name)))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        return new TestUser(UUID.fromString(JsonPath.read(body, "$.user.id")), email,
+                JsonPath.read(body, "$.accessToken"));
+    }
+
+    /** Sends the request with this user's access token. */
+    protected static RequestPostProcessor as(TestUser user) {
+        return request -> {
+            request.addHeader("Authorization", "Bearer " + user.accessToken());
+            return request;
+        };
+    }
+
+    /** Sends the request as the person who opened this account. */
+    protected RequestPostProcessor asOwnerOf(UUID accountId) {
+        return as(owners.get(accountId));
+    }
+
+    /** Signs up a new person called {@code owner} and opens an account for them. */
+    protected UUID openAccount(String owner, String currency) throws Exception {
+        TestUser user = register(owner);
+        String body = mvc.perform(post("/api/accounts")
+                        .with(as(user))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"ownerName": "%s", "currency": "%s"}
+                                """.formatted(owner, currency)))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        UUID accountId = UUID.fromString(JsonPath.read(body, "$.id"));
+        owners.put(accountId, user);
+        return accountId;
+    }
+```
+
+Add `.with(asOwnerOf(accountId))` to the request in `topUp` as well. New imports: `java.util.Map`, `java.util.concurrent.ConcurrentHashMap` and `org.springframework.test.web.servlet.request.RequestPostProcessor`.
+
+- A **`RequestPostProcessor`** changes a MockMvc request before it is sent. `.with(as(asha))` reads almost like English: "with Asha's token".
+- Every account gets its own new owner, remembered in `owners`, so `asOwnerOf(account)` finds the right token. Right now any signed-in person may use any account; the mini-project changes that, and these tests will already send each request as the right person.
+
+Then, in `MoneyApiTest` and `CardApiTest`, add `.with(asOwnerOf(...))` to every `mvc.perform(...)` about an account, and `.with(as(register("Asha")))` to the requests about accounts that do not exist or belong to the system. For example:
+
+```java
+mvc.perform(get("/api/accounts/{id}", account).with(asOwnerOf(account)))
+mvc.perform(post("/api/cards/{id}/freeze", card).with(asOwnerOf(account)))
+mvc.perform(post("/api/accounts/{id}/cards", UUID.randomUUID()).with(as(register("Asha")))
+```
+
+For `MoneyControllerTest`, load your security rules and pretend to be signed in:
+
+```java
+@WebMvcTest(MoneyController.class)
+@Import(SecurityConfig.class)
+class MoneyControllerTest {
+```
+
+```java
+        return mvc.perform(post("/api/accounts/{id}/top-ups", account)
+                .with(jwt())
+```
+
+`jwt()` comes from `SecurityMockMvcRequestPostProcessors` (import it statically). It makes the request count as signed in with a made-up token, without signing anything: this test is about the controller, not about tokens.
+
+`./mvnw test` is green again: 34 tests.
+
+<Exercise title="Test the tokens">
+Write `src/test/java/dev/paydeck/api/auth/AuthApiTest.java`, extending `ApiTestSupport`, with three tests:
+
+1. The token from signing up works: `GET /api/me` with it answers `200` with the user's email and display name.
+2. Without a token, `GET /api/me` answers `401` with `code` `NOT_SIGNED_IN`.
+3. Signing in with a wrong password answers `401` with `code` `INVALID_CREDENTIALS` and **no** `accessToken` in the body.
+
+<Fragment slot="hint">`register("Asha")` gives you a `TestUser` with the email and token. `jsonPath("$.accessToken").doesNotExist()` checks that a field is missing.</Fragment>
+<Fragment slot="solution">
+
+```java
+package dev.paydeck.api.auth;
+
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import dev.paydeck.api.ApiTestSupport;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.MediaType;
+
+class AuthApiTest extends ApiTestSupport {
+
+    @Test
+    void theTokenFromSignUpShowsWhoYouAre() throws Exception {
+        TestUser asha = register("Asha");
+
+        mvc.perform(get("/api/me").with(as(asha)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.email").value(asha.email()))
+                .andExpect(jsonPath("$.displayName").value("Asha"));
+    }
+
+    @Test
+    void withoutATokenYouAreNotSignedIn() throws Exception {
+        mvc.perform(get("/api/me"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("NOT_SIGNED_IN"));
+    }
+
+    @Test
+    void aWrongPasswordGetsNoToken() throws Exception {
+        TestUser asha = register("Asha");
+
+        mvc.perform(post("/api/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"email": "%s", "password": "not the password"}
+                                """.formatted(asha.email())))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("INVALID_CREDENTIALS"))
+                .andExpect(jsonPath("$.accessToken").doesNotExist());
+    }
+}
+```
+
+`./mvnw test`: 37 tests, all green.
+</Fragment>
+</Exercise>
+
+<Exercise title="Why the secret matters">
+The signature can only be made with the secret, and right now the secret is the default written in `application.yml`, which is in your Git repository. Make your own token for Asha **without** her password, using only that default secret, and use it to call `/api/me`. Then make one whose `exp` is in the past and see what happens.
+
+Save this as `scripts/sign-token.sh`:
+
+```sh
+#!/bin/sh
+# Makes an HS256 JWT for the payload given as $1, signed with the local default secret.
+b64url() { base64 | tr '+/' '-_' | tr -d '=\n'; }
+SECRET='change-me-this-is-only-for-local-development'
+HEADER=$(printf '{"alg":"HS256"}' | b64url)
+PAYLOAD=$(printf '%s' "$1" | b64url)
+SIGNATURE=$(printf '%s.%s' "$HEADER" "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" -binary | b64url)
+echo "$HEADER.$PAYLOAD.$SIGNATURE"
+```
+
+<Fragment slot="hint">`NOW=$(date +%s)` gives the current time in seconds. Build the payload with Asha's ID: `sh scripts/sign-token.sh "{\"iss\":\"paydeck\",\"sub\":\"<Asha's id>\",\"iat\":$NOW,\"exp\":$((NOW+900))}"`. For the expired one, use `$((NOW-1000))` and `$((NOW-100))`.</Fragment>
+<Fragment slot="solution">
+
+```sh
+NOW=$(date +%s)
+MINE=$(sh scripts/sign-token.sh "{\"iss\":\"paydeck\",\"sub\":\"538436cd-19d2-43a4-b803-f91e16867977\",\"iat\":$NOW,\"exp\":$((NOW+900))}")
+curl -s localhost:8080/api/me -H "Authorization: Bearer $MINE"
+```
+
+```json
+{"id":"538436cd-19d2-43a4-b803-f91e16867977","email":"asha@example.com","displayName":"Asha Rao"}
+```
+
+The API accepted a token it never issued, and you are Asha. That is what anyone who reads your repository could do to a server left on the default secret, which is why a real server **must** set its own long, random `JWT_SECRET` (Part 10), and why that secret never goes into Git.
+
+The expired one:
+
+```
+HTTP/1.1 401
+...
+{"type":"about:blank","title":"Not signed in","status":401,"detail":"Sign in to continue.","code":"NOT_SIGNED_IN"}
+```
+
+and the debug log says `Jwt expired at 2026-10-22T04:18:11Z` (your time will differ). Spring Security allows 60 seconds of difference between clocks, so a token stops working up to a minute after its `exp`.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="A short or published secret">
+HS256 with a guessable secret is no protection: anyone can sign tokens. Use at least 32 random characters on a real server (`openssl rand -base64 48` makes one), keep it in an environment variable, and never commit it.
+</Aside>
+
+<Aside type="caution" title="Trusting a token you only decoded">
+Decoding shows what a token **says**; it proves nothing. Only a decoder that checks the signature, like Spring Security's, may decide who someone is. Never read `sub` from a token you have not verified.
+</Aside>
+
+<Aside type="caution" title="Accepting any algorithm">
+A token's header names its own algorithm, and some old libraries believed it, even `"alg": "none"` (no signature at all). `macAlgorithm(MacAlgorithm.HS256)` makes PayDeck accept exactly one algorithm, whatever the header claims.
+</Aside>
+
+<Aside type="caution" title="Forgetting the tests">
+After locking the API, a red test run does not mean your code is broken: the tests are calling without a token. Fix the tests by signing in, never by opening the API up again.
+</Aside>
+
+## Recap
+
+- A JWT is `header.payload.signature`, Base64URL-encoded. The payload holds claims: `iss`, `sub`, `iat`, `exp`, and any extras such as `name`.
+- Anyone can read a JWT; only the holder of the secret can make a valid signature, so a changed token is refused.
+- `TokenService` issues 15-minute HS256 tokens; sign-up and sign-in return them as `accessToken`.
+- Spring Security's resource server checks `Authorization: Bearer` on every request, and `.anyRequest().authenticated()` now protects everything but sign-in, docs and health.
+- `ProblemResponses` makes Spring Security's refusals look like every other PayDeck error: `401 NOT_SIGNED_IN`.
+- Tests sign up and send their token with `.with(as(user))`; controller slice tests use `jwt()`.
+
+<Quiz
+	questions={[
+		{
+			question: 'What stops someone from changing the sub claim in their token to another user\'s ID?',
+			options: ['The payload is encrypted', 'The signature no longer matches, and they cannot make a new one without the secret', 'The server compares the token with a copy in the database'],
+			answer: 1,
+			explanation: 'The payload is only encoded, so it can be changed, but the signature covers it and only PayDeck knows the secret.',
+		},
+		{
+			question: 'Where does PayDeck keep the secret that signs tokens on a real server?',
+			options: ['In application.yml in Git', 'In the JWT_SECRET environment variable', 'Inside each token'],
+			answer: 1,
+			explanation: 'The default in application.yml is only for your Mac. A real server sets its own long random JWT_SECRET, which never goes into Git.',
+		},
+		{
+			question: 'Why did MoneyControllerTest get 403 rather than 401 after the API was locked?',
+			options: ['Its requests had a wrong token', 'Without @Import(SecurityConfig.class), the test used Spring Security\'s defaults, whose CSRF protection refuses POSTs', 'Top-ups are only for staff'],
+			answer: 1,
+			explanation: 'A @WebMvcTest only loads web classes. Importing SecurityConfig brings PayDeck\'s rules, including csrf.disable(), and jwt() signs the request in.',
+		},
+	]}
+/>
+
+<MarkComplete />

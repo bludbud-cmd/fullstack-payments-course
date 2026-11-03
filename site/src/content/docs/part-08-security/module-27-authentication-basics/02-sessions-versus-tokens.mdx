@@ -1,0 +1,148 @@
+---
+title: "27.2 Sessions versus tokens"
+description: "After signing in, how does the server recognise you on the next request? Compare server-side sessions with cookies to self-contained tokens in a header, and see why PayDeck's apps use short-lived tokens."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can explain the two common ways a server remembers who you are after you sign in, what each costs, and which one PayDeck uses and why.
+
+## Why it matters
+
+HTTP has no memory (Module 19): every request arrives on its own, and the server has no idea that the request a second ago came from the same person. Checking a password on every request would be slow (BCrypt takes about 74 ms, lesson 27.1) and would mean the app keeping the password around. So after one successful sign-in, the server hands out something the client sends with every later request instead. What that "something" is shapes the whole security design, and it is the choice behind words you will meet everywhere: cookies, sessions, tokens, JWTs, CSRF.
+
+## The idea
+
+### Option 1: a session and a cookie
+
+The classic website approach:
+
+1. You sign in. The server creates a **session**: a record in its memory or database that says "visitor 7f3a… is Asha".
+2. It sends back only the session's ID, in a **cookie**:
+
+   ```
+   HTTP/1.1 200
+   Set-Cookie: SESSION=7f3a9c21e4; HttpOnly; Secure; SameSite=Lax
+   ```
+
+3. From then on, the **browser** sends the cookie with every request to that site, by itself:
+
+   ```
+   GET /api/me
+   Cookie: SESSION=7f3a9c21e4
+   ```
+
+4. The server looks the ID up in its sessions to find out who you are.
+
+A **cookie** is a small piece of text a website asks the browser to store and send back. `HttpOnly` means JavaScript on the page cannot read it, `Secure` means it only travels over https.
+
+**Good:** signing out is easy and immediate: delete the session, and the cookie is worthless. **Costly:** the server must store every session and look one up on every request; with several servers, they all need to share that store. And because the browser sends cookies **automatically**, another website can trick your browser into sending a request to your bank with your cookie attached. That attack is **CSRF** (cross-site request forgery), and cookie-based sites need extra protection against it.
+
+### Option 2: a token in a header
+
+The approach most mobile apps and APIs use:
+
+1. You sign in. The server creates a **token**: a string that itself says who you are and when it expires, **signed** by the server so that nobody can change it or make their own.
+2. It sends the token back in the response body. The app keeps it.
+3. The app adds it to every request, in the `Authorization` header:
+
+   ```
+   GET /api/me
+   Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI1Mzg0...
+   ```
+
+   `Bearer` means "whoever carries this token": the token alone is the proof.
+
+4. The server checks the signature and the expiry time, then reads who you are from the token itself. No lookup needed.
+
+**Good:** the server stores nothing per sign-in, so any of its servers can check any token, and the check is fast. Nothing is sent automatically, so CSRF does not apply. It works the same from a phone app, a Mac app, `curl` or another server. **Costly:** a token stays valid until it expires, even after the person signs out, and if someone steals one, they can use it until then.
+
+### What PayDeck does
+
+PayDeck's clients are native apps, not web pages, and its API should stay simple to run on several servers later. So it uses **tokens**, and handles their weakness by keeping them **short-lived**:
+
+| | Lifetime | Where it lives | What it is for |
+|---|---|---|---|
+| **Access token** | 15 minutes | In the app's memory | Sent with every request |
+| **Refresh token** (Module 28) | 30 days, single use | In the device's secure storage | Swapped for a new access token when the old one expires |
+
+A stolen access token is useful for at most 15 minutes. The refresh token is used rarely, sent only to one endpoint, and **is** recorded on the server, so it can be revoked: signing out kills it. You build the access token in lesson 27.5, and the refresh token in Module 28.
+
+### Authentication and authorization
+
+Two words you will meet constantly, and which are easy to mix up:
+
+- **Authentication** (often "authn"): **who are you?** Signing in, and proving it on each request. This module.
+- **Authorization** (often "authz"): **what may you do?** Can Bea see Asha's account? Can support staff freeze a card? The mini-project starts this, and Module 30 completes it.
+
+HTTP has a status code for each failure: **`401 Unauthorized`** really means "not authenticated" (no token, or a bad one: sign in), and **`403 Forbidden`** means "authenticated, but not allowed".
+
+<Exercise title="Which would you choose?">
+For each of these, decide whether a cookie session or a bearer token fits better, and say why in one sentence:
+
+1. A classic website where the server builds every page, used only in browsers.
+2. The PayDeck Android app.
+3. A shop's server that calls the PayDeck API every night to fetch its card payments.
+4. A bank that must be able to sign someone out of every device immediately when their phone is stolen.
+
+<Fragment slot="hint">Ask: is there a browser that will send cookies by itself? Does the server need to forget a sign-in instantly?</Fragment>
+<Fragment slot="solution">
+
+1. **Session cookie.** The browser handles cookies by itself, the server already renders every page and can keep sessions, and it adds CSRF protection (Spring Security does by default).
+2. **Token.** An app is not a browser: it adds the header itself, and the same tokens work on Android and macOS.
+3. **Token.** A server has no browser and no cookie jar; it sends `Authorization: Bearer ...` with each call. (Real APIs often give servers long-lived **API keys** instead, which work the same way.)
+4. **Either, but with something the server can revoke.** A pure token cannot be cancelled before it expires. That is exactly why PayDeck pairs short access tokens with refresh tokens stored on the server: revoke the refresh tokens, and within 15 minutes every device is signed out.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Long-lived access tokens">
+An access token that lasts a month is as good as a password for a month, and cannot be taken back. Keep access tokens short, and use a refresh token that the server can revoke.
+</Aside>
+
+<Aside type="caution" title="Putting secrets in a token">
+A signed token is not encrypted: anyone holding it can read what is inside (you will do it yourself in lesson 27.5). The signature only stops changes. Put an ID in it, never a password or a card number.
+</Aside>
+
+<Aside type="caution" title="Tokens in URLs">
+`/api/me?token=...` ends up in server logs, browser history and proxies. Tokens go in the `Authorization` header.
+</Aside>
+
+## Recap
+
+- HTTP forgets everything between requests, so after signing in the client sends proof with each request.
+- **Sessions:** the server remembers the sign-in, the browser sends a cookie automatically. Easy to revoke, needs server storage and CSRF protection.
+- **Tokens:** a signed, self-contained token in the `Authorization: Bearer` header. Nothing stored, no CSRF, but valid until it expires.
+- PayDeck uses 15-minute access tokens plus revocable refresh tokens (Module 28).
+- Authentication is who you are (`401`); authorization is what you may do (`403`).
+
+<Quiz
+	questions={[
+		{
+			question: 'Why does a token in the Authorization header avoid CSRF attacks?',
+			options: ['Tokens are encrypted', 'The browser never adds it automatically, so another site cannot make it send one', 'Tokens are shorter than cookies'],
+			answer: 1,
+			explanation: 'CSRF relies on the browser attaching cookies by itself. A header that the app adds on purpose cannot be forged that way.',
+		},
+		{
+			question: 'What is the main weakness of a self-contained access token?',
+			options: ['The server must look it up on every request', 'It stays valid until it expires, even after signing out', 'It only works in browsers'],
+			answer: 1,
+			explanation: 'Nothing on the server records it, so it cannot be cancelled. Short lifetimes limit the damage.',
+		},
+		{
+			question: 'A request has a valid token, but the person may not see this account. Which status fits?',
+			options: ['401 Unauthorized', '403 Forbidden', '500 Internal Server Error'],
+			answer: 1,
+			explanation: '401 means "not signed in"; 403 means "signed in, but not allowed". (The mini-project explains why PayDeck sometimes answers 404 instead.)',
+		},
+	]}
+/>
+
+<MarkComplete />

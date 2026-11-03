@@ -1,0 +1,513 @@
+---
+title: "30.5 Audit logs"
+description: "Record who did what, to what, and when: sign-ins, failed sign-ins, role changes and every time staff look at or change a customer's things, in a table that is only ever added to."
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson PayDeck writes an **audit event** for every sign-in, every failed sign-in, every role change, and every time staff look at or change a customer's account or card. Admins can read the log through the API.
+
+## Why it matters
+
+Support staff can now see any customer's balance. That is necessary, and it is also a risk: a curious employee could look up a neighbour, an ex-partner, or a celebrity. You cannot prevent every misuse of legitimate access, but you can make sure it is **recorded**, and that everyone knows it is. When Asha asks "has anyone at PayDeck looked at my account?", or when an attacker tries a thousand passwords, the audit log is how you answer. Regulators of payment companies expect one.
+
+## The idea
+
+### What an audit event is
+
+Each event answers four questions:
+
+| Question | Column | Example |
+|----------|--------|---------|
+| Who did it? | `actor_user_id` | Sam's ID, or empty if nobody was signed in |
+| What did they do? | `action` | `CARD_FREEZE`, `ROLE_CHANGED`, `LOGIN_FAILED` |
+| To what? | `target_type`, `target_id` | `CARD` and the card's ID |
+| When? | `created_at` | `2026-10-22T05:46:39Z` |
+
+plus an optional short `detail`, such as `"by SUPPORT"` or `"CUSTOMER to SUPPORT"`.
+
+### Append-only
+
+An audit log is only useful if it cannot be quietly edited. PayDeck's API only ever **adds** events: the entity has no setters, and there is no endpoint to change or delete one. Real systems go further: the database user the API runs as is not allowed to `UPDATE` or `DELETE` that table, and events are copied to a separate system that the API's administrators cannot change. The principle is the same: whoever is being watched must not be able to edit the record.
+
+### What to record, and what never to
+
+Record security-relevant actions:
+
+- **Sign-ins**, with how (password or Google), and **failed sign-ins**. A burst of failures is how you spot someone guessing passwords.
+- **Staff using customers' things.** Not owners using their own things: that is just using PayDeck, and it would bury the important events.
+- **Changes to power**: role changes.
+
+Never record secrets: no passwords (not even wrong ones, which are often a typo of the right one), no tokens, no full card numbers. People read audit logs, and logs get copied to other systems. OWASP calls missing or leaky logging "Security Logging and Alerting Failures", number nine in its Top 10 (lesson 30.6).
+
+### When the request fails
+
+Here is a subtle problem. A failed sign-in **fails**: `AuthService.login` throws `InvalidCredentialsException`. If `login` runs in a transaction, Spring rolls that transaction back when the exception leaves the method (lesson 24.3), and an event saved inside it is rolled back too. The one event you most wanted is lost.
+
+The fix is to save that event in a transaction **of its own**, which commits straight away, whatever happens to the request afterwards. Spring calls this `Propagation.REQUIRES_NEW`: "pause the current transaction, start a new one, commit it, then carry on". PayDeck's `AuditLog` therefore has two methods:
+
+- `record`: joins the current transaction. Use it for events that describe a change, such as a role change: if the change is rolled back, the event should disappear with it, because it did not happen.
+- `recordNow`: its own transaction. Use it when the event must survive: failed sign-ins, and staff **looking** at things, which happens inside read-only transactions that cannot write.
+
+## Worked example
+
+### The table
+
+`src/main/resources/db/migration/V9__create_audit_events.sql`:
+
+```sql
+-- A record of security-relevant actions: who did what, to what, and when.
+-- Rows are only ever added, never changed or deleted by the API.
+CREATE TABLE audit_events (
+    id             UUID PRIMARY KEY,
+    actor_user_id  UUID         REFERENCES users (id),
+    action         VARCHAR(40)  NOT NULL,
+    target_type    VARCHAR(20),
+    target_id      UUID,
+    detail         VARCHAR(500),
+    created_at     TIMESTAMPTZ  NOT NULL
+);
+CREATE INDEX audit_events_created_at ON audit_events (created_at);
+```
+
+The index on `created_at` is for reading "the newest events first", which is how people read a log.
+
+### The event
+
+Create the package `dev.paydeck.api.audit`. `AuditEvent.java`:
+
+```java
+package dev.paydeck.api.audit;
+
+import java.time.Instant;
+import java.util.UUID;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+
+/** One line in the audit log. Events are only ever added, never changed: there are no setters. */
+@Entity
+@Table(name = "audit_events")
+public class AuditEvent {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private UUID id;
+
+    /** Who did it, or empty when nobody was signed in, such as a failed sign-in. */
+    private UUID actorUserId;
+
+    @Column(nullable = false)
+    private String action;
+
+    private String targetType;
+
+    private UUID targetId;
+
+    private String detail;
+
+    @Column(nullable = false)
+    private Instant createdAt;
+
+    protected AuditEvent() {
+        // For JPA
+    }
+
+    AuditEvent(UUID actorUserId, String action, String targetType, UUID targetId, String detail) {
+        this.actorUserId = actorUserId;
+        this.action = action;
+        this.targetType = targetType;
+        this.targetId = targetId;
+        this.detail = detail;
+        this.createdAt = Instant.now();
+    }
+
+    public UUID getId() {
+        return id;
+    }
+
+    public UUID getActorUserId() {
+        return actorUserId;
+    }
+
+    public String getAction() {
+        return action;
+    }
+
+    public String getTargetType() {
+        return targetType;
+    }
+
+    public UUID getTargetId() {
+        return targetId;
+    }
+
+    public String getDetail() {
+        return detail;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+}
+```
+
+The constructor is package-private (no `public`), so only classes in `audit` can create events. Everyone else goes through `AuditLog`.
+
+`AuditEventRepository.java`:
+
+```java
+package dev.paydeck.api.audit;
+
+import java.util.List;
+import java.util.UUID;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface AuditEventRepository extends JpaRepository<AuditEvent, UUID> {
+
+    List<AuditEvent> findTop100ByOrderByCreatedAtDesc();
+}
+```
+
+Spring Data reads the method name: the top 100, ordered by `createdAt`, newest first (lesson 23.2).
+
+### The log
+
+`AuditLog.java`:
+
+```java
+package dev.paydeck.api.audit;
+
+import java.util.UUID;
+
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+/**
+ * Writes down security-relevant actions. Never put passwords, tokens or card
+ * numbers in {@code detail}: people read this log.
+ */
+@Service
+public class AuditLog {
+
+    private final AuditEventRepository events;
+
+    public AuditLog(AuditEventRepository events) {
+        this.events = events;
+    }
+
+    /** Records an event as part of the current change: if the change is rolled back, so is the event. */
+    @Transactional
+    public void record(UUID actorUserId, String action, String targetType, UUID targetId, String detail) {
+        events.save(new AuditEvent(actorUserId, action, targetType, targetId, detail));
+    }
+
+    /**
+     * Records an event in a transaction of its own, so it is kept even if the
+     * request then fails (a failed sign-in) or only reads (staff looking at an account).
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void recordNow(UUID actorUserId, String action, String targetType, UUID targetId, String detail) {
+        events.save(new AuditEvent(actorUserId, action, targetType, targetId, detail));
+    }
+}
+```
+
+`REQUIRES_NEW` works because `AuditLog` is a separate bean: other classes call it through its proxy (lesson 24.3), so the annotation is honoured.
+
+### Sign-ins
+
+`AuthService` gets an `AuditLog` (add it as a field and a constructor parameter). `login` changes from `@Transactional(readOnly = true)` to `@Transactional`, because it now writes:
+
+```java
+    @Transactional
+    public User login(String email, String password) {
+        Optional<User> found = users.findByEmail(User.normalizeEmail(email));
+        String hash = found.map(User::getPasswordHash).orElse(dummyHash);
+        if (!passwordEncoder.matches(password, hash) || found.isEmpty()) {
+            // recordNow: this transaction is about to fail, and the event must survive it.
+            UUID who = found.map(User::getId).orElse(null);
+            audit.recordNow(null, "LOGIN_FAILED", "USER", who, who == null ? "unknown email" : null);
+            throw new InvalidCredentialsException("That email and password do not match.");
+        }
+        User user = found.get();
+        audit.record(user.getId(), "LOGIN", "USER", user.getId(), "password");
+        return user;
+    }
+```
+
+A failed sign-in has no actor: nobody proved who they were. The **target** is the account someone tried to get into, if that email exists. For an unknown email, the event says so, but does not store the email that was typed: it might be a password typed into the wrong box.
+
+In `signInWithGoogle` (lesson 29.4), record the three outcomes:
+
+```java
+        Optional<User> known = users.findByGoogleSubject(googleSubject);
+        if (known.isPresent()) {
+            audit.record(known.get().getId(), "LOGIN", "USER", known.get().getId(), "google");
+            return known.get();
+        }
+        // ... the email_verified check, unchanged ...
+        Optional<User> sameEmail = users.findByEmail(normalized);
+        if (sameEmail.isPresent()) {
+            sameEmail.get().linkGoogle(googleSubject);
+            audit.record(sameEmail.get().getId(), "GOOGLE_LINKED", "USER", sameEmail.get().getId(), null);
+            return sameEmail.get();
+        }
+        String displayName = name == null || name.isBlank() ? normalized : name;
+        User created = users.save(User.withGoogle(normalized, displayName, googleSubject));
+        audit.record(created.getId(), "SIGNED_UP", "USER", created.getId(), "google");
+        return created;
+```
+
+`GOOGLE_LINKED` matters: a new way into an existing account is exactly what you would look for after a suspected takeover.
+
+### Staff access
+
+In `AccessPolicy`, add an `AuditLog` field and constructor parameter, and a private method:
+
+```java
+    /** Staff using a customer's things is exactly what an audit log is for. */
+    private void recordStaffAccess(CurrentUser user, Relationship relationship, String action, String targetType,
+                                   UUID targetId) {
+        if (relationship == Relationship.NONE && user.isStaff()) {
+            audit.recordNow(user.id(), action, targetType, targetId, "by " + user.role());
+        }
+    }
+```
+
+Call it at the end of `account` and `card`, after `check` has passed and just before returning:
+
+```java
+        recordStaffAccess(user, relationship, "ACCOUNT_" + action, "ACCOUNT", accountId);
+        return account;
+```
+
+```java
+        recordStaffAccess(user, relationship, "CARD_" + action, "CARD", cardId);
+        return card;
+```
+
+Because every controller already goes through `AccessPolicy`, every staff access to an account or card is now recorded, in one place, with no change to any controller. That is the second reward for putting the rules in one class.
+
+### Staff tools
+
+In `AdminController`, add `AuditEventRepository auditEvents` and `AuditLog audit` to the fields and constructor. Opening a customer's details is recorded (the method now takes `CurrentUser staff`):
+
+```java
+    public UserDetails user(CurrentUser staff, @PathVariable UUID id) {
+        User user = users.findById(id).orElseThrow(() -> new NotFoundException("User", id));
+        audit.recordNow(staff.id(), "USER_VIEWED", "USER", id, "by " + staff.role());
+```
+
+A role change is recorded as part of the change, with what it was and what it became:
+
+```java
+        User user = users.findById(id).orElseThrow(() -> new NotFoundException("User", id));
+        Role before = user.getRole();
+        user.changeRole(request.role());
+        audit.record(admin.id(), "ROLE_CHANGED", "USER", id, before + " to " + request.role());
+        return UserResponse.of(user);
+```
+
+And admins can read the log:
+
+```java
+    public record AuditEventResponse(UUID id, UUID actorUserId, String action, String targetType, UUID targetId,
+                                     String detail, Instant createdAt) {
+
+        static AuditEventResponse of(AuditEvent event) {
+            return new AuditEventResponse(event.getId(), event.getActorUserId(), event.getAction(),
+                    event.getTargetType(), event.getTargetId(), event.getDetail(), event.getCreatedAt());
+        }
+    }
+```
+
+```java
+    /** The newest 100 events. Admins only: the log itself shows what support looked at. */
+    @GetMapping("/audit")
+    @PreAuthorize("hasRole('ADMIN')")
+    @Transactional(readOnly = true)
+    public List<AuditEventResponse> auditLog() {
+        return auditEvents.findTop100ByOrderByCreatedAtDesc().stream().map(AuditEventResponse::of).toList();
+    }
+```
+
+Support may not read the log: the people being watched should not be the ones reading the record of what they did.
+
+### Tests
+
+`src/test/java/dev/paydeck/api/audit/AuditLogApiTest.java`:
+
+```java
+package dev.paydeck.api.audit;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import java.util.List;
+import java.util.UUID;
+
+import dev.paydeck.api.ApiTestSupport;
+import dev.paydeck.api.auth.Role;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.MediaType;
+
+class AuditLogApiTest extends ApiTestSupport {
+
+    @Autowired
+    AuditEventRepository events;
+
+    @Test
+    void aFailedSignInIsRecordedEvenThoughTheRequestFails() throws Exception {
+        TestUser asha = register("Asha");
+
+        mvc.perform(post("/api/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"email": "%s", "password": "not her password"}
+                                """.formatted(asha.email())))
+                .andExpect(status().isUnauthorized());
+
+        assertThat(eventsAbout(asha.id())).extracting(AuditEvent::getAction).contains("LOGIN_FAILED");
+    }
+
+    @Test
+    void staffLookingAtAnAccountIsRecorded() throws Exception {
+        UUID ashas = openAccount("Asha", "USD");
+        TestUser sam = registerAs("Sam", Role.SUPPORT);
+
+        mvc.perform(get("/api/accounts/{id}", ashas).with(as(sam))).andExpect(status().isOk());
+
+        assertThat(eventsAbout(ashas))
+                .anySatisfy(event -> {
+                    assertThat(event.getAction()).isEqualTo("ACCOUNT_VIEW");
+                    assertThat(event.getActorUserId()).isEqualTo(sam.id());
+                    assertThat(event.getDetail()).isEqualTo("by SUPPORT");
+                });
+    }
+
+    @Test
+    void ownersUsingTheirOwnAccountAreNotRecorded() throws Exception {
+        UUID ashas = openAccount("Asha", "USD");
+
+        mvc.perform(get("/api/accounts/{id}", ashas).with(asOwnerOf(ashas))).andExpect(status().isOk());
+
+        assertThat(eventsAbout(ashas)).isEmpty();
+    }
+
+    @Test
+    void onlyAdminsReadTheLog() throws Exception {
+        mvc.perform(get("/api/admin/audit").with(as(registerAs("Sam", Role.SUPPORT))))
+                .andExpect(status().isForbidden());
+        mvc.perform(get("/api/admin/audit").with(as(registerAs("Ada", Role.ADMIN))))
+                .andExpect(status().isOk());
+    }
+
+    private List<AuditEvent> eventsAbout(UUID targetId) {
+        return events.findAll().stream().filter(event -> targetId.equals(event.getTargetId())).toList();
+    }
+}
+```
+
+Every test makes new users and accounts, so `eventsAbout` only finds events about this test's things, however many other tests have run against the same database. `./mvnw test`: 75 tests, all green.
+
+### Try it
+
+Restart the API, and make some history: sign in as Asha with a wrong password, then with an email nobody has; sign in as Sam, open Asha's details in the app or with curl, and unfreeze one of her cards. Then read the log as Ada. The full JSON is long, so `jq` turns each event into one line: time, action, the first 8 characters of the actor and target IDs, and the detail:
+
+```sh
+curl -s localhost:8080/api/admin/audit -H "Authorization: Bearer $ADA" \
+  | jq -r '.[:7][] | [.createdAt[11:19], .action, (.actorUserId // "-")[0:8], .targetType,
+                      (.targetId // "-")[0:8], (.detail // "")] | @tsv'
+```
+
+```
+05:46:39	LOGIN	94de57a3	USER	94de57a3	password
+05:46:39	CARD_UNFREEZE	99c63d2b	CARD	e81a892e	by SUPPORT
+05:46:39	USER_VIEWED	99c63d2b	USER	538436cd	by SUPPORT
+05:46:39	LOGIN	99c63d2b	USER	99c63d2b	password
+05:46:39	LOGIN_FAILED	-	USER	-	unknown email
+05:46:38	LOGIN_FAILED	-	USER	538436cd	
+05:46:27	USER_VIEWED	99c63d2b	USER	538436cd	by SUPPORT
+```
+
+Read it from the bottom up: someone failed to sign in to Asha's account (`538436cd`); someone tried an email that does not exist; Sam (`99c63d2b`) signed in, opened Asha's details and unfroze her card; Ada signed in to read this. `//` in jq means "or, if this is empty", so missing IDs print as `-`.
+
+<Exercise title="The event that disappears">
+In `AuthService.login`, change `audit.recordNow(null, "LOGIN_FAILED", ...)` to `audit.record(null, "LOGIN_FAILED", ...)` and run `./mvnw test -Dtest=AuditLogApiTest`. What fails, and explain exactly where the event went. Put `recordNow` back.
+
+<Fragment slot="hint">Which transaction does `record` join? What happens to that transaction when `InvalidCredentialsException` leaves `login`?</Fragment>
+<Fragment slot="solution">
+
+```
+[ERROR]   AuditLogApiTest.aFailedSignInIsRecordedEvenThoughTheRequestFails:33 
+Expecting ArrayList:
+  []
+to contain:
+  ["LOGIN_FAILED"]
+```
+
+`record` joins `login`'s transaction. The event is saved inside it, and then `login` throws `InvalidCredentialsException`, a `RuntimeException`, so Spring rolls the whole transaction back, event included. Nothing is ever written. `recordNow` runs in its own transaction, which commits before the exception is thrown, so the event survives. Without the test, everything would look fine: sign-ins would work, and the log would simply never show a single failed attempt, which is exactly what an attacker guessing passwords would want.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Logging secrets">
+"Login failed for asha@example.com with password correct horse batery" contains Asha's password with one typo. Never write passwords, tokens or card numbers to any log.
+</Aside>
+
+<Aside type="caution" title="Recording everything">
+If owners using their own accounts were recorded, the log would be millions of boring lines, and nobody would ever find the one that matters. Record what someone would need to investigate.
+</Aside>
+
+<Aside type="caution" title="Letting the watched read or edit the log">
+Support's actions are in the log, so support cannot read it, and nobody can change it through the API.
+</Aside>
+
+## Recap
+
+- An audit event records **who**, **what**, **to what** and **when**, and is only ever added.
+- Record sign-ins, failed sign-ins, staff access to customers' things, and role changes. Never record secrets.
+- `record` joins the current transaction; `recordNow` (`REQUIRES_NEW`) commits on its own, so failed requests and read-only requests are still recorded.
+- Because all access goes through `AccessPolicy`, one method there records all staff access.
+- Only admins read the log.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which of these belongs in an audit event\'s detail?',
+			options: ['The wrong password that was typed', '"CUSTOMER to SUPPORT"', 'The refresh token that was used'],
+			answer: 1,
+			explanation: 'Describe the change; never store secrets, not even wrong passwords, which are often a typo of the right one.',
+		},
+		{
+			question: 'Why is the failed sign-in recorded with recordNow and not record?',
+			options: ['recordNow is faster', 'The sign-in\'s transaction is rolled back when it fails, and an event inside it would be lost', 'record cannot store an empty actor'],
+			answer: 1,
+			explanation: 'REQUIRES_NEW gives the event its own transaction, which commits whatever happens to the request.',
+		},
+		{
+			question: 'Asha views her own balance. What does the audit log get?',
+			options: ['An ACCOUNT_VIEW event', 'Nothing', 'A LOGIN event'],
+			answer: 1,
+			explanation: 'Only staff access to someone else\'s things is recorded. Owners using their own accounts is ordinary use.',
+		},
+	]}
+/>
+
+<MarkComplete />

@@ -1,0 +1,571 @@
+---
+title: "Mini-project: cardholder, owner, support and admin rules in PayDeck"
+description: "Let an account owner give a card to someone else, who may use and freeze it but not change or unfreeze it, with the rules in AccessPolicy, tests for every one, and the card showing up in the other person's app."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Families and small teams share money. Asha wants to give her partner Eve a card that spends from Asha's USD account, without giving Eve her password or a view of her balance. This project adds a fourth kind of person to PayDeck's rules, the **cardholder**, and it is the promise from the Module 27 project coming true: a cardholder who tries to change a limit on a card they hold gets `403`, because they are allowed to know that card exists.
+
+## The rules
+
+The table from lesson 30.2 gains a column:
+
+| | owner | cardholder | support | admin |
+|---|:---:|:---:|:---:|:---:|
+| account: view, move money, issue card | yes | no | (as before) | (as before) |
+| card: view | yes | yes | yes | yes |
+| card: freeze | yes | yes | yes | yes |
+| card: unfreeze | yes | **no** | yes | yes |
+| card: change settings | yes | no | no | no |
+| card: cancel | yes | no | no | yes |
+
+Why may Eve freeze but not unfreeze? Freezing is the safe direction: if Eve loses the card, she should be able to stop it at once, at 2 a.m., without phoning Asha. Unfreezing turns spending back on, and the money is Asha's, so that is Asha's decision. Holding a card gives Eve no view of the account: not its balance, not its history. Paying with the card arrives in Module 32, and the cardholder will be allowed to do that too.
+
+## The tasks
+
+1. **The database.** `V10__add_cardholders.sql` adds `cardholder_user_id` to `cards`: a nullable reference to `users`, with an index. Empty means the owner holds the card.
+2. **Issuing to someone.** `POST /api/accounts/{id}/cards` accepts an optional `cardholderEmail` (validated as an email). If it is given, find that PayDeck user and store their ID on the card; if nobody has that email, answer `422` with code `CARDHOLDER_NOT_FOUND` and the message "Nobody with that email uses PayDeck yet. Ask them to sign up first." Giving a card to yourself is the same as keeping it. Every card in a response gets `cardholderId` (or `null`).
+3. **The rules.** `Relationship` gains `CARDHOLDER`, `AccessPolicy.card` recognises it, and `allows` follows the table above. Update the table in `AccessPolicy`'s comment too.
+4. **"Cards given to me".** `GET /api/me` gains `heldCards`: for each card someone gave this person, the card, the owner's name, and the account's currency (the app needs it to show the limit). Not the balance.
+5. **Tests.** `CardholderApiTest` with three tests: the cardholder sees the card in `/api/me` and through `GET /api/cards/{id}`, but gets `404` for the account; the cardholder may freeze, but gets `403` for unfreeze, settings and cancel, while the owner may unfreeze; and an unknown email is `422 CARDHOLDER_NOT_FOUND`. Plus one test in `AccessPolicyTest` for the cardholder column. `./mvnw test` should report 82 tests.
+6. **The app.** The Issue a card screen gets an optional field, **Give it to (their PayDeck email)**. The Cards screen shows a **Given to you** section under your own cards, each with "From" and the owner's name. Opening one shows the card, a sentence explaining what you may do, and **Freeze card** if it is active, and nothing else.
+7. Try the whole story with two people, and commit.
+
+<Exercise title="Build it">
+Do the seven tasks.
+
+<Fragment slot="hint">`AccessPolicy.card` already loads the card and its account's owner; the cardholder check is one more comparison, with `card.getCardholderUserId()`. In the `allows` switch, `relationship != Relationship.NONE` means "owner or cardholder". For `heldCards`, a Spring Data method named `findByCardholderUserIdOrderByCreatedAt` writes the query for you.</Fragment>
+<Fragment slot="hint2">The cards a person was given come from `/api/me`, not from the cards list of their own account. So after a freeze, the app must fetch `['me']` again, as well as the account's cards: add it to `useCardMutation`'s `onSuccess`. In `CardDetailScreen`, look for the card in `me.data.heldCards` first.</Fragment>
+<Fragment slot="solution">
+
+### The database
+
+`src/main/resources/db/migration/V10__add_cardholders.sql`:
+
+```sql
+-- An owner can give a card to someone else, the cardholder. Empty means the
+-- owner holds it.
+ALTER TABLE cards ADD COLUMN cardholder_user_id UUID REFERENCES users (id);
+CREATE INDEX cards_cardholder_user_id ON cards (cardholder_user_id);
+```
+
+### The card
+
+In `Card.java`, a field after `spendingLimitCents`:
+
+```java
+    /** Who the owner gave this card to, or {@code null} if the owner holds it. */
+    private UUID cardholderUserId;
+```
+
+`issue` takes it as a fourth parameter and stores it:
+
+```java
+    public static Card issue(UUID accountId, String nickname, Long spendingLimitCents, UUID cardholderUserId) {
+        Card card = new Card();
+        card.accountId = accountId;
+        card.nickname = nickname;
+        card.last4 = String.format("%04d", RANDOM.nextInt(10_000));
+        card.status = CardStatus.ACTIVE;
+        card.spendingLimitCents = spendingLimitCents;
+        card.cardholderUserId = cardholderUserId;
+        card.createdAt = Instant.now();
+        return card;
+    }
+```
+
+with a getter, `getCardholderUserId()`. In `CardTest`, the card is now made with `Card.issue(UUID.randomUUID(), "Groceries", null, null)`.
+
+`CardRepository` gets one more query:
+
+```java
+    List<Card> findByCardholderUserIdOrderByCreatedAt(UUID cardholderUserId);
+```
+
+### Issuing to someone
+
+In `CardController`, the request and the response each gain a field. `CardResponse.of` becomes `public`, because `MeController` will use it:
+
+```java
+    /** Leave out {@code cardholderEmail} to keep the card yourself, or give the email of another PayDeck user. */
+    public record IssueCardRequest(
+            @NotBlank @Size(max = 50) String nickname,
+            @Positive @Max(10_000_000) Long spendingLimitCents,
+            @Email String cardholderEmail) {
+    }
+```
+
+```java
+    public record CardResponse(
+            UUID id, UUID accountId, String nickname, String last4, CardStatus status,
+            Long spendingLimitCents, UUID cardholderId, Instant createdAt) {
+
+        public static CardResponse of(Card card) {
+            return new CardResponse(card.getId(), card.getAccountId(), card.getNickname(), card.getLast4(),
+                    card.getStatus(), card.getSpendingLimitCents(), card.getCardholderUserId(), card.getCreatedAt());
+        }
+    }
+```
+
+The controller needs `UserRepository` (add it to the constructor), and `issue` looks the cardholder up:
+
+```java
+        access.account(user, accountId, AccountAction.ISSUE_CARD);
+        UUID cardholder = null;
+        if (request.cardholderEmail() != null && !request.cardholderEmail().isBlank()) {
+            UUID found = users.findByEmail(User.normalizeEmail(request.cardholderEmail()))
+                    .map(User::getId)
+                    .orElseThrow(() -> new BusinessRuleException("CARDHOLDER_NOT_FOUND",
+                            "Nobody with that email uses PayDeck yet. Ask them to sign up first."));
+            // Giving a card to yourself is the same as keeping it.
+            cardholder = found.equals(user.id()) ? null : found;
+        }
+        Card card = cards.save(Card.issue(accountId, request.nickname().strip(), request.spendingLimitCents(),
+                cardholder));
+```
+
+New imports: `dev.paydeck.api.auth.User`, `dev.paydeck.api.auth.UserRepository`, `dev.paydeck.api.common.BusinessRuleException` and `jakarta.validation.constraints.Email`.
+
+"Nobody with that email uses PayDeck" does tell Asha whether an email has an account. That is acceptable here: Asha has to be signed in, can only learn about one address per request, and is choosing someone she knows. Compare sign-in (lesson 27.4), where the same information would help strangers guess passwords, and is hidden.
+
+### The rules
+
+`Relationship.java`:
+
+```java
+public enum Relationship {
+    /** They opened the account (or the card's account). */
+    OWNER,
+    /** The owner gave them this card. */
+    CARDHOLDER,
+    /** No connection at all. */
+    NONE
+}
+```
+
+In `AccessPolicy`, the table in the comment gets the new column:
+
+```java
+ * <pre>
+ *                        owner  cardholder  support  admin
+ * account: view            yes       -         yes     yes
+ * account: move money      yes       -          -       -
+ * account: issue card      yes       -          -       -
+ * card: view               yes      yes        yes     yes
+ * card: freeze             yes      yes        yes     yes
+ * card: unfreeze           yes       -         yes     yes
+ * card: change settings    yes       -          -       -
+ * card: cancel             yes       -          -      yes
+ * </pre>
+```
+
+the card rules follow it:
+
+```java
+        return switch (action) {
+            case VIEW, FREEZE -> relationship != Relationship.NONE || staff;
+            case UNFREEZE -> owner || staff;
+            case CHANGE_SETTINGS -> owner;
+            case CANCEL -> owner || role == Role.ADMIN;
+        };
+```
+
+and `card` works out the new relationship:
+
+```java
+        Relationship relationship = user.id().equals(ownerId) ? Relationship.OWNER
+                : user.id().equals(card.getCardholderUserId()) ? Relationship.CARDHOLDER
+                : Relationship.NONE;
+```
+
+The account rules do not change at all: they only ever said yes to `OWNER`, so a cardholder is a stranger to the account. Cardholders are not recorded in the audit log, because `recordStaffAccess` only records relationship `NONE`: Eve using the card she was given is ordinary use.
+
+### "Cards given to me"
+
+In `MeController`, the response gains a list, with a small record for each held card:
+
+```java
+    /** {@code heldCards}: cards on other people's accounts that they gave to this person. */
+    public record MeResponse(UserResponse user, List<AccountResponse> accounts, List<HeldCardResponse> heldCards) {
+    }
+
+    /** A card someone gave you, with whose account it pays from. Not their balance: that stays theirs. */
+    public record HeldCardResponse(CardResponse card, String ownerName, SupportedCurrency currency) {
+    }
+```
+
+`MeController` gets a `CardRepository` in its constructor, and `me` builds the list:
+
+```java
+        List<HeldCardResponse> held = cards.findByCardholderUserIdOrderByCreatedAt(current.id()).stream()
+                .map(card -> {
+                    Account account = accounts.findById(card.getAccountId()).orElseThrow();
+                    return new HeldCardResponse(CardResponse.of(card), account.getOwnerName(), account.getCurrency());
+                })
+                .toList();
+        return new MeResponse(user, owned, held);
+```
+
+New imports: `dev.paydeck.api.account.Account`, `dev.paydeck.api.card.CardController.CardResponse`, `dev.paydeck.api.card.CardRepository` and `dev.paydeck.api.money.SupportedCurrency`.
+
+### Tests
+
+`src/test/java/dev/paydeck/api/access/CardholderApiTest.java`:
+
+```java
+package dev.paydeck.api.access;
+
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import java.util.UUID;
+
+import com.jayway.jsonpath.JsonPath;
+import dev.paydeck.api.ApiTestSupport;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.MediaType;
+
+/** An owner gives a card to someone else, who may use it but not run it. */
+class CardholderApiTest extends ApiTestSupport {
+
+    @Test
+    void theCardholderSeesTheCardButNotTheAccount() throws Exception {
+        UUID ashas = openAccount("Asha", "USD");
+        TestUser bea = register("Bea");
+        UUID card = giveCard(ashas, bea);
+
+        mvc.perform(get("/api/me").with(as(bea)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.accounts.length()").value(0))
+                .andExpect(jsonPath("$.heldCards[0].card.id").value(card.toString()))
+                .andExpect(jsonPath("$.heldCards[0].ownerName").value("Asha"))
+                .andExpect(jsonPath("$.heldCards[0].currency").value("USD"));
+        mvc.perform(get("/api/cards/{id}", card).with(as(bea)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.cardholderId").value(bea.id().toString()));
+        // Holding a card is not a window into Asha's balance.
+        mvc.perform(get("/api/accounts/{id}", ashas).with(as(bea))).andExpect(status().isNotFound());
+    }
+
+    @Test
+    void theCardholderMayFreezeButOnlyTheOwnerUnfreezes() throws Exception {
+        UUID ashas = openAccount("Asha", "USD");
+        TestUser bea = register("Bea");
+        UUID card = giveCard(ashas, bea);
+
+        mvc.perform(post("/api/cards/{id}/freeze", card).with(as(bea)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("FROZEN"));
+        mvc.perform(post("/api/cards/{id}/unfreeze", card).with(as(bea)))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.detail").value("You are not allowed to do this to this card."));
+        mvc.perform(patch("/api/cards/{id}", card).with(as(bea))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"spendingLimitCents": 99999}
+                                """))
+                .andExpect(status().isForbidden());
+        mvc.perform(delete("/api/cards/{id}", card).with(as(bea))).andExpect(status().isForbidden());
+
+        mvc.perform(post("/api/cards/{id}/unfreeze", card).with(asOwnerOf(ashas)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("ACTIVE"));
+    }
+
+    @Test
+    void someoneWhoDoesNotUsePayDeckCannotBeGivenACard() throws Exception {
+        UUID ashas = openAccount("Asha", "USD");
+
+        mvc.perform(post("/api/accounts/{id}/cards", ashas).with(asOwnerOf(ashas))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"nickname": "For Bea", "cardholderEmail": "nobody-%s@example.com"}
+                                """.formatted(UUID.randomUUID())))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.code").value("CARDHOLDER_NOT_FOUND"));
+    }
+
+    private UUID giveCard(UUID accountId, TestUser cardholder) throws Exception {
+        String body = mvc.perform(post("/api/accounts/{id}/cards", accountId).with(asOwnerOf(accountId))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"nickname": "Family card", "cardholderEmail": "%s"}
+                                """.formatted(cardholder.email())))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        return UUID.fromString(JsonPath.read(body, "$.id"));
+    }
+}
+```
+
+And in `AccessPolicyTest`:
+
+```java
+    @Test
+    void aCardholderMayLookAndFreezeButNotRunTheCard() {
+        assertThat(AccessPolicy.allows(Role.CUSTOMER, Relationship.CARDHOLDER, CardAction.VIEW)).isTrue();
+        assertThat(AccessPolicy.allows(Role.CUSTOMER, Relationship.CARDHOLDER, CardAction.FREEZE)).isTrue();
+        assertThat(AccessPolicy.allows(Role.CUSTOMER, Relationship.CARDHOLDER, CardAction.UNFREEZE)).isFalse();
+        assertThat(AccessPolicy.allows(Role.CUSTOMER, Relationship.CARDHOLDER, CardAction.CHANGE_SETTINGS)).isFalse();
+        assertThat(AccessPolicy.allows(Role.CUSTOMER, Relationship.CARDHOLDER, CardAction.CANCEL)).isFalse();
+    }
+```
+
+`./mvnw test`: 82 tests, all green.
+
+### The app: types and requests
+
+In `src/types.ts`, `Card` gains `cardholderId`, and a new type describes a held card:
+
+```ts
+  spendingLimitCents: number | null;
+  /** Who the owner gave the card to, or null if the owner holds it. */
+  cardholderId: string | null;
+  createdAt: string;
+};
+
+/** A card someone else gave you, with whose account it pays from. */
+export type HeldCard = {
+  card: Card;
+  ownerName: string;
+  currency: Currency;
+};
+```
+
+In `src/api/auth.ts`, `Me` gains the list (import `HeldCard`):
+
+```ts
+/** Who is signed in, the accounts they own, and the cards other people gave them. */
+export type Me = {
+  user: User;
+  accounts: Account[];
+  heldCards: HeldCard[];
+};
+```
+
+In `src/api/paydeck.ts`, `issueCard` sends the email:
+
+```ts
+/** {@code cardholderEmail}: give the card to another PayDeck user, or null to keep it. */
+export const issueCard = (
+  accountId: string,
+  nickname: string,
+  spendingLimitCents: number | null,
+  cardholderEmail: string | null,
+) =>
+  request<Card>(`/api/accounts/${accountId}/cards`, {
+    method: 'POST',
+    body: { nickname, spendingLimitCents, cardholderEmail },
+  });
+```
+
+In `src/api/hooks.ts`, card changes now refresh `['me']` too, and `useIssueCard` passes the email on:
+
+```ts
+/** A mutation that changes a card, and then fetches your cards, and the cards given to you, again. */
+function useCardMutation<Input>(change: (input: Input) => Promise<unknown>) {
+  const accountId = useAccountId();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: change,
+    onSuccess: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: keys.cards(accountId) }),
+        queryClient.invalidateQueries({ queryKey: keys.me }),
+      ]),
+  });
+}
+
+export function useIssueCard() {
+  const accountId = useAccountId();
+  return useCardMutation(
+    (input: { nickname: string; spendingLimitCents: number | null; cardholderEmail: string | null }) =>
+      api.issueCard(accountId, input.nickname, input.spendingLimitCents, input.cardholderEmail),
+  );
+}
+```
+
+### The app: screens
+
+`IssueCardScreen` gets a third piece of state, `const [cardholder, setCardholder] = useState('');`, a field after the limit (which loses its `onSubmitEditing`):
+
+```tsx
+      <Field
+        label="Give it to (their PayDeck email)"
+        value={cardholder}
+        onChangeText={setCardholder}
+        autoCapitalize="none"
+        autoCorrect={false}
+        keyboardType="email-address"
+        placeholder="Leave empty to keep it yourself"
+        onSubmitEditing={confirm}
+      />
+```
+
+and `confirm` sends it, empty meaning "keep it":
+
+```tsx
+      issue.mutate(
+        {
+          nickname: nickname.trim(),
+          spendingLimitCents: parseLimit(limit),
+          cardholderEmail: cardholder.trim() === '' ? null : cardholder.trim(),
+        },
+        { onSuccess: goBack },
+      );
+```
+
+The API's "Nobody with that email..." message appears through the existing `issue.error` line.
+
+`CardsScreen` also reads `useMe()` (wait for it with the others: `QueryState queries={[account, cards, me]}`), picks the cards given to you that are not cancelled:
+
+```tsx
+  const given = me.data.heldCards.filter((held) => held.card.status !== 'CANCELLED');
+```
+
+and shows them under your own:
+
+```tsx
+      {given.length > 0 && <Text style={styles.heading}>Given to you</Text>}
+      {given.map((held) => (
+        <Pressable
+          key={held.card.id}
+          accessibilityRole="button"
+          onPress={() => navigate({ name: 'card', cardId: held.card.id })}
+        >
+          <PaymentCard card={held.card} currency={held.currency} />
+          <Text style={styles.muted}>From {held.ownerName}</Text>
+        </Pressable>
+      ))}
+```
+
+with `StyleSheet` imported and two styles:
+
+```tsx
+const styles = StyleSheet.create({
+  heading: { fontSize: 20, fontWeight: '700', marginTop: 8 },
+  muted: { color: '#5d6177', marginTop: 4 },
+});
+```
+
+`CardDetailScreen` also waits for `useMe()`, and checks for a held card before its own cards:
+
+```tsx
+  const card = cards.data.find((c) => c.id === cardId);
+  const held = me.data.heldCards.find((h) => h.card.id === cardId);
+  if (held !== undefined) {
+    return <GivenCard held={held} />;
+  }
+```
+
+`GivenCard` (import `HeldCard` from `../types`, and add `muted: { color: '#5d6177' }` to the styles):
+
+```tsx
+/** A card someone gave you: you can freeze it if you lose it, and that is all. */
+function GivenCard({ held }: { held: HeldCard }) {
+  const freeze = useFreezeCard();
+  const { card, ownerName, currency } = held;
+
+  return (
+    <Screen title={card.nickname}>
+      <PaymentCard card={card} currency={currency} />
+      <Text style={styles.muted}>
+        {ownerName} gave you this card. If you lose it, freeze it straight away. Only {ownerName} can unfreeze,
+        change or cancel it.
+      </Text>
+      {card.status === 'ACTIVE' && (
+        <Button title="Freeze card" variant="secondary" onPress={() => freeze.mutate(card.id)} />
+      )}
+      {freeze.error && <Text style={styles.error}>{freeze.error.message}</Text>}
+    </Screen>
+  );
+}
+```
+
+`npx tsc --noEmit` reports no errors.
+
+### Try it
+
+1. As Asha, open **Cards → Issue a card**, name it "For Eve", and type an email nobody uses. The screen says: "Nobody with that email uses PayDeck yet. Ask them to sign up first."
+2. Type Eve's email (Eve must have signed up and opened her own account) and issue it. Asha sees it among her cards, like any other.
+3. Sign in as Eve. Her Cards screen shows her own cards, then **Given to you** with "For Eve" and **From Asha Rao**.
+4. Open it: "Asha Rao gave you this card. If you lose it, freeze it straight away. Only Asha Rao can unfreeze, change or cancel it." Tap **Freeze card**: the card turns grey, and there is no button to undo it.
+5. Ask the API directly, with Eve's token, for the account behind the card, and try to unfreeze:
+
+```sh
+curl -s localhost:8080/api/me -H "Authorization: Bearer $EVE" | jq '.heldCards[0]'
+```
+
+```json
+{
+  "card": {
+    "id": "eb9aace8-8b1c-42eb-ac39-b4b0f16da5f8",
+    "accountId": "20f0ebd9-5f0d-4685-b788-d6c386e6ac85",
+    "nickname": "For Eve",
+    "last4": "2799",
+    "status": "FROZEN",
+    "spendingLimitCents": null,
+    "cardholderId": "41609685-d300-4e72-8b60-949d329a3f9b",
+    "createdAt": "2026-10-22T05:44:05.257858Z"
+  },
+  "ownerName": "Asha Rao",
+  "currency": "USD"
+}
+```
+
+```sh
+curl -s localhost:8080/api/accounts/20f0ebd9-5f0d-4685-b788-d6c386e6ac85 -H "Authorization: Bearer $EVE"
+```
+
+```json
+{"detail":"Account 20f0ebd9-5f0d-4685-b788-d6c386e6ac85 was not found","instance":"/api/accounts/20f0ebd9-5f0d-4685-b788-d6c386e6ac85","status":404,"title":"Not found"}
+```
+
+```sh
+curl -s -X POST localhost:8080/api/cards/eb9aace8-8b1c-42eb-ac39-b4b0f16da5f8/unfreeze -H "Authorization: Bearer $EVE"
+```
+
+```json
+{"detail":"You are not allowed to do this to this card.","instance":"/api/cards/eb9aace8-8b1c-42eb-ac39-b4b0f16da5f8/unfreeze","status":403,"title":"Not allowed","code":"FORBIDDEN"}
+```
+
+Eve knows the account's ID (it is in the card), and still gets `404`: knowing an ID is not permission. The unfreeze is `403`, not `404`, because she may see the card.
+
+6. As Asha, open the card and unfreeze it. Commit.
+</Fragment>
+</Exercise>
+
+<Exercise title="One word too generous">
+In `allows`, change the `UNFREEZE` line to `relationship != Relationship.NONE || staff`, the same as `FREEZE`. Run `./mvnw test -Dtest='CardholderApiTest,AccessPolicyTest'`. What fails? Then explain in one sentence why this matters even though freezing and unfreezing look like a matching pair. Put it back.
+
+<Fragment slot="hint">Who decides whether money can be spent from Asha's account?</Fragment>
+<Fragment slot="solution">
+
+```
+[ERROR]   AccessPolicyTest.aCardholderMayLookAndFreezeButNotRunTheCard:46 
+Expecting value to be false but was true
+[ERROR]   CardholderApiTest.theCardholderMayFreezeButOnlyTheOwnerUnfreezes:49 Status expected:<403> but was:<200>
+```
+
+Freezing can only stop spending, so anyone connected to the card may do it; unfreezing turns spending of **Asha's** money back on, so only Asha (or staff helping her) may decide that. Rules that look symmetrical often are not, and a table with a test for every cell is how you notice.
+</Fragment>
+</Exercise>
+
+## What to notice
+
+- **One more column, one class.** A new kind of person needed changes in exactly one place, `AccessPolicy`, plus the data it reads. No controller learned anything about cardholders: they still ask "may this person freeze this card?".
+- **Each relationship sees only what it needs.** The cardholder gets the card, the owner's name and the currency, and nothing about the balance or history.
+- **403 and 404 mean something.** Eve gets 404 for the account (she may not know it), and 403 for unfreezing (she may know the card, but not do that).
+- **The table is the specification.** It is in the comment, in the tests, and on this page, and all three say the same thing.
+
+<MarkComplete />
