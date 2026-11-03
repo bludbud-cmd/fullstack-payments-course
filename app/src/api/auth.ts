@@ -28,28 +28,36 @@ export const register = (
   request<AuthResponse>('/api/auth/register', {
     method: 'POST',
     body: { email, password, displayName },
+    withToken: false,
   });
 
 export const login = (email: string, password: string) =>
   request<AuthResponse>('/api/auth/login', {
     method: 'POST',
     body: { email, password },
+    withToken: false,
   });
 
 export const refresh = (refreshToken: string) =>
   request<AuthResponse>('/api/auth/refresh', {
     method: 'POST',
     body: { refreshToken },
+    withToken: false,
   });
 
 export const logout = (refreshToken: string) =>
-  request<void>('/api/auth/logout', { method: 'POST', body: { refreshToken } });
+  request<void>('/api/auth/logout', {
+    method: 'POST',
+    body: { refreshToken },
+    withToken: false,
+  });
 
 /** Trades the one-time code from "Sign in with Google" for tokens. */
 export const exchangeCode = (code: string, codeVerifier: string) =>
   request<AuthResponse>('/api/auth/token', {
     method: 'POST',
     body: { code, codeVerifier },
+    withToken: false,
   });
 
 export const getMe = () => request<Me>('/api/me');

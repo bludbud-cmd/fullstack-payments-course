@@ -18,6 +18,11 @@ type RequestOptions = {
   body?: unknown;
   /** Send the same key again when retrying, so money never moves twice. */
   idempotencyKey?: string;
+  /**
+   * False for the sign-in endpoints. The API refuses any request that carries
+   * an expired access token, so refreshing must not send one.
+   */
+  withToken?: boolean;
 };
 
 /**
@@ -46,7 +51,8 @@ export async function request<T>(
   path: string,
   options: RequestOptions = {},
 ): Promise<T> {
-  const token = tokens?.accessToken() ?? null;
+  const token =
+    options.withToken === false ? null : tokens?.accessToken() ?? null;
   const response = await send(path, options, token);
 
   // Access tokens last 15 minutes. When one has expired, get a new one and

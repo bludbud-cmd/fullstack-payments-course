@@ -361,6 +361,11 @@ export function installFakeApi() {
       return problem(f.status, f.detail, f.code);
     }
     const token = headers.Authorization?.replace('Bearer ', '');
+    // Like Spring Security: a token that does not work is refused on every
+    // path, even the public sign-in ones.
+    if (token && !accessTokens.has(token)) {
+      return problem(401, 'Sign in to continue.', 'NOT_SIGNED_IN');
+    }
     return handle(
       method,
       path,
