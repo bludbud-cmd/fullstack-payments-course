@@ -1,0 +1,782 @@
+---
+title: "33.2 Spring WebSocket with STOMP"
+description: "Give PayDeck's API a WebSocket endpoint that speaks STOMP: services announce what happened as events, a listener sends them to the right topics only after the money is safely saved, and every connection and subscription is checked with the same rules as the REST API."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson PayDeck's API accepts WebSocket connections at `/ws`, and whenever money moves or a card is frozen it sends a message to `/topic/accounts/{id}`, to everyone allowed to watch that account, and to the cardholder's own topic. You can watch it happen in the terminal.
+
+## Why it matters
+
+The live feed is a second door into people's money data, next to the REST API. It must follow the same rules: only signed-in people, only their own accounts, cardholders never see the owner's balance. And it must never announce something that did not happen: a "Money added" banner for a payment that then failed would be worse than no banner at all.
+
+## The idea
+
+### Topics and subscriptions
+
+With STOMP (lesson 33.1), the API sends each message to a **destination**, a name that looks like a path. Apps **subscribe** to the destinations they want. PayDeck uses two kinds:
+
+- `/topic/accounts/{accountId}`: everything that happens to one account. The owner watches it, and so may staff, by the same `VIEW` rule as `GET /api/accounts/{id}` (lesson 30.2).
+- `/topic/users/{userId}`: messages for one person. A cardholder may not watch the account behind their card, so news about *their card* comes here, without the balance.
+
+Spring's **simple broker** keeps the list of subscribers in the API's memory and delivers each message to everyone subscribed to its destination.
+
+### Events: "something happened"
+
+Who should send these messages? Not `MoneyMovementService` itself: it should move money, not know about WebSockets (and, in Module 34, phones). Instead it **announces** what happened, and other code listens. Spring has this built in:
+
+- `ApplicationEventPublisher.publishEvent(x)` announces an object `x`, the **event**.
+- A method marked as a listener for that type of object is called with it.
+
+PayDeck's event is an `AccountEvent`: which account, what kind of thing (`MONEY_IN`, `CARD_DECLINED`, …), a title and a sentence for people, and the card, if there was one.
+
+### Only after it is saved
+
+`topUp` runs in a database transaction (lesson 24.3). If it announced "Money added" and the transaction then rolled back, everyone would have been told about money that never arrived. So the listener is a **`@TransactionalEventListener`**: Spring holds the event until the transaction **commits**, and throws it away if the transaction rolls back.
+
+It is also **`@Async`**: it runs on another thread, so the payment request answers straight away, however many apps are listening. And it opens its own transaction (`REQUIRES_NEW`, as in lesson 30.5) to read the new balance.
+
+### Signing in over a WebSocket
+
+The REST API reads the access token from each request's `Authorization` header. A WebSocket has one handshake and then many messages, and not every WebSocket client can add headers to the handshake. STOMP's first frame, `CONNECT`, can carry headers though, so PayDeck reads the token there. A **channel interceptor** sees every frame the app sends before Spring handles it:
+
+- `CONNECT` without a valid token: refused.
+- `SUBSCRIBE` to an account: allowed only if `AccessPolicy` says this person may `VIEW` it.
+- `SUBSCRIBE` to a user topic: only your own.
+- `SEND`: refused. The app only listens; changes go through the REST API, with all its checks.
+
+## Worked example
+
+### Dependency
+
+```xml
+        <dependency>
+            <!-- Live updates over WebSockets, with STOMP -->
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
+        </dependency>
+```
+
+### The event and the message
+
+Create the package `dev.paydeck.api.live`. `AccountEvent.java`:
+
+```java
+package dev.paydeck.api.live;
+
+import java.util.UUID;
+
+/**
+ * Something happened to an account that people should hear about straight
+ * away. Services publish these inside their database transaction;
+ * {@link LiveUpdates} sends them out only once the transaction has committed,
+ * so nobody is told about money that then failed to move.
+ */
+public record AccountEvent(UUID accountId, Kind kind, String title, String body, UUID cardId) {
+
+    public enum Kind {
+        MONEY_IN,
+        MONEY_OUT,
+        CARD_PAYMENT,
+        CARD_DECLINED,
+        REFUND,
+        CARD_UPDATED;
+
+        /** Declines get their own on/off switch in notification settings. */
+        public boolean isDecline() {
+            return this == CARD_DECLINED;
+        }
+    }
+
+    public static AccountEvent of(UUID accountId, Kind kind, String title, String body) {
+        return new AccountEvent(accountId, kind, title, body, null);
+    }
+}
+```
+
+A record with a nested enum. `isDecline()` is for Module 34's notification settings. `LiveMessage.java` is what subscribers receive, as JSON:
+
+```java
+package dev.paydeck.api.live;
+
+import java.time.Instant;
+import java.util.UUID;
+
+import dev.paydeck.api.live.AccountEvent.Kind;
+
+/**
+ * What subscribers to /topic/accounts/{id} and /topic/users/{id} receive, as JSON.
+ * {@code balanceCents} is the account's balance just after the event, or null
+ * for a cardholder, who may not see the balance of the account behind their card.
+ */
+public record LiveMessage(UUID accountId, Kind kind, String title, String body, UUID cardId, Long balanceCents,
+                          Instant at) {
+
+    LiveMessage withoutBalance() {
+        return new LiveMessage(accountId, kind, title, body, cardId, null, at);
+    }
+}
+```
+
+`balanceCents` is a `Long`, not a `long`, so that it can be `null`: the cardholder's copy leaves it out.
+
+The messages say amounts the way people write them, "$10.00", so add a small helper, `common/MoneyFormat.java`:
+
+```java
+package dev.paydeck.api.common;
+
+import java.math.BigDecimal;
+import java.text.NumberFormat;
+import java.util.Currency;
+import java.util.Locale;
+
+import dev.paydeck.api.money.SupportedCurrency;
+
+/** Writes amounts for people to read, such as "$12.50", in notifications. */
+public final class MoneyFormat {
+
+    private MoneyFormat() {
+    }
+
+    public static String format(long cents, SupportedCurrency currency) {
+        NumberFormat format = NumberFormat.getCurrencyInstance(Locale.US);
+        format.setCurrency(Currency.getInstance(currency.name()));
+        return format.format(BigDecimal.valueOf(cents, 2));
+    }
+}
+```
+
+`BigDecimal.valueOf(cents, 2)` means "this many hundredths" (lesson 24.1), and `NumberFormat` adds the currency sign and the separators.
+
+### Announcing
+
+In `MoneyMovementService`, take an `ApplicationEventPublisher` in the constructor (Spring provides one), and announce after each ledger transaction. In `topUp`:
+
+```java
+        LedgerTransaction transaction = ledger.record(TransactionType.TOP_UP, description, idempotencyKey, fingerprint,
+                List.of(new Posting(outsideWorld.getId(), -amountCents), new Posting(account.getId(), amountCents)));
+        events.publishEvent(AccountEvent.of(accountId, AccountEvent.Kind.MONEY_IN, "Money added",
+                MoneyFormat.format(amountCents, account.getCurrency()) + " added: " + description));
+        return new MovementResult(transaction, false);
+```
+
+and in `transfer`, one event for each side:
+
+```java
+        String amount = MoneyFormat.format(amountCents, from.getCurrency());
+        events.publishEvent(AccountEvent.of(from.getId(), AccountEvent.Kind.MONEY_OUT, "Money sent",
+                amount + " sent to " + to.getOwnerName() + ": " + description));
+        events.publishEvent(AccountEvent.of(to.getId(), AccountEvent.Kind.MONEY_IN, "Money received",
+                amount + " from " + from.getOwnerName() + ": " + description));
+```
+
+In `CardPaymentService` (Module 32), the same for payments, declines and refunds. In `pay`, before the decline check:
+
+```java
+        String amount = MoneyFormat.format(amountCents, account.getCurrency());
+        DeclineReason reason = declineReason(card, account, amountCents);
+        if (reason != null) {
+            events.publishEvent(new AccountEvent(account.getId(), AccountEvent.Kind.CARD_DECLINED,
+                    "Payment declined", amount + " at " + merchant + " with " + card.getNickname() + ". "
+                            + reason.message(), cardId));
+            // ... save the decline, as before
+```
+
+after an approved payment's ledger transaction:
+
+```java
+        events.publishEvent(new AccountEvent(account.getId(), AccountEvent.Kind.CARD_PAYMENT,
+                "You paid " + merchant, amount + " with " + card.getNickname(), cardId));
+```
+
+and in `refund`, after `payment.refunded(...)`:
+
+```java
+        events.publishEvent(new AccountEvent(account.getId(), AccountEvent.Kind.REFUND, "Refund from "
+                + payment.getMerchant(), MoneyFormat.format(payment.getAmountCents(), account.getCurrency())
+                + " is back in your wallet", payment.getCardId()));
+```
+
+Finally `CardController` announces freezes, so every open app redraws the card. Take the publisher in its constructor, call `cardChanged(card, "frozen")` after `card.freeze()` and `cardChanged(card, "unfrozen")` after `card.unfreeze()`, and add:
+
+```java
+    /** Lets every open app (the owner's and the cardholder's) redraw the card straight away. */
+    private void cardChanged(Card card, String what) {
+        events.publishEvent(new AccountEvent(card.getAccountId(), AccountEvent.Kind.CARD_UPDATED,
+                card.getNickname() + " " + what, "The card ending " + card.getLast4() + " was " + what + ".",
+                card.getId()));
+    }
+```
+
+A declined payment is announced too: its transaction commits (the decline is saved), so the listener runs.
+
+### Delivering
+
+`LiveUpdates.java`:
+
+```java
+package dev.paydeck.api.live;
+
+import java.time.Instant;
+import java.util.UUID;
+
+import dev.paydeck.api.account.Account;
+import dev.paydeck.api.account.AccountRepository;
+import dev.paydeck.api.card.CardRepository;
+import dev.paydeck.api.ledger.LedgerService;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.event.TransactionalEventListener;
+
+/**
+ * Tells people what happened, the moment it is safely saved: over
+ * WebSockets, to every open app watching the account
+ * ({@code /topic/accounts/{id}}) or the person ({@code /topic/users/{id}}).
+ */
+@Component
+public class LiveUpdates {
+
+    private final SimpMessagingTemplate stomp;
+    private final AccountRepository accounts;
+    private final CardRepository cards;
+    private final LedgerService ledger;
+
+    public LiveUpdates(SimpMessagingTemplate stomp, AccountRepository accounts, CardRepository cards,
+                       LedgerService ledger) {
+        this.stomp = stomp;
+        this.accounts = accounts;
+        this.cards = cards;
+        this.ledger = ledger;
+    }
+
+    /**
+     * Runs after the transaction that published the event has committed, on
+     * another thread, so a slow connection never slows down a payment.
+     */
+    @Async
+    @TransactionalEventListener
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void deliver(AccountEvent event) {
+        Account account = accounts.findById(event.accountId()).orElseThrow();
+        LiveMessage message = new LiveMessage(event.accountId(), event.kind(), event.title(), event.body(),
+                event.cardId(), ledger.balanceOf(event.accountId()), Instant.now());
+
+        stomp.convertAndSend("/topic/accounts/" + event.accountId(), message);
+
+        // Cardholders may not watch the account, so they hear about their card on their own topic.
+        if (event.cardId() != null) {
+            cards.findById(event.cardId())
+                    .map(card -> card.getCardholderUserId())
+                    .filter(holder -> !holder.equals(account.getOwnerUserId()))
+                    .ifPresent(holder -> stomp.convertAndSend("/topic/users/" + holder, message.withoutBalance()));
+        }
+    }
+}
+```
+
+- `SimpMessagingTemplate` is Spring's way to send to a STOMP destination; `convertAndSend` turns the record into JSON.
+- The balance is read here, after the commit, so it includes this change.
+- The cardholder's copy goes to their own topic, `withoutBalance()`. Without that, a cardholder could watch the owner's balance change with every payment, which Module 30 promised they could not see.
+
+### The endpoint and the rules
+
+`WebSocketConfig.java`:
+
+```java
+package dev.paydeck.api.live;
+
+import org.springframework.context.annotation.Configuration;
+import org.springframework.messaging.simp.config.ChannelRegistration;
+import org.springframework.messaging.simp.config.MessageBrokerRegistry;
+import org.springframework.scheduling.annotation.EnableAsync;
+import org.springframework.web.socket.config.annotation.EnableWebSocketMessageBroker;
+import org.springframework.web.socket.config.annotation.StompEndpointRegistry;
+import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerConfigurer;
+
+/**
+ * Live updates over WebSockets, using the STOMP protocol on top. The app
+ * connects to ws://…/ws, signs in with its access token, and subscribes to
+ * the topics it is allowed to see.
+ */
+@Configuration
+@EnableAsync
+@EnableWebSocketMessageBroker
+public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
+
+    private final StompAuthInterceptor auth;
+
+    public WebSocketConfig(StompAuthInterceptor auth) {
+        this.auth = auth;
+    }
+
+    @Override
+    public void registerStompEndpoints(StompEndpointRegistry registry) {
+        // Phones and desktop apps send no Origin header, so any origin is fine:
+        // the access token is what lets someone in.
+        registry.addEndpoint("/ws").setAllowedOriginPatterns("*");
+    }
+
+    @Override
+    public void configureMessageBroker(MessageBrokerRegistry registry) {
+        // A simple broker inside the API. A bigger PayDeck would use RabbitMQ
+        // so several API servers could share subscribers.
+        registry.enableSimpleBroker("/topic").setHeartbeatValue(new long[] {10_000, 10_000})
+                .setTaskScheduler(heartbeatScheduler());
+        registry.setApplicationDestinationPrefixes("/app");
+    }
+
+    @Override
+    public void configureClientInboundChannel(ChannelRegistration registration) {
+        registration.interceptors(auth);
+    }
+
+    private static org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler heartbeatScheduler() {
+        var scheduler = new org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler();
+        scheduler.setPoolSize(1);
+        scheduler.setThreadNamePrefix("ws-heartbeat-");
+        scheduler.initialize();
+        return scheduler;
+    }
+}
+```
+
+- `@EnableWebSocketMessageBroker` switches on STOMP over WebSockets; `@EnableAsync` makes `@Async` work.
+- `addEndpoint("/ws")` is the address apps connect to.
+- `enableSimpleBroker("/topic")` keeps subscribers in memory. The **heartbeat** settings let the broker send a tiny "still here" every 10 seconds to clients that ask for it, so dead connections are noticed.
+- `configureClientInboundChannel` puts the interceptor in front of everything apps send.
+
+`StompAuthInterceptor.java`:
+
+```java
+package dev.paydeck.api.live;
+
+import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import dev.paydeck.api.access.AccessPolicy;
+import dev.paydeck.api.access.AccountAction;
+import dev.paydeck.api.auth.CurrentUser;
+import org.springframework.context.annotation.Lazy;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageChannel;
+import org.springframework.messaging.MessageDeliveryException;
+import org.springframework.messaging.simp.stomp.StompCommand;
+import org.springframework.messaging.simp.stomp.StompHeaderAccessor;
+import org.springframework.messaging.support.ChannelInterceptor;
+import org.springframework.messaging.support.MessageHeaderAccessor;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.jwt.JwtException;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
+import org.springframework.stereotype.Component;
+
+/**
+ * The WebSocket version of sign-in and permissions. CONNECT must carry an
+ * {@code Authorization: Bearer …} header, and each SUBSCRIBE is checked
+ * against the same rules as the REST API.
+ */
+@Component
+public class StompAuthInterceptor implements ChannelInterceptor {
+
+    private static final Pattern ACCOUNT_TOPIC = Pattern.compile("^/topic/accounts/([0-9a-fA-F-]{36})$");
+    private static final Pattern USER_TOPIC = Pattern.compile("^/topic/users/([0-9a-fA-F-]{36})$");
+
+    private final JwtDecoder jwtDecoder;
+    private final AccessPolicy access;
+
+    public StompAuthInterceptor(@Lazy JwtDecoder jwtDecoder, @Lazy AccessPolicy access) {
+        this.jwtDecoder = jwtDecoder;
+        this.access = access;
+    }
+
+    @Override
+    public Message<?> preSend(Message<?> message, MessageChannel channel) {
+        StompHeaderAccessor stomp = MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor.class);
+        if (stomp == null || stomp.getCommand() == null) {
+            return message;
+        }
+        switch (stomp.getCommand()) {
+            case CONNECT -> stomp.setUser(authenticate(stomp.getFirstNativeHeader("Authorization")));
+            case SUBSCRIBE -> checkSubscription(stomp);
+            case SEND -> throw new MessageDeliveryException("PayDeck only sends updates; it does not accept them");
+            default -> {
+            }
+        }
+        return message;
+    }
+
+    private JwtAuthenticationToken authenticate(String header) {
+        if (header == null || !header.startsWith("Bearer ")) {
+            throw new MessageDeliveryException("Sign in to continue.");
+        }
+        try {
+            Jwt jwt = jwtDecoder.decode(header.substring("Bearer ".length()));
+            return new JwtAuthenticationToken(jwt);
+        } catch (JwtException e) {
+            throw new MessageDeliveryException("Sign in to continue.");
+        }
+    }
+
+    private void checkSubscription(StompHeaderAccessor stomp) {
+        if (!(stomp.getUser() instanceof JwtAuthenticationToken token)) {
+            throw new MessageDeliveryException("Sign in to continue.");
+        }
+        CurrentUser user = CurrentUser.from(token.getToken());
+        String destination = stomp.getDestination() == null ? "" : stomp.getDestination();
+
+        Matcher account = ACCOUNT_TOPIC.matcher(destination);
+        if (account.matches()) {
+            // Throws if this person may not see the account, which refuses the subscription.
+            access.account(user, UUID.fromString(account.group(1)), AccountAction.VIEW);
+            return;
+        }
+        Matcher person = USER_TOPIC.matcher(destination);
+        if (person.matches() && UUID.fromString(person.group(1)).equals(user.id())) {
+            return;
+        }
+        throw new MessageDeliveryException("You cannot subscribe to " + destination);
+    }
+}
+```
+
+- It uses the same `JwtDecoder` that checks REST requests (lesson 27.5), so the same tokens work, with the same expiry.
+- `access.account(...)` throws for someone who may not view the account, exactly as for `GET /api/accounts/{id}`. Any exception here refuses the frame, and Spring answers with an `ERROR` frame and closes the connection.
+- `@Lazy` breaks a loop at start-up: the security settings and the WebSocket settings would otherwise each wait for the other to be built first.
+- The regular expressions accept only a full UUID after the prefix, so a destination like `/topic/accounts/*` or `/topic/accounts/../users/…` is simply refused.
+
+Last, the handshake itself carries no token, so `SecurityConfig` must let `/ws` through; the interceptor does the checking:
+
+```java
+                        // The WebSocket signs in with its own CONNECT frame (StompAuthInterceptor).
+                        .requestMatchers("/ws").permitAll()
+```
+
+### Tests
+
+`src/test/java/dev/paydeck/api/live/LiveUpdatesTest.java` uses Spring's own STOMP client against the real API on a random port:
+
+```java
+package dev.paydeck.api.live;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import java.lang.reflect.Type;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+
+import dev.paydeck.api.ApiTestSupport;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.http.MediaType;
+import org.springframework.messaging.converter.JacksonJsonMessageConverter;
+import org.springframework.messaging.simp.stomp.StompCommand;
+import org.springframework.messaging.simp.stomp.StompFrameHandler;
+import org.springframework.messaging.simp.stomp.StompHeaders;
+import org.springframework.messaging.simp.stomp.StompSession;
+import org.springframework.messaging.simp.stomp.StompSessionHandlerAdapter;
+import org.springframework.web.socket.WebSocketHttpHeaders;
+import org.springframework.web.socket.client.standard.StandardWebSocketClient;
+import org.springframework.web.socket.messaging.WebSocketStompClient;
+
+/** Live updates over a real WebSocket. */
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+class LiveUpdatesTest extends ApiTestSupport {
+
+    @LocalServerPort
+    int port;
+
+    private WebSocketStompClient client;
+
+    @AfterEach
+    void stopClient() {
+        if (client != null) {
+            client.stop();
+        }
+    }
+
+    @Test
+    void theOwnerHearsAboutATopUpStraightAway() throws Exception {
+        UUID account = openAccount("Asha", "USD");
+        StompSession session = connect(ownerOf(account).accessToken());
+        BlockingQueue<Map<String, Object>> received = subscribe(session, "/topic/accounts/" + account);
+
+        topUp(account, 2_500);
+
+        Map<String, Object> message = received.poll(5, TimeUnit.SECONDS);
+        assertThat(message).isNotNull();
+        assertThat(message.get("kind")).isEqualTo("MONEY_IN");
+        assertThat(message.get("title")).isEqualTo("Money added");
+        assertThat(((Number) message.get("balanceCents")).longValue()).isEqualTo(2_500);
+    }
+
+    @Test
+    void aCardholderHearsAboutPaymentsOnTheirOwnTopic() throws Exception {
+        UUID account = openAccount("Asha", "USD");
+        topUp(account, 5_000);
+        TestUser ben = register("Ben");
+        UUID card = issueCard(account, "For Ben", 1_000L, ben.email());
+        StompSession session = connect(ben.accessToken());
+        BlockingQueue<Map<String, Object>> received = subscribe(session, "/topic/users/" + ben.id());
+
+        mvc.perform(post("/api/cards/{id}/payments", card).with(as(ben))
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"amountCents": 2000, "merchant": "Bike Shop"}
+                                """))
+                .andExpect(status().isCreated());
+
+        Map<String, Object> message = received.poll(5, TimeUnit.SECONDS);
+        assertThat(message).isNotNull();
+        assertThat(message.get("kind")).isEqualTo("CARD_DECLINED");
+        assertThat((String) message.get("body")).contains("over the card's spending limit");
+        // Holding a card does not let Ben see Asha's balance (Module 30).
+        assertThat(message.get("balanceCents")).isNull();
+    }
+
+    @Test
+    void nobodyCanListenToSomeoneElsesAccount() throws Exception {
+        UUID account = openAccount("Asha", "USD");
+        TestUser mallory = register("Mallory");
+        CompletableFuture<String> error = new CompletableFuture<>();
+        StompSession session = connect(mallory.accessToken(), error);
+
+        session.subscribe("/topic/accounts/" + account, frames(new LinkedBlockingQueue<>()));
+
+        // The server answers the SUBSCRIBE with an ERROR frame and closes the connection.
+        assertThat(error.get(5, TimeUnit.SECONDS)).isNotBlank();
+    }
+
+    @Test
+    void connectingWithoutATokenIsRefused() {
+        assertThatThrownBy(() -> connect("not-a-real-token")).isInstanceOf(ExecutionException.class);
+    }
+
+    private StompSession connect(String accessToken) throws Exception {
+        return connect(accessToken, new CompletableFuture<>());
+    }
+
+    private StompSession connect(String accessToken, CompletableFuture<String> errors) throws Exception {
+        client = new WebSocketStompClient(new StandardWebSocketClient());
+        client.setMessageConverter(new JacksonJsonMessageConverter());
+        StompHeaders connectHeaders = new StompHeaders();
+        connectHeaders.add("Authorization", "Bearer " + accessToken);
+        return client.connectAsync("ws://localhost:" + port + "/ws", new WebSocketHttpHeaders(), connectHeaders,
+                        new StompSessionHandlerAdapter() {
+                            @Override
+                            public void handleFrame(StompHeaders headers, Object payload) {
+                                errors.complete(String.valueOf(headers.getFirst("message")));
+                            }
+
+                            @Override
+                            public void handleException(StompSession s, StompCommand command, StompHeaders headers,
+                                                        byte[] payload, Throwable exception) {
+                                errors.complete(exception.getMessage());
+                            }
+
+                            @Override
+                            public void handleTransportError(StompSession s, Throwable exception) {
+                                errors.complete(exception.getMessage());
+                            }
+                        })
+                .get(5, TimeUnit.SECONDS);
+    }
+
+    private BlockingQueue<Map<String, Object>> subscribe(StompSession session, String topic) throws Exception {
+        BlockingQueue<Map<String, Object>> received = new LinkedBlockingQueue<>();
+        session.subscribe(topic, frames(received));
+        // SUBSCRIBE has no reply in STOMP; give the broker a moment to register it.
+        Thread.sleep(300);
+        return received;
+    }
+
+    private static StompFrameHandler frames(BlockingQueue<Map<String, Object>> into) {
+        return new StompFrameHandler() {
+            @Override
+            public Type getPayloadType(StompHeaders headers) {
+                return Map.class;
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public void handleFrame(StompHeaders headers, Object payload) {
+                into.add((Map<String, Object>) payload);
+            }
+        };
+    }
+}
+```
+
+- `@SpringBootTest(webEnvironment = RANDOM_PORT)` starts the real server, because a WebSocket needs a real network connection; `@LocalServerPort` says which port it got.
+- A `BlockingQueue` collects messages as they arrive on another thread; `poll(5, SECONDS)` waits up to five seconds for one.
+- The second test pays over the card's limit, so the message is a decline, and checks that Ben's copy has no balance.
+
+`./mvnw test`: 106 tests, all green. And if you forget `withoutBalance()`, the second test says so:
+
+```
+[ERROR]   LiveUpdatesTest.aCardholderHearsAboutPaymentsOnTheirOwnTopic:86 
+expected: null
+ but was: 5000
+```
+
+### Try it from the terminal
+
+Node.js (Part 2) has a `WebSocket` built in, so a dozen lines can watch PayDeck's feed. Save this anywhere as `watch.mjs`:
+
+```js
+// Watches PayDeck's live updates in the terminal.
+// Usage: node watch.mjs <access token> <topic>
+const [token, topic] = process.argv.slice(2);
+const ws = new WebSocket('ws://localhost:8080/ws');
+
+const frame = (command, headers) =>
+  [command, ...Object.entries(headers).map(([k, v]) => `${k}:${v}`), '', ''].join('\n') + '\0';
+
+ws.onopen = () => ws.send(frame('CONNECT', { 'accept-version': '1.2', host: 'paydeck', Authorization: `Bearer ${token}` }));
+ws.onmessage = (event) => {
+  const text = String(event.data).replace(/\0$/, '');
+  const [head, body] = text.split('\n\n');
+  const [command, ...headers] = head.split('\n');
+  if (command === 'CONNECTED') {
+    console.log('connected, subscribing to', topic);
+    ws.send(frame('SUBSCRIBE', { id: 'sub-0', destination: topic }));
+  } else if (command === 'MESSAGE') {
+    console.log(body);
+  } else if (command === 'ERROR') {
+    console.log('ERROR', headers.find((h) => h.startsWith('message:')));
+  }
+};
+ws.onclose = () => console.log('closed');
+```
+
+Restart the API. In one terminal, watch Asha's account:
+
+```sh
+node watch.mjs $ASHA /topic/accounts/$A
+```
+
+In another, add $10.00 and try the Groceries card for more than its limit. The first terminal prints, as it happens:
+
+```
+connected, subscribing to /topic/accounts/20f0ebd9-5f0d-4685-b788-d6c386e6ac85
+{"accountId":"20f0ebd9-5f0d-4685-b788-d6c386e6ac85","kind":"MONEY_IN","title":"Money added","body":"$10.00 added: Birthday money","cardId":null,"balanceCents":25250,"at":"2026-11-04T09:57:38.792780768Z"}
+{"accountId":"20f0ebd9-5f0d-4685-b788-d6c386e6ac85","kind":"CARD_DECLINED","title":"Payment declined","body":"$75.00 at Gadget Shop with Groceries. The payment is over the card's spending limit.","cardId":"e81a892e-be41-428e-a6c6-7b625b0c1c5b","balanceCents":25250,"at":"2026-11-04T09:57:38.867393975Z"}
+```
+
+Eve watching her own topic while she pays at the bakery with the card Asha gave her:
+
+```sh
+node watch.mjs $EVE /topic/users/41609685-d300-4e72-8b60-949d329a3f9b
+```
+
+```
+connected, subscribing to /topic/users/41609685-d300-4e72-8b60-949d329a3f9b
+{"accountId":"20f0ebd9-5f0d-4685-b788-d6c386e6ac85","kind":"CARD_PAYMENT","title":"You paid Bakery","body":"$4.50 with For Eve","cardId":"d62e8a7a-dadf-416f-9ea1-8b4c70c6539f","balanceCents":null,"at":"2026-11-04T09:57:55.660276350Z"}
+```
+
+No balance for Eve. And the doors that should stay shut:
+
+```sh
+node watch.mjs $EVE /topic/accounts/$A
+node watch.mjs $EVE /topic/users/94de57a3-7cc4-429a-b8f4-92552a081814
+node watch.mjs not-a-token /topic/accounts/$A
+```
+
+```
+connected, subscribing to /topic/accounts/20f0ebd9-5f0d-4685-b788-d6c386e6ac85
+ERROR message:Failed to send message to ExecutorSubscribableChannel[clientInboundChannel]
+closed
+connected, subscribing to /topic/users/94de57a3-7cc4-429a-b8f4-92552a081814
+ERROR message:You cannot subscribe to /topic/users/94de57a3-7cc4-429a-b8f4-92552a081814
+closed
+ERROR message:Sign in to continue.
+closed
+```
+
+Eve's attempt on Asha's account fails inside `AccessPolicy` with a "not found" error that is not a STOMP error, so Spring reports it in general words. That is fine: it does not tell Eve whether the account exists. And a plain browser visit to `http://localhost:8080/ws` gets `400` with `Can "Upgrade" only to "WebSocket".`: the endpoint only speaks WebSocket.
+
+<Aside type="note" title="Where the IDs come from">
+The ID in `/topic/users/…` is the person's user ID, which `GET /api/me` returns as `user.id`. The `balanceCents` values above are from the course's own test data; yours will differ.
+</Aside>
+
+<Exercise title="Announce a new card">
+When Asha issues a card to Eve, Eve's open app should show it at once. Add an announcement to `CardController.issue`, using `cardChanged`. Check it with `watch.mjs` on Eve's user topic. What title does the message get, and why does Eve receive it at all?
+
+<Fragment slot="hint">`cardChanged(card, "issued")` after the card is saved. `LiveUpdates` sends card events to the card's cardholder.</Fragment>
+<Fragment slot="solution">
+
+In `issue`, after `cards.save(...)`:
+
+```java
+        cardChanged(card, "issued");
+```
+
+The message's title is "For Eve issued", and its body "The card ending … was issued.", on `/topic/accounts/{id}` for Asha and, without the balance, on Eve's `/topic/users/{id}`. Eve receives it because the event carries the card's ID, and `LiveUpdates` looks up that card's cardholder. The wording could be friendlier for Eve ("Asha gave you a card"); that would need the event to say who it is for, which is a good refactoring exercise in itself.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="danger" title="Sending before the commit">
+A plain `@EventListener` runs at once, inside the transaction. If anything fails afterwards, people have already been told about money that never moved. Use `@TransactionalEventListener`.
+</Aside>
+
+<Aside type="caution" title="Letting anyone subscribe to anything">
+Without the interceptor, anyone who can connect can subscribe to any account's topic, and the IDs are not secret (lesson 30.2). Check every `SUBSCRIBE` with the same rules as the REST API.
+</Aside>
+
+<Aside type="caution" title="Sending the same message to everyone involved">
+The owner and the cardholder see different things. Build what each person may see; do not reuse one message for both.
+</Aside>
+
+## Recap
+
+- `spring-boot-starter-websocket` and `@EnableWebSocketMessageBroker` give the API a STOMP endpoint at `/ws` with a simple in-memory broker for `/topic/...`.
+- Services **publish events**; `LiveUpdates` is a `@TransactionalEventListener` and `@Async`, so messages go out only after the commit, without slowing payments down.
+- `StompAuthInterceptor` checks the token on `CONNECT` and `AccessPolicy` on every `SUBSCRIBE`; apps may not `SEND`.
+- Owners get `/topic/accounts/{id}` with the balance; cardholders get `/topic/users/{id}` without it.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why is LiveUpdates.deliver a @TransactionalEventListener?',
+			options: ['So it runs faster', 'So messages go out only after the money is saved, and never for a rolled-back transaction', 'So it can use WebSockets'],
+			answer: 1,
+			explanation: 'People must never be told about money that did not move.',
+		},
+		{
+			question: 'Where does a WebSocket connection to PayDeck carry its access token?',
+			options: ['In the URL', 'In the Authorization header of the STOMP CONNECT frame', 'It needs no token'],
+			answer: 1,
+			explanation: 'The interceptor reads it from CONNECT and checks it with the same JwtDecoder as the REST API.',
+		},
+		{
+			question: 'Eve holds a card on Asha\'s account. Which topic may she subscribe to?',
+			options: ['/topic/accounts/{Asha\'s account}', '/topic/users/{her own user ID}', 'Both'],
+			answer: 1,
+			explanation: 'She may not view the account, so her card\'s news comes on her own topic, without the balance.',
+		},
+	]}
+/>
+
+<MarkComplete />

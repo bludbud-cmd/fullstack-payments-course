@@ -1,0 +1,430 @@
+---
+title: "Mini-project: a live transaction feed"
+description: "Turn PayDeck's Activity screen into a live feed: it says whether updates are flowing (Live, Connecting, Reconnecting), and new transactions appear at the top, highlighted, the moment they happen."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+The live feed already refreshes every screen and shows a banner. But the banner is gone after five seconds, and when the connection is down, nothing says so: Asha cannot tell a quiet afternoon from a broken feed. This project makes the **Activity** screen honest about both. At the top it says **● Live**, **Connecting…** or **Reconnecting…**, and a transaction that arrives while Asha watches gets a soft blue background, so her eye finds it.
+
+## The tasks
+
+1. **A status type.** In `src/live/stomp.ts`, export `type LiveStatus = 'connecting' | 'live' | 'reconnecting'`.
+2. **Report it.** Give `connectStomp`'s options an optional `onStatus(status)`. Call it with `'connecting'` before the first connection, `'live'` when the server says `CONNECTED`, and `'reconnecting'` when a connection is lost (in `reconnect` from lesson 33.4).
+3. **Share it.** In `LiveUpdates`, keep the status in state and offer it to every screen through a context, with a `useLiveStatus()` hook.
+4. **Show it.** The Activity screen shows the status above the list: "● Live" in green, the others in grey.
+5. **Highlight what is new.** Rows that were not in the list when the screen opened get a light blue background (`#eef0fd`).
+6. Try it with the API running, stopped and restarted, and commit.
+
+<Exercise title="Build it">
+Do the six tasks.
+
+<Fragment slot="hint">`createContext<LiveStatus>('connecting')` gives a context with a sensible default. Wrap `children` in `LiveUpdates` with its `Provider`. Pass `setStatus` itself as `onStatus`.</Fragment>
+<Fragment slot="hint2">For task 5, remember the transaction IDs from the first time the screen has data, in a `useRef` that holds a `Set<string>`. A ref survives re-renders, and is forgotten when the screen closes, which is what you want: "new" means "new since you opened this screen".</Fragment>
+<Fragment slot="solution">
+
+### stomp.ts
+
+Below `decodeFrame`:
+
+```ts
+/** Whether updates are flowing right now. */
+export type LiveStatus = 'connecting' | 'live' | 'reconnecting';
+```
+
+In `Options`, after `onRefused`:
+
+```ts
+  /** Told whenever the connection comes up or goes down. */
+  onStatus?: (status: LiveStatus) => void;
+```
+
+Then three calls. On `CONNECTED`, before subscribing:
+
+```ts
+        options.onStatus?.('live');
+```
+
+In `reconnect`, after `gone = true;`:
+
+```ts
+      options.onStatus?.('reconnecting');
+```
+
+And just before the first `open();` at the bottom of `connectStomp`:
+
+```ts
+  options.onStatus?.('connecting');
+```
+
+The whole file is now:
+
+```ts
+/**
+ * A very small STOMP client. STOMP is a text protocol that runs on top of a
+ * WebSocket: each message (a "frame") is a command, some "name:value" header
+ * lines, a blank line, a body, and a NULL character to finish.
+ *
+ *   SUBSCRIBE
+ *   id:sub-0
+ *   destination:/topic/accounts/1234
+ *
+ *   ^@
+ *
+ * PayDeck only needs four commands: CONNECT and SUBSCRIBE going out,
+ * CONNECTED and MESSAGE (or ERROR) coming back.
+ */
+export type Frame = {
+  command: string;
+  headers: Record<string, string>;
+  body: string;
+};
+
+export function encodeFrame(command: string, headers: Record<string, string>, body = ''): Uint8Array {
+  const lines = Object.entries(headers).map(([name, value]) => `${name}:${value}`);
+  const text = [command, ...lines, '', body].join('\n') + '\0';
+  // Sent as bytes, because React Native's WebSocket drops the NULL from text
+  // messages. Every frame PayDeck sends is plain ASCII: one letter, one byte.
+  return Uint8Array.from(text, (letter) => letter.charCodeAt(0));
+}
+
+/** Reads one frame. Returns null for a heartbeat (an empty line). */
+export function decodeFrame(data: string): Frame | null {
+  const text = data.replace(/\0$/, '').replace(/^[\r\n]+/, '');
+  if (text === '') {
+    return null;
+  }
+  const blankLine = text.indexOf('\n\n');
+  const head = blankLine < 0 ? text : text.slice(0, blankLine);
+  const body = blankLine < 0 ? '' : text.slice(blankLine + 2);
+  const [command, ...lines] = head.split('\n');
+  const headers: Record<string, string> = {};
+  for (const line of lines) {
+    const colon = line.indexOf(':');
+    if (colon > 0) {
+      headers[line.slice(0, colon)] = line.slice(colon + 1);
+    }
+  }
+  return { command, headers, body };
+}
+
+/** Whether updates are flowing right now. */
+export type LiveStatus = 'connecting' | 'live' | 'reconnecting';
+
+type Options = {
+  /** For example ws://localhost:8080/ws */
+  url: string;
+  /** Read again on every connection, so a reconnect uses a fresh token. */
+  accessToken: () => string | null;
+  topics: string[];
+  onMessage: (body: string) => void;
+  /** The server said no, usually because the access token has expired. */
+  onRefused: () => void;
+  /** Told whenever the connection comes up or goes down. */
+  onStatus?: (status: LiveStatus) => void;
+};
+
+/**
+ * Connects, subscribes to `topics`, and reconnects whenever the connection
+ * drops (the phone lost signal, the API restarted). Returns a function that
+ * disconnects for good.
+ */
+export function connectStomp(options: Options): () => void {
+  let socket: WebSocket | null = null;
+  let stopped = false;
+  let retry: ReturnType<typeof setTimeout> | null = null;
+  let delay = 1000;
+
+  function open() {
+    const ws = new WebSocket(options.url);
+    socket = ws;
+    ws.onopen = () =>
+      ws.send(
+        encodeFrame('CONNECT', {
+          'accept-version': '1.2',
+          host: 'paydeck',
+          'heart-beat': '0,0',
+          Authorization: `Bearer ${options.accessToken() ?? ''}`,
+        }),
+      );
+    ws.onmessage = (event) => {
+      const frame = typeof event.data === 'string' ? decodeFrame(event.data) : null;
+      if (frame?.command === 'CONNECTED') {
+        delay = 1000;
+        options.onStatus?.('live');
+        options.topics.forEach((destination, i) => ws.send(encodeFrame('SUBSCRIBE', { id: `sub-${i}`, destination })));
+      } else if (frame?.command === 'MESSAGE') {
+        options.onMessage(frame.body);
+      } else if (frame?.command === 'ERROR') {
+        options.onRefused();
+      }
+    };
+    // A dropped connection fires "close". A connection that never opened may
+    // fire only "error", so both lead here, and only the first one counts.
+    let gone = false;
+    const reconnect = () => {
+      if (gone || stopped) {
+        return;
+      }
+      gone = true;
+      options.onStatus?.('reconnecting');
+      // Wait a little longer after each failure, up to a minute.
+      retry = setTimeout(open, delay);
+      delay = Math.min(delay * 2, 60_000);
+    };
+    ws.onclose = reconnect;
+    ws.onerror = reconnect;
+  }
+
+  options.onStatus?.('connecting');
+  open();
+  return () => {
+    stopped = true;
+    if (retry !== null) {
+      clearTimeout(retry);
+    }
+    socket?.close();
+  };
+}
+```
+
+### LiveUpdates.tsx
+
+```tsx
+import { useQueryClient } from '@tanstack/react-query';
+import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { currentAccessToken, refreshTokens } from '../api/client';
+import { useMe } from '../api/hooks';
+import { API_BASE_URL } from '../config';
+import { useAccountId } from '../state/AccountContext';
+import type { LiveMessage } from '../types';
+import { connectStomp, type LiveStatus } from './stomp';
+
+const LiveStatusContext = createContext<LiveStatus>('connecting');
+
+/** Whether live updates are flowing, for screens that want to say so. */
+export function useLiveStatus(): LiveStatus {
+  return useContext(LiveStatusContext);
+}
+
+/** How long the banner stays up. */
+const BANNER_MS = 5000;
+
+/**
+ * Keeps a WebSocket open to the API while someone is signed in. When money
+ * moves or a card changes, every screen refreshes its data and a banner
+ * says what happened, without anyone pulling to refresh.
+ */
+export function LiveUpdates({ children }: { children: ReactNode }) {
+  const queryClient = useQueryClient();
+  const accountId = useAccountId();
+  const userId = useMe().data?.user.id;
+  const [latest, setLatest] = useState<LiveMessage | null>(null);
+  const [status, setStatus] = useState<LiveStatus>('connecting');
+
+  useEffect(() => {
+    if (userId === undefined) {
+      return;
+    }
+    return connectStomp({
+      url: API_BASE_URL.replace(/^http/, 'ws') + '/ws',
+      accessToken: currentAccessToken,
+      // Your account, plus anything about cards other people gave you.
+      topics: [`/topic/accounts/${accountId}`, `/topic/users/${userId}`],
+      onMessage: (body) => {
+        queryClient.invalidateQueries();
+        setLatest(JSON.parse(body) as LiveMessage);
+      },
+      onRefused: () => {
+        refreshTokens();
+      },
+      onStatus: setStatus,
+    });
+  }, [accountId, userId, queryClient]);
+
+  useEffect(() => {
+    if (latest === null) {
+      return;
+    }
+    const timer = setTimeout(() => setLatest(null), BANNER_MS);
+    return () => clearTimeout(timer);
+  }, [latest]);
+
+  const declined = latest?.kind === 'CARD_DECLINED';
+  return (
+    <View style={styles.root}>
+      <LiveStatusContext.Provider value={status}>{children}</LiveStatusContext.Provider>
+      {latest && (
+        <Pressable
+          accessibilityRole="alert"
+          accessibilityHint="Dismisses this message"
+          onPress={() => setLatest(null)}
+          style={[styles.banner, declined && styles.declinedBanner]}
+        >
+          <Text style={[styles.title, declined && styles.declinedTitle]}>{latest.title}</Text>
+          <Text style={styles.body}>{latest.body}</Text>
+        </Pressable>
+      )}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1 },
+  banner: {
+    position: 'absolute',
+    top: 24,
+    left: 16,
+    right: 16,
+    maxWidth: 480,
+    alignSelf: 'center',
+    padding: 16,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: '#3c4fe0',
+    backgroundColor: '#ffffff',
+    gap: 4,
+    elevation: 6,
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  declinedBanner: { borderColor: '#b3261e' },
+  title: { fontWeight: '700', fontSize: 16, color: '#14162b' },
+  declinedTitle: { color: '#b3261e' },
+  body: { color: '#5d6177' },
+});
+```
+
+Two things changed: a `status` state that `connectStomp` keeps up to date through `onStatus: setStatus`, and `LiveStatusContext.Provider` around `children`, so any screen can call `useLiveStatus()`. The banner stays outside the provider; it does not need the status.
+
+### ActivityScreen.tsx
+
+```tsx
+import { useRef } from 'react';
+import { StyleSheet, Text, View } from 'react-native';
+import { useAccount, useActivity } from '../api/hooks';
+import { ActivityRow } from '../components/ActivityRow';
+import { QueryState } from '../components/QueryState';
+import { Screen } from '../components/Screen';
+import { useLiveStatus } from '../live/LiveUpdates';
+
+const STATUS_TEXT = { connecting: 'Connecting…', live: '● Live', reconnecting: 'Reconnecting…' } as const;
+
+export function ActivityScreen() {
+  const account = useAccount();
+  const activity = useActivity();
+  const status = useLiveStatus();
+  // The transactions that were there when the screen opened. Anything else arrived while watching.
+  const seen = useRef<Set<string> | null>(null);
+
+  if (account.data === undefined || activity.data === undefined) {
+    return (
+      <Screen title="Activity">
+        <QueryState queries={[account, activity]} />
+      </Screen>
+    );
+  }
+
+  if (seen.current === null) {
+    seen.current = new Set(activity.data.map((item) => item.transactionId));
+  }
+  const { currency } = account.data;
+
+  return (
+    <Screen title="Activity">
+      <Text style={[styles.status, status === 'live' && styles.live]}>{STATUS_TEXT[status]}</Text>
+      {activity.data.length === 0 && <Text>No transactions yet.</Text>}
+      {activity.data.map((item) => (
+        <View key={item.transactionId} style={!seen.current?.has(item.transactionId) && styles.fresh}>
+          <ActivityRow item={item} currency={currency} />
+        </View>
+      ))}
+    </Screen>
+  );
+}
+
+const styles = StyleSheet.create({
+  status: { color: '#5d6177' },
+  live: { color: '#1d7a46' },
+  fresh: { backgroundColor: '#eef0fd', borderRadius: 8, paddingHorizontal: 8 },
+});
+```
+
+- `STATUS_TEXT` maps each status to its words. `as const` keeps TypeScript sure that every status has an entry.
+- `seen` is filled once, the first time there is data, and never again. When the live feed makes the list fetch again, a new transaction is not in `seen`, so its row gets `styles.fresh`.
+- `style={!seen.current?.has(...) && styles.fresh}` gives `false` for old rows, and React Native ignores a `false` style.
+
+### Try it
+
+Restart the app, sign in as Asha and open **Activity**. It says **● Live**. Top up from the terminal, as in lesson 33.3: the new row appears at the top with a blue background. Stop the API with Ctrl+C: the screen says **Reconnecting…**. Start it again: after a few seconds, **● Live**.
+
+A test drove the same story through the real screens and printed what they showed (`NEW ROW` counts the rows called "From my laptop", including older top-ups from earlier lessons, and checks the newest one):
+
+```
+STATUS 1 ● Live
+CURL 201
+NEW ROW 9 highlighted: true
+STATUS 2 Reconnecting…
+STATUS 3 ● Live
+  ✓ a live activity feed (17449 ms)
+```
+
+Commit.
+</Fragment>
+</Exercise>
+
+<Exercise title="Let the highlight fade">
+A highlight that stays until Asha leaves the screen stops meaning "new". Make it fade: ten seconds after the list changes, every row on it counts as seen.
+
+<Fragment slot="hint">A `useEffect` that depends on `activity.data` runs each time the list arrives. It must sit above the early `return`, because hooks must run in the same order on every render (lesson 10.5).</Fragment>
+<Fragment slot="hint2">Adding to `seen.current` does not re-render anything, because a ref is not state. Bump a small state counter to make React draw the rows again.</Fragment>
+<Fragment slot="solution">
+
+Import `useEffect` and `useState` as well as `useRef`, and add this right after `seen`:
+
+```tsx
+  const [, setFaded] = useState(0);
+
+  // Ten seconds after the list changes, everything on it counts as seen.
+  useEffect(() => {
+    const items = activity.data;
+    if (items === undefined) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      items.forEach((item) => seen.current?.add(item.transactionId));
+      setFaded((n) => n + 1);
+    }, 10_000);
+    return () => clearTimeout(timer);
+  }, [activity.data]);
+```
+
+The same test, extended to wait eleven more seconds after the top-up, printed:
+
+```
+STATUS 1 ● Live
+NEW ROW 10 highlighted: true
+AFTER 12s highlighted: false
+```
+
+The clean-up matters: if another transaction arrives after five seconds, the old timer is cancelled and a new one starts, so the newer row gets its full ten seconds.
+</Fragment>
+</Exercise>
+
+## What to notice
+
+- **Say when it is not live.** A status line costs one context and one `Text`, and it turns a silent failure into something Asha can see.
+- **Push and pull work together.** The WebSocket only says "something changed"; TanStack Query fetches the list, and the screen works out what is new by comparing with what it had.
+- **Small parts, one job each.** `stomp.ts` knows STOMP and nothing about React; `LiveUpdates` knows React and nothing about frames; the screen knows neither, only `useLiveStatus()`.
+
+Module 34 takes the same events one step further: to Asha's phone when PayDeck is not open at all.
+
+<MarkComplete />

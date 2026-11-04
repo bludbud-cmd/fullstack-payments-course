@@ -1,0 +1,130 @@
+---
+title: "33.1 Polling versus WebSockets"
+description: "Two ways for an app to learn that something changed on the server: asking again and again (polling), or keeping a connection open so the server can tell it (WebSockets). What each costs, when each is right, and why PayDeck's live feed uses WebSockets."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can explain why HTTP alone cannot tell an app "something just happened", compare polling with WebSockets on speed, cost and complexity, and say which one PayDeck uses for its live feed and why.
+
+## Why it matters
+
+Eve pays for bread with the card Asha gave her. Asha has PayDeck open on her Mac. When should Asha's screen show the payment? With everything built so far, only when Asha does something that makes the app fetch data again, such as switching screens and back. A payments app that shows old balances feels broken, and for a card that has just been stolen, a few seconds matter. This module makes PayDeck's screens update **the moment money moves**.
+
+## The idea
+
+### HTTP only answers
+
+Everything PayDeck's app and API have said to each other so far has been **request and response** (lesson 19.1): the app asks, the API answers, done. The API cannot start a conversation. It does not even know which apps are open right now. So when Eve's payment is saved, the API has no way to tell Asha's screen.
+
+There are two ways around that.
+
+### Polling: ask again and again
+
+The app asks every few seconds: "anything new?" TanStack Query can do it with one option (lesson 26.3):
+
+```ts
+useQuery({ queryKey: keys.activity(accountId), queryFn: ..., refetchInterval: 5000 });
+```
+
+Polling is simple, and it works everywhere, through any network. But look at the numbers. Every open app asks every 5 seconds whether or not anything happened:
+
+- Most answers are "nothing new". The phone wakes its radio for nothing, which costs battery, and the API reads the database for nothing.
+- An update can be up to 5 seconds late. Polling faster makes it less late and the waste worse.
+- 10,000 open apps polling every 5 seconds is 2,000 requests a second, even on a quiet day.
+
+### WebSockets: keep the line open
+
+A **WebSocket** is a connection that stays open in both directions. It starts as a normal HTTP request with a special header, `Upgrade: websocket`. If the server agrees, it answers `101 Switching Protocols`, and from then on the same connection carries messages either way, whenever either side wants, until one side closes it.
+
+So Asha's app opens one WebSocket when she signs in, and when Eve's payment is saved, the API pushes a message down it straight away. No waiting, and no requests at all while nothing happens.
+
+The price:
+
+- **More moving parts.** The server must remember who is connected and what they want to hear about.
+- **Connections drop.** Phones change networks, laptops sleep, servers restart. The app must notice and reconnect (lesson 33.4).
+- **Sign-in is different.** A browser or app cannot add headers to the WebSocket handshake in every environment, so PayDeck signs in with the first message instead (lesson 33.2).
+
+### A protocol on top: STOMP
+
+A WebSocket carries messages, but it says nothing about what is in them. Who wants which updates? How does the app say "I want Asha's account"? Rather than invent its own rules, PayDeck uses a small, old, well-supported protocol called **STOMP** (Simple Text Oriented Messaging Protocol). In STOMP, the app **subscribes** to a **topic** such as `/topic/accounts/20f0ebd9-…`, and the server sends to a topic. Spring Boot has STOMP built in (lesson 33.2), and it is plain text, so you can read every message.
+
+### Other options, briefly
+
+- **Long polling**: the app asks, and the server holds the request open until something happens or a timeout passes. Fewer empty answers than polling, but every update still needs a new request.
+- **Server-Sent Events (SSE)**: a one-way stream from the server, over ordinary HTTP. A good fit for browsers; less convenient in React Native, which has WebSockets built in.
+- **Push notifications** reach a phone even when the app is closed. They are for people, not for keeping screens up to date, and they are Module 34.
+
+### Which one when?
+
+| Situation | Choice |
+|---|---|
+| Data changes rarely and a delay of a minute is fine (exchange rates, a news list) | Polling, slowly |
+| The person is looking at the screen and expects changes at once (a balance, a chat) | WebSockets |
+| The app is closed | Push notifications |
+
+PayDeck uses all three in the end: `invalidateQueries` after the app's own changes (Module 26), WebSockets for changes made elsewhere while the app is open, and push for when it is not.
+
+<Exercise title="Count the requests">
+PayDeck has 2,000 people with the app open in an evening. On average, each account sees one transaction every 30 minutes.
+
+1. With polling every 10 seconds, how many requests does the API answer in one hour? How many of them carry news?
+2. With WebSockets, how many messages does the API send in that hour?
+
+<Fragment slot="hint">One app polling every 10 seconds asks 6 times a minute, 360 times an hour. One transaction every 30 minutes is 2 an hour.</Fragment>
+<Fragment slot="solution">
+
+1. 2,000 × 360 = **720,000 requests** an hour. News: 2,000 × 2 = 4,000 of them, about 0.6%. The other 99.4% answer "nothing new". And each update is, on average, 5 seconds late.
+2. About **4,000 messages**, each sent the moment the transaction is saved, plus 2,000 connections kept open (and small "still here" heartbeats, which lesson 33.4 mentions).
+
+Polling's cost grows with the number of people *watching*; WebSockets' cost grows with the number of things that *happen*. For a payments app, far more people watch than spend at any moment.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Polling very fast to feel &quot;real time&quot;">
+Every second, from every open app, is a lot of load for "nothing new". If you need updates within a second, you need a connection that the server can push to.
+</Aside>
+
+<Aside type="caution" title="Trusting the live message instead of the API">
+A live message says "something changed". The app then fetches the real data from the API, as usual. If a message is ever lost, nothing is wrong for long, because the next fetch shows the truth.
+</Aside>
+
+## Recap
+
+- HTTP is **request and response**: the server cannot speak first.
+- **Polling** asks again and again: simple, but mostly wasted requests, and always a little late.
+- A **WebSocket** is a connection that stays open both ways, started with an HTTP `Upgrade`; the server can push the moment something happens.
+- **STOMP** adds topics and subscriptions on top of a WebSocket, and Spring supports it.
+- PayDeck refetches after its own changes, uses WebSockets while the app is open, and push notifications when it is closed.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why can\'t PayDeck\'s API just send Asha\'s app a normal HTTP response when Eve pays?',
+			options: ['HTTP responses are too slow', 'In HTTP the server only answers requests; it cannot start a conversation', 'Responses cannot contain JSON'],
+			answer: 1,
+			explanation: 'Without a request from the app, there is nothing to answer. A WebSocket gives the server a way to speak first.',
+		},
+		{
+			question: 'What does the server answer when it agrees to open a WebSocket?',
+			options: ['200 OK', '101 Switching Protocols', '302 Found'],
+			answer: 1,
+			explanation: 'From then on the connection is no longer plain HTTP request and response.',
+		},
+		{
+			question: 'Which grows with the number of people watching, even when nothing happens?',
+			options: ['The cost of polling', 'The number of WebSocket messages', 'The number of push notifications'],
+			answer: 0,
+			explanation: 'Every watching app asks again and again, news or not.',
+		},
+	]}
+/>
+
+<MarkComplete />
