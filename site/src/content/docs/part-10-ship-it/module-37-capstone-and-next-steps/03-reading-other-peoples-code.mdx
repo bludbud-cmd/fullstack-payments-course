@@ -1,0 +1,219 @@
+---
+title: "37.3 Reading other people's code"
+description: "Find your way around code you did not write: start from a question, follow one path from an entry point, search instead of scrolling, read the tests, ask Git why a line exists, and check what you read with a small experiment. Practised on the testing library PayDeck already uses."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you have a method for answering a question about code you did not write, and you have used it to find out, from the source, something this course only told you.
+
+## Why it matters
+
+Every job, and every open-source project, starts with a codebase that is bigger than you can read. Most of a developer's day is reading: a colleague's change to review, a library that behaves oddly, last year's code nobody remembers. Nobody reads a codebase from the first file to the last. People who are good at it ask one question, and follow the shortest path to its answer.
+
+## The idea
+
+### A method
+
+1. **Start from a question**, as narrow as you can: not "how does this library work?" but "how long does `findByText` wait, and can I change it?"
+2. **Find the entry point**: the function you call, the URL you request, the button you press. Start there, not at the top of the project.
+3. **Follow one path.** Go into the one function that matters for your question, skip everything else. Note where you went, like a trail of crumbs.
+4. **Search, do not scroll.** `grep -rn` (search every file in a folder, recursively, with line numbers), your editor's "Go to definition" (F12 in VS Code, Command–B in IntelliJ), and "Find usages" answer "where is this defined?" and "who calls it?" in seconds.
+5. **Read the tests.** Tests are examples of how the authors meant the code to be used, with the answers written down.
+6. **Ask Git why.** `git log` and `git blame` say when a line changed, by whom, and with which message. A strange line often has a good reason in its commit.
+7. **Check with an experiment.** What you think you read is a guess until a small program confirms it.
+
+### Where code lives
+
+You already have plenty of other people's code on your Mac:
+
+- **JavaScript libraries** are in `node_modules/`, often as compiled JavaScript in a `dist` or `build` folder, with the original TypeScript on GitHub.
+- **Java libraries** are in Maven's cache (`~/.m2`). IntelliJ downloads their source when you **Command–click** a Spring class and choose **Download Sources**.
+- **Open-source projects** are on GitHub, where you can press `.` on any repository page to open it in a browser editor with search.
+
+## Worked example
+
+### The question
+
+Lesson 35.1 said `findByText` "waits (up to a second)". Where does that second come from, and how often does it look?
+
+### Entry point: the package
+
+`findByText` comes from `@testing-library/react-native`. Its `package.json` says which file is the library's front door:
+
+```sh
+cd node_modules/@testing-library/react-native
+jq -r '.version, .main' package.json
+```
+
+```
+14.1.0
+dist/index.js
+```
+
+The code is in `dist`. Searching beats opening files one by one: what decides how long something waits is probably called a timeout.
+
+```sh
+grep -rn "timeout" dist --include=*.js -il
+```
+
+That lists a handful of files. Two names stand out: `wait-for.js` and `config.js`.
+
+### Follow the path
+
+In `dist/queries/make-queries.js`, every `findBy...` is built the same way (shortened):
+
+```js
+  function findAllByQuery(instance) {
+    return function findAllFn(predicate, queryOptions, {
+      onTimeout = error => appendElementTreeToError(error),
+      ...waitForOptions
+    } = {}) {
+      ...
+      return (0, _waitFor.waitFor)(() => getAllByQuery(instance, {
+        printElementTree: false
+      })(predicate, queryOptions), {
+        ...deprecatedWaitForOptions,
+        ...waitForOptions,
+```
+
+So a `findBy` is a `getBy` (look once, now) wrapped in `waitFor`, which keeps calling it. The third argument, `waitForOptions`, is passed straight through. In `dist/wait-for.js`:
+
+```js
+const DEFAULT_INTERVAL = 50;
+function waitForInternal(expectation, {
+  timeout = (0, _config.getConfig)().asyncUtilTimeout,
+  interval = DEFAULT_INTERVAL,
+```
+
+It tries every 50 milliseconds, until `timeout`, which comes from the configuration. In `dist/config.js`:
+
+```js
+const defaultConfig = {
+  asyncUtilTimeout: 1000,
+  defaultIncludeHiddenElements: false,
+  eventDiagnostics: false
+};
+```
+
+and a little further down, an exported `configure` function that changes it for every test.
+
+The answer, with its path: `findByText` → `findAllByQuery` → `waitFor` → `getConfig().asyncUtilTimeout`, which is **1000 milliseconds** unless you `configure({ asyncUtilTimeout: ... })` for all tests, or pass `{ timeout: ... }` as the third argument for one. It looks every **50 milliseconds**.
+
+### Check with an experiment
+
+A screen that shows its text after a second and a half, and two tests, one with the default and one asking for two seconds. A throwaway file, `__tests__/slow.test.tsx`:
+
+```tsx
+import { useEffect, useState } from 'react';
+import { Text } from 'react-native';
+import { render, screen } from '@testing-library/react-native';
+
+function Slow() {
+  const [text, setText] = useState('Waiting');
+  useEffect(() => {
+    const timer = setTimeout(() => setText('Arrived'), 1500);
+    return () => clearTimeout(timer);
+  }, []);
+  return <Text>{text}</Text>;
+}
+
+it('gives up after one second', async () => {
+  await render(<Slow />);
+  await screen.findByText('Arrived');
+});
+
+it('waits longer when asked', async () => {
+  await render(<Slow />);
+  await screen.findByText('Arrived', {}, { timeout: 2000 });
+});
+```
+
+```sh
+npx jest slow
+```
+
+```
+  ✕ gives up after one second (1134 ms)
+  ✓ waits longer when asked (1513 ms)
+    Unable to find an element with text: Arrived
+```
+
+The first gave up just after a second; the second found the text at about 1.5 seconds. What the code said is what it does. Delete the file: it was a question, not a test PayDeck needs.
+
+### Ask Git why
+
+In your own projects, Git remembers why things are the way they are. In the API, which commits touched the settings check?
+
+```sh
+git log --format='%h %s' -- src/main/java/dev/paydeck/api/common/ProductionSettingsCheck.java
+```
+
+```
+b60820d 36 docker image, production settings checked first
+bc5e937 30.7 production settings check
+```
+
+`git show b60820d` shows that change in full, and `git log -S "ApplicationEnvironmentPreparedEvent"` finds every commit that added or removed that word. `git blame` on a file shows, for every line, the last commit that changed it. This is why commit messages that say **why** (lesson 3.1) matter: someone, often you, will read them like this.
+
+<Exercise title="Your turn: TanStack Query">
+Lesson 35.1 set `retry: false` because "TanStack Query retries a failed request three times by default, with pauses". Find, in `node_modules/@tanstack/query-core`, where the three comes from and how long the pauses are. Then check one of them with an experiment.
+
+<Fragment slot="hint">Search the package for `retry` and for `retryDelay`. The pauses are calculated by a small function.</Fragment>
+<Fragment slot="solution">
+
+In `node_modules/@tanstack/query-core/build/modern/retryer.js` (version 5.104; the folder names can differ in other versions), `defaultRetryDelay` is `Math.min(1e3 * 2 ** failureCount, 3e4)`: 1 second, then 2, then 4, never more than 30 (`1e3` is 1000 written in scientific notation). A little lower, `config.retry ?? (isServer() ? 0 : 3)`: three retries in an app, none on a server. And `mutation.js` passes `retry: this.options.retry ?? 0`: mutations are never retried unless you ask, which is why the library never sends a failed payment twice by itself. An experiment: a test with `retry: 1` and a mocked request that fails once then succeeds should show the data after about a second, and `jest.mocked(...).mock.calls` has length 2.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Reading everything first">
+You will run out of time before you reach the answer. Start from one question and one entry point; the rest can stay unread.
+</Aside>
+
+<Aside type="caution" title="Editing node_modules to test an idea">
+It works until the next `npm install` replaces your change, silently. Experiment in a test file of your own, or copy the code out.
+</Aside>
+
+<Aside type="caution" title="Trusting your reading without checking">
+Compiled code, defaults overridden elsewhere, an older version on GitHub than in your project: a five-line experiment settles it.
+</Aside>
+
+## Recap
+
+- One narrow question, one entry point, one path.
+- Search (`grep -rn`, Go to definition, Find usages) instead of scrolling.
+- Tests are worked examples; Git says why (`git log`, `git log -S`, `git blame`).
+- Confirm with a tiny experiment, then throw it away.
+- `findByText` is `getByText` retried every 50 ms for up to `asyncUtilTimeout`, 1000 ms by default.
+
+<Quiz
+	questions={[
+		{
+			question: 'You need to know why a strange line exists in a file. What is the quickest first step?',
+			options: ['Read the whole project', 'git blame on the file, then git show on that line\'s commit', 'Delete the line and see what breaks'],
+			answer: 1,
+			explanation: 'The commit message, and the rest of that change, usually explain it.',
+		},
+		{
+			question: 'Where is the default for findByText\'s waiting time?',
+			options: ['In Jest', 'In RNTL\'s config: asyncUtilTimeout, 1000 ms', 'In React Native'],
+			answer: 1,
+			explanation: 'findBy passes its options to waitFor, whose timeout defaults to getConfig().asyncUtilTimeout.',
+		},
+		{
+			question: 'Why run an experiment after reading?',
+			options: ['Tests must always be added', 'What you think the code does is a guess until something runs it', 'To make the code faster'],
+			answer: 1,
+			explanation: 'Reading compiled code, overridden defaults and versions is easy to get slightly wrong.',
+		},
+	]}
+/>
+
+<MarkComplete />

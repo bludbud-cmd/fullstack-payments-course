@@ -1,0 +1,195 @@
+---
+title: "37.2 A portfolio README"
+description: "Write the README that makes a stranger understand PayDeck in a minute: what it is, a picture, what is interesting about it, how to run and test it, and the decisions behind it. With both of PayDeck's READMEs as examples, screenshots that work in Markdown, and a checklist for the repository page."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson both PayDeck repositories have a README that someone deciding whether to hire you can read in a minute, and their GitHub pages are ready to be shown.
+
+## Why it matters
+
+When you share PayDeck, people do not clone it. They open the repository page on GitHub, which shows the `README.md` below the files, read for a minute, maybe click one file, and leave. The README is the whole interview for most of them. A good one says what the project is, shows it, and points at what is worth a closer look. A missing one says "a folder of code".
+
+## The idea
+
+### Who reads it, and what they want
+
+| Reader | Wants to know | Section |
+|---|---|---|
+| Someone hiring | What can this person build? How do they think? | The first paragraph, the picture, "What it does", "Decisions" |
+| Another developer | How do I run it? Does it work? | "Run it", "Tests" |
+| You, in a year | Why did I do it this way? | "Decisions", "What I would do next" |
+
+Write for the first one first: they read the least.
+
+### The shape
+
+1. **One sentence of what it is**, in words a non-programmer understands, and what it is built with.
+2. **A picture.** A screenshot (or a short screen recording as a GIF) does more than any paragraph.
+3. **What is interesting**, as a short list: the parts you would want to talk about.
+4. **Run it** and **Tests**: the exact commands, short.
+5. **Decisions**: two or three choices, and why. This is where you show judgment, not only code.
+6. **What next**: what you know is missing. It shows you see the limits.
+
+The file is written in **Markdown**, plain text with a few marks that GitHub shows formatted: `#` headings, `-` lists, `` ` `` for code, fenced code blocks, and `![description](path/to/image.png)` for a picture.
+
+## Worked example
+
+### The API's README
+
+In the API project, `README.md`:
+
+```markdown
+# PayDeck API
+
+The back end of **PayDeck**, a card and payments app: wallets in several currencies, virtual cards with spending limits and freezing, card payments with approve and decline rules, top-ups through Stripe, a live transaction feed over WebSockets, and push notifications. The app that uses it is [PayDeck](https://github.com/YOUR-NAME/PayDeck).
+
+Built with Java 25, Spring Boot 4, PostgreSQL 17 and Flyway, while following a full-stack course from zero.
+
+![The PayDeck app showing a card payment arriving live](docs/live-payment.png)
+
+## What it does
+
+- **Money done right.** Amounts are whole cents (`long`), every movement is a pair of ledger entries that sum to zero, and balances are derived from the ledger. Transfers lock accounts in a fixed order, so two at once can neither deadlock nor overspend.
+- **Safe to retry.** Top-ups and payments take an `Idempotency-Key`: the same request sent twice moves money once.
+- **Cards.** Virtual cards with an optional spending limit, freeze and unfreeze, and a cardholder who may differ from the account owner.
+- **Who may do what.** Customers see only their own accounts; a card's holder sees only that card; support staff can refund but not spend; every staff action is written to an audit log.
+- **Sign-in.** Email and password (BCrypt), Google sign-in with PKCE, short-lived JWT access tokens and rotating refresh tokens.
+- **Live.** Account events go out over STOMP WebSockets to every signed-in device, and as push notifications through Firebase, filtered by each person's settings.
+
+## Run it
+
+You need Docker and Java 25.
+
+    docker compose up -d          # PostgreSQL on port 5432
+    ./mvnw spring-boot:run        # the API on http://localhost:8080
+
+API documentation: http://localhost:8080/docs
+
+## Tests
+
+    ./mvnw verify
+
+118 tests: unit tests for the rules, and API tests against a real PostgreSQL started by Testcontainers. GitHub Actions runs them, and builds the Docker image, on every push.
+
+## Deploy
+
+`Dockerfile` builds a small image that runs as a non-root user; `compose.production.yaml` runs it with PostgreSQL on any Linux server. Copy `.env.example` to `.env` and fill it in: the API refuses to start in production until every required setting is there, and says which ones are missing. `scripts/smoke.sh` checks a deployed API from outside.
+
+## Decisions worth knowing
+
+- **The ledger is the truth.** A balance column would be faster to read and easy to get wrong; the ledger makes every cent explainable.
+- **Rules live here, once.** The app shows what the API decides (approved, declined and why); it never decides itself.
+- **Fail loudly at start-up.** A missing secret in production stops the API with a list of what to set, before anything else runs.
+
+## What I would do next
+
+- Real card networks instead of the simulated payment endpoint.
+- Rate limiting on sign-in.
+- Monthly statements as PDF.
+```
+
+(In your file, the commands under "Run it" and "Tests" go in fenced code blocks with `sh`, like every command in this course; they are indented here only because this example is itself inside one.)
+
+Notice what it does **not** contain: no list of every endpoint (the `/docs` page has that), no history of how you built it, no apology. Every claim is something a reader can check in the code, and "118 tests" is the number `./mvnw verify` printed:
+
+```
+[INFO] Tests run: 118, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
+Keep that number true: update it when you add tests, or write "over a hundred".
+
+### The app's README
+
+The app's `README.md` follows the same shape, with what is interesting about the app instead: the screens, sign-in, the hand-written STOMP client, TanStack Query, accessibility. Its pictures sit side by side in a table:
+
+```markdown
+| Android | macOS |
+|---|---|
+| ![Paying with a card on Android](docs/android-pay.png) | ![The Activity screen on the Mac](docs/macos-activity.png) |
+```
+
+and it ends with a short "What I learned building it", three sentences in your own words. That section is optional, and the one people remember.
+
+### Screenshots
+
+Make a `docs` folder in each project for images, and keep each under about 500 KB so the page loads quickly.
+
+- **Mac app**: Command–Shift–4, then Space, then click the PayDeck window: a picture of just that window, saved on the Desktop.
+- **Android emulator**: the camera button in the emulator's side toolbar saves a picture of the phone's screen.
+- **A screen recording** of a payment arriving live is the most convincing picture PayDeck has. Command–Shift–5 records part of the screen; keep it under ten seconds. GitHub shows `.mp4` files dragged into the README's editor on github.com, and `.gif` files anywhere.
+
+Use made-up data in every picture (Asha, Eve, Corner Café), never a real email or card.
+
+### The repository page
+
+On each repository's GitHub page, the gear icon next to **About** sets:
+
+- a **description**: "Card and payments API in Spring Boot 4, Java 25 and PostgreSQL";
+- a **website**: your deployed API's `/docs` page, if it is online;
+- **topics**: `spring-boot`, `java`, `postgresql`, `react-native`, `typescript`, `payments`. Topics make it findable.
+
+And on your own profile page, **Customize your pins** puts both PayDeck repositories at the top.
+
+<Exercise title="The one-minute test">
+Ask someone who has not seen PayDeck (a friend is fine, they do not need to code) to read one README for one minute, then close it and tell you what PayDeck is and one thing that is special about it. What did they say, and what will you change?
+
+<Fragment slot="hint">Do not explain anything before or during the minute. Their answer shows what the README actually says, which is not always what you meant.</Fragment>
+<Fragment slot="solution">
+
+There is no single answer. Typical results: if they cannot say what PayDeck is, the first sentence is too technical, so start with what a person does with it ("pay, top up, freeze a card"). If the special thing they name is from the bottom of the page, move it up. If they mention the picture first, good: it is working. Change one thing and try again with someone else.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="The template's README">
+The React Native template ships a README about the template ("This is a new React Native project..."). It tells a reader you did not write one. Replace it entirely.
+</Aside>
+
+<Aside type="caution" title="Claims the code does not back">
+"Secure", "scalable", "production-ready" are words a reader will test. Name what you did instead ("BCrypt-hashed passwords", "rotating refresh tokens") and let them judge.
+</Aside>
+
+<Aside type="caution" title="Real data in screenshots">
+A screenshot is public forever. Use the course's made-up people and cards.
+</Aside>
+
+## Recap
+
+- The README is the page people actually read: what it is, a picture, what is interesting, run, test, decisions, what next.
+- Every claim is checkable; numbers come from real output.
+- Screenshots in `docs/`, small, with made-up data; a short recording of the live feed if you can.
+- Set each repository's description, website and topics, and pin both on your profile.
+
+<Quiz
+	questions={[
+		{
+			question: 'Who reads a portfolio README the least, and so should be written for first?',
+			options: ['Another developer who wants to run it', 'Someone deciding whether to hire you, in about a minute', 'You, later'],
+			answer: 1,
+			explanation: 'The top of the page, and the picture, are all many readers see.',
+		},
+		{
+			question: 'Which line belongs in "Decisions worth knowing"?',
+			options: ['The API has 30 endpoints', 'Balances come from the ledger, so every cent is explainable, at the cost of a little speed', 'I used IntelliJ'],
+			answer: 1,
+			explanation: 'A decision with its reason and its cost shows judgment.',
+		},
+		{
+			question: 'Where does the "118 tests" in the README come from?',
+			options: ['An estimate', 'The output of ./mvnw verify', 'Counting files'],
+			answer: 1,
+			explanation: 'Every number in a README should be one you can reproduce.',
+		},
+	]}
+/>
+
+<MarkComplete />

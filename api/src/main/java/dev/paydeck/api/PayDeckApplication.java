@@ -1,5 +1,6 @@
 package dev.paydeck.api;
 
+import dev.paydeck.api.common.ProductionSettingsCheck;
 import io.swagger.v3.oas.annotations.OpenAPIDefinition;
 import io.swagger.v3.oas.annotations.enums.SecuritySchemeType;
 import io.swagger.v3.oas.annotations.info.Info;
@@ -17,6 +18,9 @@ import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 public class PayDeckApplication {
 
     public static void main(String[] args) {
-        SpringApplication.run(PayDeckApplication.class, args);
+        SpringApplication app = new SpringApplication(PayDeckApplication.class);
+        // Checked before anything else starts, even the database connection.
+        app.addListeners(new ProductionSettingsCheck());
+        app.run(args);
     }
 }

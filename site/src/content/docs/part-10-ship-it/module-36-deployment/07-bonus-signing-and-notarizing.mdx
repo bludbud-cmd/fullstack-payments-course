@@ -1,0 +1,154 @@
+---
+title: "36.7 Bonus: signing and notarizing the Mac app"
+description: "For readers with a paid Apple Developer membership: sign PayDeck.app with a Developer ID, have Apple notarize it, and staple the ticket, so it opens on any Mac without a warning."
+sidebar:
+  order: 7
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you know the three steps that turn lesson 36.5's unsigned app into one that opens on any Mac without a warning, and the commands for each.
+
+<Aside type="caution" title="A map, not a recipe">
+This lesson is optional. It needs an **Apple Developer Program membership** (a yearly fee), which this course does not require, so the course has not run these steps itself. It explains the parts and the commands; Apple's own documentation ("Notarizing macOS software before distribution") has the current screens.
+</Aside>
+
+## Why it matters
+
+Lesson 36.5's zip works for friends who are willing to press **Open Anyway**. Most people are not, and they should not be: that warning is how macOS protects them from malware. An app signed with your **Developer ID** and **notarized** by Apple opens with no warning at all, and if your certificate were ever stolen, Apple could revoke it and stop the bad copies.
+
+## The idea
+
+Three steps, in order:
+
+1. **Sign** the app with a **Developer ID Application** certificate, with the **hardened runtime** switched on. The signature says who made the app and proves nothing in it changed since.
+2. **Notarize**: upload it to Apple. Apple's servers scan it for malware and, within minutes usually, issue a **ticket**.
+3. **Staple** the ticket to the app, so a Mac that is offline can still check it.
+
+The App Store is a different route: it signs and reviews the app itself, with its own rules about the sandbox and payments. Developer ID is for apps you distribute yourself, from your website or GitHub.
+
+## Worked example
+
+### The certificate
+
+With your membership active, in Xcode: **Settings → Accounts**, select your team, **Manage Certificates**, **+**, **Developer ID Application**. Xcode creates the certificate and keeps its private key in your Mac's keychain. Check:
+
+```sh
+security find-identity -v -p codesigning
+```
+
+It lists a line like `"Developer ID Application: Asha Rao (AB12CD34EF)"`. The ten characters in brackets are your **team ID**.
+
+### Sign
+
+In Xcode, select the PayDeck-macOS target, **Signing & Capabilities**: choose your team, and add the **Hardened Runtime** capability (Apple refuses to notarize without it). Then build the release as in lesson 36.5, but **without** `CODE_SIGNING_ALLOWED=NO`, and with your identity:
+
+```sh
+xcodebuild -workspace PayDeck.xcworkspace -scheme PayDeck-macOS \
+  -configuration Release -destination 'platform=macOS' -derivedDataPath build \
+  CODE_SIGN_IDENTITY="Developer ID Application" DEVELOPMENT_TEAM=AB12CD34EF \
+  OTHER_CODE_SIGN_FLAGS=--timestamp build
+```
+
+`--timestamp` adds a secure time to the signature, which notarization requires. Check the result:
+
+```sh
+codesign --verify --deep --strict --verbose=2 build/Build/Products/Release/PayDeck.app
+```
+
+It answers `valid on disk` and `satisfies its Designated Requirement`.
+
+### Notarize
+
+Apple's `notarytool` needs to sign in. Save the login once in the keychain, with an **app-specific password** made at account.apple.com (never your real Apple ID password):
+
+```sh
+xcrun notarytool store-credentials paydeck-notary \
+  --apple-id asha@example.com --team-id AB12CD34EF
+```
+
+Then zip (notarization takes a zip) and submit, waiting for the answer:
+
+```sh
+ditto -c -k --keepParent build/Build/Products/Release/PayDeck.app PayDeck.zip
+xcrun notarytool submit PayDeck.zip --keychain-profile paydeck-notary --wait
+```
+
+The answer ends with `status: Accepted`. If it says `Invalid`, `xcrun notarytool log <submission id> --keychain-profile paydeck-notary` lists every problem, usually a library without the hardened runtime or a missing timestamp.
+
+### Staple, and zip again
+
+```sh
+xcrun stapler staple build/Build/Products/Release/PayDeck.app
+ditto -c -k --keepParent build/Build/Products/Release/PayDeck.app PayDeck-macOS.zip
+```
+
+The ticket is now inside the app, so the zip made **after** stapling is the one to share. A last check, as Gatekeeper sees it:
+
+```sh
+spctl --assess --type execute --verbose build/Build/Products/Release/PayDeck.app
+```
+
+`accepted`, `source=Notarized Developer ID`.
+
+### In CI
+
+The release workflow (lesson 36.6) can do the same on a `macos-15` runner. The certificate is exported from the keychain as a `.p12` file with a password, stored base64-encoded as a secret, and imported into a temporary keychain during the job; the notary login uses an **App Store Connect API key**, also a secret. The steps are the commands above. Apple's and GitHub's documentation ("Installing an Apple certificate on macOS runners") show the keychain commands.
+
+<Exercise title="What breaks the signature?">
+After signing and stapling, you notice a typo in the app's name in `Info.plist` and fix it inside `PayDeck.app` with a text editor. What happens when someone opens the new zip?
+
+<Fragment slot="hint">What does a signature prove about the files?</Fragment>
+<Fragment slot="solution">
+
+The signature covers every file in the bundle, `Info.plist` included. After the edit, `codesign --verify` reports that the app was modified, and Gatekeeper refuses to open it as damaged. Any change, however small, means build, sign, notarize and staple again. That is why the whole sequence belongs in a script or a release workflow, not in your memory.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Using an Apple Development certificate">
+"Apple Development" certificates are for running on your own Macs. Distribution outside the App Store needs **Developer ID Application**.
+</Aside>
+
+<Aside type="caution" title="Sharing the zip from before stapling">
+It works online, because macOS can fetch the ticket, but not offline. Zip after `stapler staple`.
+</Aside>
+
+<Aside type="caution" title="Your Apple ID password in a script">
+`notarytool` takes an app-specific password or an API key, stored in the keychain or in CI secrets. Never write either into a file in Git.
+</Aside>
+
+## Recap
+
+- Developer ID distribution: sign with the hardened runtime and a timestamp, notarize with `notarytool submit --wait`, staple with `stapler staple`.
+- Check with `codesign --verify` and `spctl --assess`.
+- Any change to the app means doing all three again; put them in a release workflow.
+
+<Quiz
+	questions={[
+		{
+			question: 'What does notarization add?',
+			options: ['A faster app', 'Apple\'s check for malware, and a ticket Gatekeeper trusts', 'An App Store listing'],
+			answer: 1,
+			explanation: 'The ticket, stapled to the app, lets it open without a warning, even offline.',
+		},
+		{
+			question: 'Which certificate signs an app you share from your own website?',
+			options: ['Apple Development', 'Developer ID Application', 'Apple Distribution'],
+			answer: 1,
+			explanation: 'Apple Distribution is for the App Store; Developer ID for everywhere else.',
+		},
+		{
+			question: 'You change one file inside a signed app. What then?',
+			options: ['Nothing', 'The signature no longer matches; sign, notarize and staple again', 'Only staple again'],
+			answer: 1,
+			explanation: 'A signature proves that nothing changed.',
+		},
+	]}
+/>
+
+<MarkComplete />

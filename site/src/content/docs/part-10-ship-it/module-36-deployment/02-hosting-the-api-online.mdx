@@ -1,0 +1,301 @@
+---
+title: "36.2 Hosting the API and database online"
+description: "Run the API and PostgreSQL together with a production Compose file, keep the data in a volume, put Caddy in front for automatic HTTPS, and follow the steps to do the same on a rented Linux server with your own domain name."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can start PayDeck's whole back end (API and database) with one command, keep its data safe across restarts, serve it over HTTPS, and know the steps to do the same on a server on the internet.
+
+## Why it matters
+
+The app on your phone can only reach an API that the internet can reach. Your Mac goes to sleep, changes networks and is not reachable from outside, so the API needs a computer that is always on, with a public address. That computer needs three things: the API, a database whose data survives restarts, and HTTPS, because a payments app sends passwords and tokens and must never send them in plain text.
+
+## The idea
+
+### Where to run it
+
+There are many ways to host an API:
+
+| Option | You manage | Example |
+|---|---|---|
+| A **virtual private server** (VPS) | The whole Linux machine | Hetzner, DigitalOcean, Linode |
+| A container platform | Only the container and its settings | Fly.io, Render, Google Cloud Run |
+| A managed database | Nothing but the data | Most of the above sell one |
+
+PayDeck uses the simplest one that teaches the most: one small VPS (a few dollars or euros a month) running Docker Compose. Everything on it is something you have already used on your Mac. When you later move to a platform, you will know what it is doing for you.
+
+### One file for the whole back end
+
+Your Mac's `docker-compose.yml` (lesson 23.1) runs only the database; you start the API yourself. On a server, Compose runs both, and starts them in the right order: the database first, the API once the database answers.
+
+### HTTPS with Caddy
+
+Spring Boot speaks plain HTTP on port 8080. In front of it goes a **reverse proxy**: a small web server that receives the HTTPS requests on port 443, and passes them on to the API. **Caddy** is a reverse proxy that gets and renews an HTTPS certificate for your domain by itself, from the free authority Let's Encrypt. Its whole configuration for PayDeck is three lines.
+
+## Worked example
+
+### The production Compose file
+
+In the API folder, `compose.production.yaml`:
+
+```yaml
+# Runs the whole PayDeck back end on one server: the API and its database.
+#   cp .env.example .env      then fill in .env
+#   docker compose -f compose.production.yaml up -d --build
+#
+# Put a web server with HTTPS (such as Caddy) in front of port 8080.
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: paydeck
+      POSTGRES_USER: paydeck
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env}
+    volumes:
+      - paydeck-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paydeck -d paydeck"]
+      interval: 5s
+      retries: 10
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: jdbc:postgresql://postgres:5432/paydeck
+      DATABASE_USERNAME: paydeck
+    ports:
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  paydeck-data:
+```
+
+What is new compared to your development file:
+
+- `restart: unless-stopped`: if a container crashes, or the server reboots, Docker starts it again.
+- `${DATABASE_PASSWORD:?...}` reads the password from `.env`, and refuses to start with that message if it is missing. No default password on a server.
+- `healthcheck` runs `pg_isready` every 5 seconds. `depends_on ... condition: service_healthy` makes the API wait until PostgreSQL really accepts connections, not just until its container exists.
+- `build: .` builds the image from lesson 36.1's Dockerfile.
+- `env_file: .env` gives the API every setting in `.env` (lesson 36.3).
+- `DATABASE_URL` uses the host name **`postgres`**, the service's name. On the network Compose creates, that is how containers find each other (lesson 36.1's `localhost` problem, solved).
+- `"127.0.0.1:8080:8080"` publishes the API's port **only on the server itself**. The internet cannot reach port 8080; it reaches Caddy, which reaches the API.
+- The volume `paydeck-data` keeps the database's files outside the container, so they survive a restart, an upgrade and `docker compose down`.
+
+`application.yml` already reads `DATABASE_URL`, `DATABASE_USERNAME` and `DATABASE_PASSWORD`, with your Mac's values as defaults:
+
+```yaml
+  datasource:
+    # Matches docker-compose.yml. A server sets the environment variables instead.
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/paydeck}
+    username: ${DATABASE_USERNAME:paydeck}
+    password: ${DATABASE_PASSWORD:paydeck}
+```
+
+### Try the whole back end on your Mac
+
+Before renting anything, run the production setup on your Mac. Stop your development API first (it uses port 8080). Copy the example settings and fill in three values (lesson 36.3 explains each line of the file):
+
+```sh
+cp .env.example .env
+```
+
+In `.env`, set `JWT_SECRET` to the output of `openssl rand -base64 48`, `DATABASE_PASSWORD` to the output of `openssl rand -base64 24`, and leave `PAYDECK_PUBLIC_BASE_URL=https://api.example.com` for now.
+
+On your Mac, add `-p paydeck-prod` (the **project name**) to every command. Compose names a project after its folder, so without it this file and your development `docker-compose.yml` would both be the project `paydeck-api`, both with a service called `postgres`: Compose would replace your development database's container with this one, and use the same volume. A server has only the production file, so there you can leave `-p` out.
+
+```sh
+docker compose -p paydeck-prod -f compose.production.yaml up -d --build
+docker compose -p paydeck-prod -f compose.production.yaml ps
+```
+
+```
+NAME                      IMAGE                COMMAND                  SERVICE    CREATED          STATUS                    PORTS
+paydeck-prod-api-1        paydeck-api          "java -jar app.jar"      api        36 seconds ago   Up 30 seconds             127.0.0.1:8081->8080/tcp
+paydeck-prod-postgres-1   postgres:17-alpine   "docker-entrypoint.s…"   postgres   36 seconds ago   Up 35 seconds (healthy)   5432/tcp
+```
+
+That is the course's run, with two small differences from yours. Your IMAGE column says `paydeck-prod-api`, the name Compose gives an image it builds (the course reused the image it built in lesson 36.1). And yours says `127.0.0.1:8080->8080/tcp`: the course published its API on port 8081, because its development API was using 8080.
+
+The API's log:
+
+```sh
+docker compose -p paydeck-prod -f compose.production.yaml logs api
+```
+
+shows the profile, the migrations on the new, empty database, and the start:
+
+```
+The following 1 profile is active: "production"
+Successfully applied 14 migrations to schema "public", now at version v14 (execution time 00:00.115s)
+Started PayDeckApplication in 10.003 seconds (process running for 10.629)
+```
+
+```sh
+curl -s localhost:8080/actuator/health
+```
+
+```json
+{"groups":["liveness","readiness"],"status":"UP"}
+```
+
+This is a new, empty database. Register Asha in it with lesson 27.4's request (`POST /api/auth/register` with her email, password and `displayName`): `201`. Log in: `200`.
+
+### The data survives
+
+```sh
+docker compose -p paydeck-prod -f compose.production.yaml down
+docker compose -p paydeck-prod -f compose.production.yaml up -d
+```
+
+`down` removes both containers. `up` creates new ones, and the log now says:
+
+```
+Successfully validated 14 migrations (execution time 00:00.056s)
+Schema "public" is up to date. No migration necessary.
+```
+
+and logging in as Asha still answers `200`. The containers are new; the data was in the volume. (`down -v` would delete the volume too, and everything in it. Never on a server.)
+
+### HTTPS in front
+
+On the server, Caddy's configuration file, `/etc/caddy/Caddyfile`, is:
+
+```
+# The API's public name. Caddy gets a free HTTPS certificate for it from Let's Encrypt.
+api.paydeck.example {
+	reverse_proxy localhost:8080
+}
+```
+
+`api.paydeck.example` is a stand-in: you use your own domain. Caddy can check a file without starting:
+
+```sh
+caddy validate --config Caddyfile
+```
+
+```
+Valid configuration
+```
+
+You can try Caddy on your Mac too (`brew install caddy`). For a name like `localhost`, Caddy makes its own local certificate instead of asking Let's Encrypt. A file `Caddyfile.local`:
+
+```
+localhost:8443 {
+	reverse_proxy 127.0.0.1:8080
+}
+```
+
+```sh
+caddy run --config Caddyfile.local
+```
+
+In another terminal:
+
+```sh
+curl -sk -w "\n%{http_code} %{scheme} %{http_version}\n" https://localhost:8443/actuator/health
+```
+
+```
+{"groups":["liveness","readiness"],"status":"UP"}
+200 HTTPS 2
+```
+
+HTTPS, over HTTP/2, to the API behind it. (The course's Caddy passed requests to port 8081, where its production API was. `-k` accepts Caddy's local certificate, which your Mac does not know; on a real domain it is a Let's Encrypt certificate that every phone trusts, and `-k` is not needed.) The live feed's WebSocket (Module 33) goes through Caddy too, with no extra configuration: a WebSocket request to `https://localhost:8443/ws` answers `HTTP/1.1 101 Switching Protocols`.
+
+### On a real server
+
+<Aside type="caution" title="The course has not rented a server for these steps">
+The steps below need a paid server and a domain name, which this course does not require, so the course has not run them itself. Everything they start (the Compose file, the image, Caddy) is what you ran above on your Mac. The providers' screens change often: follow their own guides for the clicks.
+</Aside>
+
+1. **Rent a small Linux server** (Ubuntu, 2 GB of memory is plenty for PayDeck) from a VPS provider. When it asks, give it your SSH public key, so you sign in with a key, not a password. It gives you an IP address, such as `203.0.113.10`.
+2. **Point your domain at it.** Buy a domain (about ten dollars a year) and, at the company that sold it, add a DNS record (lesson 1.2): type `A`, name `api`, value `203.0.113.10`. After a few minutes, `host api.yourdomain.com` answers that address.
+3. **Sign in to the server** with `ssh root@203.0.113.10`. Everything after this runs on the server.
+4. **Install Docker and Caddy** following their own instructions for Ubuntu (docs.docker.com and caddyserver.com).
+5. **Close every port except SSH and HTTPS**, with Ubuntu's firewall: `ufw allow OpenSSH`, `ufw allow 80`, `ufw allow 443`, `ufw enable`. (Port 80 lets Let's Encrypt check that you own the domain.)
+6. **Get the code**: `git clone` your API's repository (lesson 36.6 also publishes an image you can pull instead).
+7. **Create `.env`** on the server, with new secrets made there (lesson 36.3), and `PAYDECK_PUBLIC_BASE_URL=https://api.yourdomain.com`.
+8. **Start it**: `docker compose -f compose.production.yaml up -d --build`.
+9. **Put your domain in `/etc/caddy/Caddyfile`** and run `systemctl reload caddy`. Within a minute Caddy has a certificate, and `curl https://api.yourdomain.com/actuator/health` answers `UP` from anywhere.
+
+To release a new version later: `git pull`, then the same `up -d --build`. Compose rebuilds the image and replaces the API container; the database container and its volume stay.
+
+<Exercise title="Backups">
+The volume survives restarts, but not a deleted server or a broken disk. Write the command that saves the whole database to a file, and the one that loads such a file into an empty database.
+
+<Fragment slot="hint">PostgreSQL's `pg_dump` writes a database as SQL. `docker compose exec` runs a command in a running service's container (lesson 23.1).</Fragment>
+<Fragment slot="solution">
+
+```sh
+docker compose -f compose.production.yaml exec -T postgres \
+  pg_dump -U paydeck paydeck > paydeck-$(date +%F).sql
+```
+
+and to load it into a fresh, empty database (before the API has created any tables):
+
+```sh
+docker compose -f compose.production.yaml exec -T postgres \
+  psql -U paydeck paydeck < paydeck-2026-11-04.sql
+```
+
+`-T` lets the output go to a file instead of a terminal. A backup only counts once you have restored it somewhere and seen the data. And it must leave the server: copy it to another place (most VPS providers also sell automatic backups of the whole server). The file holds everyone's email and balance, so treat it like a secret.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Publishing 8080 to the internet">
+`ports: - "8080:8080"` (without `127.0.0.1:`) lets anyone reach the API over plain HTTP, around Caddy. Docker's published ports also skip some firewalls. Publish on `127.0.0.1` only.
+</Aside>
+
+<Aside type="caution" title="docker compose down -v">
+`-v` deletes the volumes: the whole database. On your Mac it is a quick reset; on a server it is every customer's money record.
+</Aside>
+
+<Aside type="caution" title="Testing over HTTPS too late">
+If the app talks to `http://` while you develop and `https://` only in production, the first HTTPS problem appears on release day. Try the API through Caddy before you build the release.
+</Aside>
+
+## Recap
+
+- One small Linux server runs PayDeck with Docker Compose: PostgreSQL, then the API once the database is healthy.
+- The database's files live in a volume and survive `down` and `up`.
+- The API's port is published only on `127.0.0.1`; Caddy in front serves HTTPS with a free, automatic certificate, WebSockets included.
+- On a real server: rent it, point a DNS `A` record at it, install Docker and Caddy, open only SSH, 80 and 443, create `.env`, `up -d --build`.
+
+<Quiz
+	questions={[
+		{
+			question: 'Inside compose.production.yaml, why is the database address jdbc:postgresql://postgres:5432/paydeck?',
+			options: ['postgres is the server\'s domain name', 'Containers on a Compose network find each other by service name', 'It is a placeholder to replace'],
+			answer: 1,
+			explanation: 'Compose puts both services on one network where postgres resolves to the database container.',
+		},
+		{
+			question: 'What keeps the data when the containers are removed by docker compose down?',
+			options: ['The image', 'The volume paydeck-data', 'Nothing: down deletes it'],
+			answer: 1,
+			explanation: 'Only down -v deletes volumes.',
+		},
+		{
+			question: 'Why is the API published on 127.0.0.1:8080 and not 8080?',
+			options: ['So only Caddy, on the same server, can reach it, and the internet must use HTTPS', 'It is faster', 'Docker requires it'],
+			answer: 0,
+			explanation: 'Every request from outside goes through Caddy and its certificate.',
+		},
+	]}
+/>
+
+<MarkComplete />

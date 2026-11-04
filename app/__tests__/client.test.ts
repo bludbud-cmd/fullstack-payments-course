@@ -38,10 +38,17 @@ it('turns problem details into an ApiError', async () => {
   });
 });
 
-it('explains a failure without a body', async () => {
+it('explains a server failure without a body in plain words', async () => {
   globalThis.fetch = respond(502) as unknown as typeof fetch;
   await expect(request('/api/accounts/a1')).rejects.toThrow(
-    'The server answered 502',
+    'PayDeck is not available right now. Try again in a minute.',
+  );
+});
+
+it('names the status of any other failure without a body', async () => {
+  globalThis.fetch = respond(404) as unknown as typeof fetch;
+  await expect(request('/api/accounts/a1')).rejects.toThrow(
+    'The server answered 404',
   );
 });
 
@@ -50,7 +57,12 @@ it('reports a network failure in plain words', async () => {
     throw new TypeError('Network request failed');
   }) as unknown as typeof fetch;
   const error = await request('/api/accounts/a1').catch(e => e);
-  expect(error).toMatchObject({ status: 0, title: 'No connection' });
+  expect(error).toMatchObject({
+    status: 0,
+    title: 'No connection',
+    message:
+      'Could not reach PayDeck. Check your internet connection and try again.',
+  });
 });
 
 it('sends JSON and the idempotency key', async () => {

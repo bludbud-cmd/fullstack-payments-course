@@ -1,0 +1,176 @@
+---
+title: "Mini-project: PayDeck live on the internet"
+description: "Put the whole of PayDeck online: the API and database on a server behind HTTPS, Stripe, Google and Firebase pointed at it, a smoke-test script that checks it from outside, and release builds of the app that use it."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Each lesson in this module did one part of deploying. This project puts them together, in the order a real release takes, and adds the one tool every deployed service needs: a quick check, run from outside, that says "it works" or exactly what does not.
+
+<Aside type="note" title="What the course ran">
+The course ran everything that does not need a paid server, a domain or an Apple or Google developer account: the smoke test below ran against PayDeck's production Compose stack behind Caddy's HTTPS on the course's machine, and the Firebase key mount was checked there too. The server, DNS and store steps are lessons 36.2, 36.4 and 36.5's outlines.
+</Aside>
+
+## The tasks
+
+1. **A smoke test.** `scripts/smoke.sh` in the API project takes the API's address, an email and a password, and checks four things a person relies on: the API is healthy, signing in works, `/api/me` answers, and the live feed's WebSocket opens. It stops at the first failure.
+2. **The server.** Follow lesson 36.2's steps with your own server and domain. Run the smoke test against it from your Mac.
+3. **The outside services.** Point Stripe's webhook, Google's sign-in callback and Firebase at the server (the solution lists what goes where).
+4. **The apps.** Set `PRODUCTION_API_URL`, build the Android release (36.4) and the Mac release (36.5), sign in on each, and make a payment that shows up live on the other.
+5. Commit both projects, and push: CI (36.6) should be green.
+
+<Exercise title="Build it">
+Do the five tasks.
+
+<Fragment slot="hint">For the smoke test, `set -euo pipefail` makes a Bash script stop at the first failing command, including inside a pipe. `curl -f` turns an HTTP error (401, 500) into a failing command.</Fragment>
+<Fragment slot="hint2">A WebSocket answers `101 Switching Protocols` and then stays open. `curl --max-time 3 -w '%{http_code}'` waits three seconds, gives up, and still prints the code.</Fragment>
+<Fragment slot="solution">
+
+### The smoke test
+
+`scripts/smoke.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Checks a deployed PayDeck API from the outside, the way the app reaches it.
+#   scripts/smoke.sh https://api.yourdomain.com you@example.com 'your password'
+# Stops at the first check that fails. Needs curl and jq.
+set -euo pipefail
+API="$1"
+EMAIL="$2"
+PASSWORD="$3"
+# For a local test with a self-made certificate: CURL_OPTIONS=-k scripts/smoke.sh ...
+CURL="curl -fsS ${CURL_OPTIONS:-}"
+
+HEALTH=$($CURL "$API/actuator/health" | jq -r .status)
+echo "1. health:    $HEALTH"
+
+LOGIN=$(jq -n --arg e "$EMAIL" --arg p "$PASSWORD" '{email: $e, password: $p}')
+TOKEN=$($CURL -X POST "$API/api/auth/login" -H 'Content-Type: application/json' -d "$LOGIN" | jq -r .accessToken)
+echo "2. login:     token of ${#TOKEN} characters"
+
+ME=$($CURL "$API/api/me" -H "Authorization: Bearer $TOKEN" | jq -r '"\(.user.displayName), \(.accounts | length) account(s)"')
+echo "3. me:        $ME"
+
+# A WebSocket answers 101 and then stays open, so curl gives up after 3 seconds.
+STATUS=$($CURL -o /dev/null -w '%{http_code}' --http1.1 --max-time 3 "$API/ws" \
+  -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+  -H 'Sec-WebSocket-Key: c21va2UtdGVzdC1rZXkhIQ==' 2>/dev/null || true)
+echo "4. live feed: WebSocket answered $STATUS"
+[ "$STATUS" = 101 ]
+echo "All good."
+```
+
+- `jq -n --arg` builds the login JSON, so a password with a quote in it cannot break the request.
+- `${#TOKEN}` is the length of the token: enough to see one arrived, without printing a secret to the screen.
+- The WebSocket request sends the four headers a browser would. `|| true` stops the expected time-out from ending the script; the last line, `[ "$STATUS" = 101 ]`, is the real check.
+
+`chmod +x scripts/smoke.sh`. Against lesson 36.2's stack behind Caddy on the course's machine:
+
+```sh
+CURL_OPTIONS=-k scripts/smoke.sh https://localhost:8443 asha@example.com 'correct horse battery'
+```
+
+```
+1. health:    UP
+2. login:     token of 241 characters
+3. me:        Asha Rao, 0 account(s)
+4. live feed: WebSocket answered 101
+All good.
+```
+
+(Asha has no account yet in the fresh production database: she has only registered.) With a wrong password, it stops at step 2:
+
+```
+1. health:    UP
+curl: (22) The requested URL returned error: 401
+```
+
+and without `CURL_OPTIONS=-k`, against Caddy's self-made local certificate, at step 1, which is what it should say about a server whose certificate a phone would not trust:
+
+```
+curl: (60) SSL certificate problem: unable to get local issuer certificate
+```
+
+Against your real server, no `-k`: Let's Encrypt's certificate is trusted everywhere.
+
+```sh
+scripts/smoke.sh https://api.yourdomain.com asha@example.com 'her password'
+```
+
+Run it after every deploy.
+
+### The outside services
+
+Each service you set up on your Mac knows your Mac's address. Each needs the server's:
+
+| Service | Where | What |
+|---|---|---|
+| Stripe (Module 31) | Dashboard → Developers → Webhooks → Add endpoint | `https://api.yourdomain.com/api/stripe/webhook`, the same events as lesson 31.4; its signing secret goes in the server's `.env` as `STRIPE_WEBHOOK_SECRET`, with `STRIPE_SECRET_KEY` |
+| Google (Module 29) | Cloud Console → Credentials → your OAuth client | Add the redirect URI `https://api.yourdomain.com/login/oauth2/code/google`; uncomment the two Google lines in `.env` |
+| Firebase (Module 34) | The service-account key file | Copy it to the server next to `.env`, never into Git |
+
+For Firebase, Compose mounts the key file into the container read-only. In `compose.production.yaml`, the `api` service gets:
+
+```yaml
+    volumes:
+      - ./firebase-key.json:/run/secrets/firebase-key.json:ro
+```
+
+and `.env` says where to find it inside the container:
+
+```sh
+FIREBASE_SERVICE_ACCOUNT_FILE=/run/secrets/firebase-key.json
+```
+
+`:ro` is read-only: even the API cannot change the key. The course checked this with lesson 34.4's made-up key: with the file mounted, the API's log no longer says `Push (not sent, Firebase is not set up)`; the test notification goes to `FcmPushSender`, which tries Google (and, with a made-up key, is refused, as in lesson 34.4). `chmod 600 firebase-key.json` on the server, like `.env`.
+
+After changing `.env`, `docker compose -f compose.production.yaml up -d` recreates the API with the new settings.
+
+### The apps
+
+In `src/config.ts`, `PRODUCTION_API_URL = 'https://api.yourdomain.com'`. Then the Android release (`./gradlew assembleRelease`, `adb install ...`) and the Mac release (`xcodebuild ... -configuration Release`). Sign in as Asha on the Mac and as Eve on the emulator; Eve pays at Bakery with "For Eve"; Asha's Activity shows it, marked **New**, within a second: the WebSocket through Caddy, from a server on the internet.
+
+### Commit and push
+
+The API: Dockerfile, `.dockerignore`, `compose.production.yaml`, `.env.example`, the settings check, `scripts/smoke.sh`, `.github/workflows/ci.yml`. The app: `config.ts`, `build.gradle`, `Info.plist`, `.github/workflows/ci.yml`, the lint and typecheck fixes. Push both; the Actions tab shows the runs. Not committed, ever: `.env`, the keystore, the Firebase key.
+</Fragment>
+</Exercise>
+
+<Exercise title="What the log says in production">
+Start the production stack and read the API's log from the top. Two warnings appear on every start. What do they say, should a payments API live with them, and what is the fix?
+
+<Fragment slot="hint">`docker compose -f compose.production.yaml logs api | grep WARN`</Fragment>
+<Fragment slot="solution">
+
+```
+o.s.core.events.SpringDocAppInitializer  : SpringDoc /v3/api-docs endpoint is enabled by default. To disable it in production, set the property 'springdoc.api-docs.enabled=false'
+o.s.core.events.SpringDocAppInitializer  : SpringDoc /docs endpoint is enabled by default. To disable it in production, set the property 'springdoc.swagger-ui.enabled=false'
+```
+
+The API documentation from lesson 22.5 is public on the server: a full map of every endpoint, for anyone. The endpoints are protected anyway, so this is not a hole, but there is no reason to hand out the map. In `application-production.yml`:
+
+```yaml
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+```
+
+Rebuild and restart; the warnings are gone and `/docs` answers `404`. On your Mac, where the profile is not active, the docs still work. Reading the log after each deploy, warnings included, is part of the job.
+</Fragment>
+</Exercise>
+
+## What to notice
+
+- **Same image, different settings.** Nothing in the code knows whether it runs on your Mac or the internet; `SPRING_PROFILES_ACTIVE` and `.env` decide.
+- **Check from outside.** Health from inside the server says the API runs; the smoke test from your Mac says people can use it, certificate and WebSocket included.
+- **Secrets have exactly one home.** `.env` and key files on the server, the upload key in your password manager and Actions secrets, nothing in Git or images.
+
+<MarkComplete />
