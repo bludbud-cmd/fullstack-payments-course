@@ -1,0 +1,636 @@
+---
+title: "31.4 Webhooks and verifying them"
+description: "Receive Stripe's signed message that a top-up was paid, prove it really came from Stripe with an HMAC signature, credit the wallet exactly once even when the message arrives twice, and test it all without Stripe."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson `POST /api/stripe/webhook` accepts Stripe's events, refuses anything not signed with PayDeck's webhook secret, and credits the wallet once, and only for the amount PayDeck asked for. Nine new tests prove it, and you can forward real test-mode events to your Mac with the Stripe CLI.
+
+## Why it matters
+
+This endpoint is the only door through which card money enters PayDeck. It has no login, because Stripe's servers do not have a PayDeck account. Anyone on the internet can send it a request that says "checkout `cs_test_…` was paid". If PayDeck believed every such request, anyone could print money. Getting this lesson right is the difference between a payments app and a free-money machine.
+
+## The idea
+
+### Webhooks
+
+A **webhook** is an HTTP request that another service sends to *your* server when something happens. Instead of PayDeck asking Stripe every few seconds "has it been paid yet?", Stripe calls PayDeck once it has. The body is an **event** in JSON:
+
+```json
+{"id":"evt_…","type":"checkout.session.completed","data":{"object":{"id":"cs_test_…","object":"checkout.session","amount_total":2500,"currency":"usd","payment_status":"paid"}}}
+```
+
+PayDeck cares about three event types:
+
+- `checkout.session.completed`: the person finished on Stripe's page. If `payment_status` is `paid`, the money is there.
+- `checkout.session.async_payment_succeeded`: some payment methods (bank debits, for example) take days; this event says one has finally succeeded. Card payments are normally `paid` straight away.
+- `checkout.session.expired`: the page was never used and has expired.
+
+### Signatures
+
+How does PayDeck know a webhook came from Stripe? When you create a webhook endpoint, Stripe gives you a **webhook secret** (`whsec_…`). Only Stripe and PayDeck know it. For every event, Stripe computes an **HMAC** of the body: a code made from the body and the secret together, with SHA-256. It sends it in a header:
+
+```
+Stripe-Signature: t=1793814426,v1=5257a869e7ec…
+```
+
+`t` is the time it was signed, in seconds since 1970 (a **Unix timestamp**), and `v1` is the HMAC of `t` + `.` + body. PayDeck computes the same HMAC with its copy of the secret and compares. If even one character of the body changed, or the secret is wrong, the codes differ. Without the secret, nobody can produce a matching code.
+
+You met the same tool in lesson 27.5: PayDeck's JWTs are signed with HMAC-SHA256 too (`HS256`).
+
+### Replays
+
+Someone who records a genuine webhook could send it again later. That is why `t` is signed along with the body: PayDeck refuses signatures more than five minutes old.
+
+### Exactly once, even when Stripe says it twice
+
+Stripe **retries** a webhook until PayDeck answers with a `2xx` status, sometimes hours later, and very occasionally sends the same event twice anyway. So the handler must be **idempotent**: the second "paid" for the same checkout must do nothing. Three things make sure of it:
+
+1. The checkout row is **locked** while the event is handled, so two copies arriving together take turns (lesson 24.4).
+2. A checkout that is already `PAID` is skipped.
+3. The ledger top-up uses `stripe:<session id>` as its idempotency key, so even a bug above could not credit it twice (lesson 24.5).
+
+And PayDeck answers `200` to events it ignores, or Stripe would keep retrying them.
+
+### Trust, but check the amount
+
+The signature proves the message is from Stripe. PayDeck still compares the event's amount and currency with what it asked for in `stripe_checkouts`. They should always match; if they ever do not, something is badly wrong, and the safe answer is to credit nothing and log an error for a person to look at.
+
+## Worked example
+
+### Verifying a signature
+
+`StripeSignature.java`, in the stripe package:
+
+```java
+package dev.paydeck.api.stripe;
+
+import java.nio.charset.StandardCharsets;
+import java.security.InvalidKeyException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HexFormat;
+import java.util.List;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+
+/**
+ * Checks that a webhook really came from Stripe. Anyone can send a request
+ * to our webhook URL, so without this check anyone could tell PayDeck "this
+ * top-up was paid" and get free money.
+ *
+ * <p>Stripe sends a {@code Stripe-Signature} header like
+ * {@code t=1700000000,v1=5257a8…}: an HMAC-SHA256 of "timestamp.body" made
+ * with the webhook secret that only Stripe and we know.
+ * See https://docs.stripe.com/webhooks#verify-manually
+ */
+public final class StripeSignature {
+
+    /** Older events are refused, so a recorded request cannot be replayed later. */
+    static final Duration TOLERANCE = Duration.ofMinutes(5);
+
+    private StripeSignature() {
+    }
+
+    public static boolean isValid(String payload, String header, String secret, Instant now) {
+        if (header == null || secret == null || secret.isBlank()) {
+            return false;
+        }
+        Long timestamp = null;
+        List<String> signatures = new ArrayList<>();
+        for (String part : header.split(",")) {
+            String[] keyValue = part.trim().split("=", 2);
+            if (keyValue.length != 2) {
+                continue;
+            }
+            if (keyValue[0].equals("t")) {
+                try {
+                    timestamp = Long.parseLong(keyValue[1]);
+                } catch (NumberFormatException e) {
+                    return false;
+                }
+            } else if (keyValue[0].equals("v1")) {
+                signatures.add(keyValue[1]);
+            }
+        }
+        if (timestamp == null || signatures.isEmpty()) {
+            return false;
+        }
+        if (Duration.between(Instant.ofEpochSecond(timestamp), now).abs().compareTo(TOLERANCE) > 0) {
+            return false;
+        }
+        byte[] expected = sign(timestamp + "." + payload, secret).getBytes(StandardCharsets.UTF_8);
+        return signatures.stream()
+                .anyMatch(signature -> MessageDigest.isEqual(expected, signature.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    /** Exposed for tests, which play the part of Stripe. */
+    public static String sign(String signedPayload, String secret) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            return HexFormat.of().formatHex(mac.doFinal(signedPayload.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException | InvalidKeyException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+}
+```
+
+- The header is split at commas, then each part at its first `=`. There may be several `v1` values (while you change secrets, Stripe signs with old and new), so they go in a list, and any one may match.
+- `now` is a parameter instead of calling `Instant.now()` inside, so tests can pretend it is any time they like.
+- **`MessageDigest.isEqual`** compares in a fixed time. An ordinary `equals` stops at the first different character, and by measuring how long answers take, an attacker could guess a valid signature one character at a time. This is the same timing idea as the dummy password hash in lesson 27.4.
+- `Mac` with `HmacSHA256` is Java's built-in HMAC; `HexFormat` writes the result as lower-case hex, the way Stripe does.
+
+### The handler
+
+Add `paid` and `expired` to `StripeTopUpService`. The service now also needs `MoneyMovementService` and a logger:
+
+```java
+import java.util.UUID;
+
+import dev.paydeck.api.money.MoneyMovementService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+// ...
+
+    private static final Logger log = LoggerFactory.getLogger(StripeTopUpService.class);
+
+    private final CheckoutGateway gateway;
+    private final StripeCheckoutRepository checkouts;
+    private final MoneyMovementService money;
+
+    public StripeTopUpService(CheckoutGateway gateway, StripeCheckoutRepository checkouts,
+                              MoneyMovementService money) {
+        this.gateway = gateway;
+        this.checkouts = checkouts;
+        this.money = money;
+    }
+
+    // ... start as before ...
+
+    /**
+     * Stripe can send the same event more than once, so this must be safe to
+     * repeat. The Checkout Session ID doubles as the ledger's idempotency key.
+     */
+    @Transactional
+    public void paid(String sessionId, long amountTotal, String currency) {
+        StripeCheckout checkout = checkouts.findByIdForUpdate(sessionId).orElse(null);
+        if (checkout == null) {
+            log.warn("Stripe reported a payment for a checkout we never opened: {}", sessionId);
+            return;
+        }
+        if (checkout.getStatus() == StripeCheckout.Status.PAID) {
+            return;
+        }
+        if (amountTotal != checkout.getAmountCents() || !checkout.getCurrency().name().equalsIgnoreCase(currency)) {
+            log.error("Stripe amount {} {} does not match checkout {}; not crediting", amountTotal, currency,
+                    sessionId);
+            return;
+        }
+        UUID accountId = checkout.getAccountId();
+        money.topUp(accountId, checkout.getAmountCents(), "Card top-up", "stripe:" + sessionId);
+        checkout.markPaid();
+    }
+
+    @Transactional
+    public void expired(String sessionId) {
+        checkouts.findByIdForUpdate(sessionId)
+                .filter(checkout -> checkout.getStatus() == StripeCheckout.Status.OPEN)
+                .ifPresent(StripeCheckout::markExpired);
+    }
+```
+
+`money.topUp(...)` is the same method the pretend top-up has used since Module 24, with its ledger postings and idempotency. The only difference is who is allowed to call it: now it is a verified message from Stripe.
+
+### The endpoint
+
+In `StripeController`, add a `JsonMapper` to the constructor (Spring provides one) and the third step:
+
+```java
+import java.time.Instant;
+
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
+
+// ...
+
+    private final StripeTopUpService topUps;
+    private final StripeProperties properties;
+    private final AccessPolicy access;
+    private final JsonMapper json;
+
+    public StripeController(StripeTopUpService topUps, StripeProperties properties, AccessPolicy access,
+                            JsonMapper json) {
+        this.topUps = topUps;
+        this.properties = properties;
+        this.access = access;
+        this.json = json;
+    }
+
+    // ... checkout and backToApp as before ...
+
+    /** Step 3: Stripe tells us, signed, that the payment went through. */
+    @PostMapping("/api/stripe/webhook")
+    public ResponseEntity<Void> webhook(@RequestBody String payload,
+                                        @RequestHeader(name = "Stripe-Signature", required = false) String signature) {
+        if (!StripeSignature.isValid(payload, signature, properties.webhookSecret(), Instant.now())) {
+            return ResponseEntity.badRequest().build();
+        }
+        JsonNode event = json.readTree(payload);
+        JsonNode session = event.path("data").path("object");
+        switch (event.path("type").asString()) {
+            case "checkout.session.completed", "checkout.session.async_payment_succeeded" -> {
+                // "completed" can arrive before slower payment methods have settled.
+                if (session.path("payment_status").asString().equals("paid")) {
+                    topUps.paid(session.path("id").asString(), session.path("amount_total").asLong(),
+                            session.path("currency").asString());
+                }
+            }
+            case "checkout.session.expired" -> topUps.expired(session.path("id").asString());
+            default -> {
+                // We only asked for the events above; anything else is fine to ignore.
+            }
+        }
+        return ResponseEntity.ok().build();
+    }
+```
+
+- **`@RequestBody String payload`**: the body as the exact text that arrived. The signature covers those exact characters, so the body must be checked *before* it is turned into objects. If Spring parsed it into a record and you turned that back into JSON, spaces and field order could differ and the signature would never match.
+- Only after the check does `JsonMapper` read it into a `JsonNode`, a tree you can walk with `path("data").path("object")`. `path` never returns `null`: a missing field gives an empty node, so a strange event cannot crash the handler.
+- `required = false` on the header: a request without it is not an error in Spring's eyes; `isValid` turns it into `400`.
+
+The `/api/stripe/webhook` path was already allowed without a token in lesson 31.3.
+
+### Tests
+
+`src/test/java/dev/paydeck/api/stripe/StripeSignatureTest.java`, plain unit tests of the signature check:
+
+```java
+package dev.paydeck.api.stripe;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.time.Instant;
+
+import org.junit.jupiter.api.Test;
+
+class StripeSignatureTest {
+
+    private static final String SECRET = "whsec_test_secret";
+    private static final String BODY = "{\"type\":\"checkout.session.completed\"}";
+    private static final Instant NOW = Instant.ofEpochSecond(1_800_000_000);
+
+    private static String header(long timestamp, String body, String secret) {
+        return "t=" + timestamp + ",v1=" + StripeSignature.sign(timestamp + "." + body, secret);
+    }
+
+    @Test
+    void acceptsAGenuineSignature() {
+        assertThat(StripeSignature.isValid(BODY, header(NOW.getEpochSecond(), BODY, SECRET), SECRET, NOW)).isTrue();
+    }
+
+    @Test
+    void refusesAChangedBody() {
+        String header = header(NOW.getEpochSecond(), BODY, SECRET);
+        assertThat(StripeSignature.isValid(BODY.replace("completed", "expired"), header, SECRET, NOW)).isFalse();
+    }
+
+    @Test
+    void refusesTheWrongSecret() {
+        assertThat(StripeSignature.isValid(BODY, header(NOW.getEpochSecond(), BODY, "whsec_other"), SECRET, NOW))
+                .isFalse();
+    }
+
+    @Test
+    void refusesAnOldReplayedEvent() {
+        long tenMinutesAgo = NOW.minusSeconds(600).getEpochSecond();
+        assertThat(StripeSignature.isValid(BODY, header(tenMinutesAgo, BODY, SECRET), SECRET, NOW)).isFalse();
+    }
+
+    @Test
+    void refusesAMissingOrGarbledHeader() {
+        assertThat(StripeSignature.isValid(BODY, null, SECRET, NOW)).isFalse();
+        assertThat(StripeSignature.isValid(BODY, "nonsense", SECRET, NOW)).isFalse();
+        assertThat(StripeSignature.isValid(BODY, "t=abc,v1=00", SECRET, NOW)).isFalse();
+    }
+}
+```
+
+And `StripeTopUpTest.java`, the whole flow through the API. The test plays both sides of Stripe: `@MockitoBean` replaces the `CheckoutGateway` with a Mockito fake that returns a made-up session (lesson 25.1), and the test signs its own webhooks with a known secret:
+
+```java
+package dev.paydeck.api.stripe;
+
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import java.time.Instant;
+import java.util.UUID;
+
+import dev.paydeck.api.ApiTestSupport;
+import dev.paydeck.api.money.SupportedCurrency;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.MediaType;
+import org.springframework.test.context.TestPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.web.servlet.ResultActions;
+
+/** Top-ups through Stripe Checkout. Stripe itself is replaced: the test plays both Stripe's API and its webhook. */
+@TestPropertySource(properties = {
+        "paydeck.stripe.secret-key=sk_test_fake",
+        "paydeck.stripe.webhook-secret=" + StripeTopUpTest.WEBHOOK_SECRET
+})
+class StripeTopUpTest extends ApiTestSupport {
+
+    static final String WEBHOOK_SECRET = "whsec_test_paydeck";
+
+    @MockitoBean
+    CheckoutGateway stripe;
+
+    @Test
+    void theWalletIsCreditedOnlyWhenStripeSaysItWasPaid() throws Exception {
+        UUID account = openAccount("Asha", "EUR");
+        String sessionId = "cs_test_" + UUID.randomUUID();
+        when(stripe.createTopUpSession(eq(account), eq(2_500L), eq(SupportedCurrency.EUR), anyString()))
+                .thenReturn(new CheckoutGateway.CheckoutSession(sessionId, "https://checkout.stripe.com/c/pay/x"));
+
+        mvc.perform(post("/api/accounts/{id}/top-ups/checkout", account).with(asOwnerOf(account))
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"amountCents": 2500}
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.url").value("https://checkout.stripe.com/c/pay/x"));
+        balanceIs(account, 0);
+
+        String paid = completedEvent(sessionId, 2_500, "eur");
+        webhook(paid).andExpect(status().isOk());
+        balanceIs(account, 2_500);
+
+        // Stripe retries webhooks, sometimes long after: the money must still arrive only once.
+        webhook(paid).andExpect(status().isOk());
+        balanceIs(account, 2_500);
+        mvc.perform(get("/api/accounts/{id}/transactions", account).with(asOwnerOf(account)))
+                .andExpect(jsonPath("$[0].description").value("Card top-up"));
+    }
+
+    @Test
+    void aForgedWebhookIsRefused() throws Exception {
+        UUID account = openAccount("Asha", "USD");
+        String sessionId = startCheckout(account, 1_000);
+
+        String body = completedEvent(sessionId, 1_000, "usd");
+        long now = Instant.now().getEpochSecond();
+        mvc.perform(post("/api/stripe/webhook")
+                        .header("Stripe-Signature", "t=" + now + ",v1=" + StripeSignature.sign(now + "." + body,
+                                "whsec_guessed"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isBadRequest());
+        balanceIs(account, 0);
+    }
+
+    @Test
+    void anAmountThatDoesNotMatchIsNotCredited() throws Exception {
+        UUID account = openAccount("Asha", "USD");
+        String sessionId = startCheckout(account, 1_000);
+
+        webhook(completedEvent(sessionId, 999_999, "usd")).andExpect(status().isOk());
+        balanceIs(account, 0);
+    }
+
+    @Test
+    void theBrowserIsSentBackToTheApp() throws Exception {
+        mvc.perform(get("/payments/return").param("result", "success"))
+                .andExpect(status().isFound())
+                .andExpect(header().string("Location", "paydeck://top-up?result=success"));
+        mvc.perform(get("/payments/return").param("result", "javascript:alert(1)"))
+                .andExpect(header().string("Location", "paydeck://top-up?result=cancelled"));
+    }
+
+    private String startCheckout(UUID account, long amountCents) throws Exception {
+        String sessionId = "cs_test_" + UUID.randomUUID();
+        when(stripe.createTopUpSession(eq(account), anyLong(), any(), anyString()))
+                .thenReturn(new CheckoutGateway.CheckoutSession(sessionId, "https://checkout.stripe.com/x"));
+        mvc.perform(post("/api/accounts/{id}/top-ups/checkout", account).with(asOwnerOf(account))
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"amountCents": %d}
+                                """.formatted(amountCents)))
+                .andExpect(status().isCreated());
+        return sessionId;
+    }
+
+    private static String completedEvent(String sessionId, long amountTotal, String currency) {
+        return """
+                {"id": "evt_%s", "type": "checkout.session.completed",
+                 "data": {"object": {"id": "%s", "object": "checkout.session", "payment_status": "paid",
+                                     "amount_total": %d, "currency": "%s"}}}
+                """.formatted(UUID.randomUUID(), sessionId, amountTotal, currency);
+    }
+
+    private ResultActions webhook(String body) throws Exception {
+        long now = Instant.now().getEpochSecond();
+        return mvc.perform(post("/api/stripe/webhook")
+                .header("Stripe-Signature", "t=" + now + ",v1=" + StripeSignature.sign(now + "." + body,
+                        WEBHOOK_SECRET))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body));
+    }
+
+    private void balanceIs(UUID account, long cents) throws Exception {
+        mvc.perform(get("/api/accounts/{id}", account).with(asOwnerOf(account)))
+                .andExpect(jsonPath("$.balanceCents").value(cents));
+    }
+}
+```
+
+- `@TestPropertySource` sets the two Stripe settings just for this class: a fake key, so card top-ups are switched on, and a known webhook secret.
+- `@MockitoBean CheckoutGateway stripe` swaps the real gateway for a fake in the Spring app under test, so no request ever leaves the computer. `when(...).thenReturn(...)` says what the fake answers.
+- The first test is the whole story, including the **same webhook twice**. The last one checks that something nasty in `result` never reaches the app link.
+
+`./mvnw test`: 91 tests, all green.
+
+Then break it on purpose: delete the `if (amountTotal != …)` check in `paid` and run `./mvnw test -Dtest='StripeTopUpTest,StripeSignatureTest'`:
+
+```
+[ERROR]   StripeTopUpTest.anAmountThatDoesNotMatchIsNotCredited:87->balanceIs:132 JSON path "$.balanceCents" expected:<0> but was:<1000>
+[ERROR] Tests run: 9, Failures: 1, Errors: 0, Skipped: 0
+```
+
+Without the check, an event saying "999,999 cents were paid" credits the checkout's own 1,000 cents anyway: the event and the checkout disagree and PayDeck did not notice. Put the check back.
+
+### Try it with Stripe's test mode
+
+Stripe cannot reach `localhost` on your Mac, so the Stripe CLI receives events for you and passes them on. In a second terminal:
+
+```sh
+stripe listen --forward-to localhost:8080/api/stripe/webhook \
+  --events checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.expired
+```
+
+It prints a **webhook signing secret** starting `whsec_`, and keeps running. Start the API with both secrets:
+
+```sh
+STRIPE_SECRET_KEY=sk_test_… STRIPE_WEBHOOK_SECRET=whsec_… ./mvnw spring-boot:run
+```
+
+Ask for a top-up page as in lesson 31.3, open the URL and pay with `4242 4242 4242 4242`. Within a second or two, the `stripe listen` terminal shows `checkout.session.completed` forwarded to PayDeck with `[200]`, and Asha's balance has grown by $25.00, with "Card top-up" at the top of her history.
+
+Once PayDeck is online (Module 36), you instead add the API's public URL as a webhook endpoint in the Dashboard (**Developers → Webhooks**), choose the same three events, and Stripe gives that endpoint its own `whsec_` secret.
+
+### Try it without Stripe
+
+You can also play Stripe yourself: sign an event with the same secret the API uses, exactly as the tests do. Save this as `scripts/send-webhook.sh` in the API folder:
+
+```sh
+#!/bin/sh
+# Plays Stripe: signs a webhook event the way Stripe does and sends it to PayDeck.
+# Usage: sh send-webhook.sh event.json
+SECRET=${STRIPE_WEBHOOK_SECRET:?set STRIPE_WEBHOOK_SECRET first}
+BODY=$(cat "$1")
+T=$(date +%s)
+SIG=$(printf '%s.%s' "$T" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | sed 's/^.* //')
+curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/api/stripe/webhook \
+  -H 'Content-Type: application/json' \
+  -H "Stripe-Signature: t=$T,v1=$SIG" \
+  --data-binary "$BODY"
+```
+
+`openssl dgst -sha256 -hmac` computes the HMAC in the terminal; `sed` keeps only the code from its output; `-w '%{http_code}'` makes `curl` print just the status.
+
+These outputs come from a run against stripe-mock (lesson 31.2), with `STRIPE_WEBHOOK_SECRET=whsec_paydeck_local`. A checkout `cs_test_ReEJ4yDcDvqHAKR` for $25.00 was open, and Asha's balance was 10750. The event, saved as `paid.json`:
+
+```json
+{"id":"evt_test_1","type":"checkout.session.completed","data":{"object":{"id":"cs_test_ReEJ4yDcDvqHAKR","object":"checkout.session","amount_total":2500,"currency":"usd","payment_status":"paid"}}}
+```
+
+First, a forgery and a request with no signature at all:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/api/stripe/webhook \
+  -H 'Content-Type: application/json' -H "Stripe-Signature: t=$(date +%s),v1=0000" --data-binary @paid.json
+curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/api/stripe/webhook \
+  -H 'Content-Type: application/json' --data-binary @paid.json
+```
+
+```
+400
+400
+```
+
+The balance is still 10750. Now properly signed, twice, then with a guessed secret:
+
+```sh
+STRIPE_WEBHOOK_SECRET=whsec_paydeck_local sh scripts/send-webhook.sh paid.json
+STRIPE_WEBHOOK_SECRET=whsec_paydeck_local sh scripts/send-webhook.sh paid.json
+STRIPE_WEBHOOK_SECRET=whsec_guess sh scripts/send-webhook.sh paid.json
+```
+
+```
+200
+200
+400
+```
+
+The balance is 13250: $25.00 more, once. The history and the checkout agree:
+
+```
+{"transactionId":"6857e1be-c641-4d09-a278-d30cc97a82ec","type":"TOP_UP","description":"Card top-up","amountCents":2500,"createdAt":"2026-11-04T09:37:06.361521Z"}
+```
+
+```
+           id            | amount_cents | currency | status | completed 
+-------------------------+--------------+----------+--------+-----------
+ cs_test_ReEJ4yDcDvqHAKR |         2500 | USD      | PAID   | t
+(1 row)
+```
+
+<Exercise title="An event PayDeck never asked for">
+With `stripe listen` running, try `stripe trigger checkout.session.completed`. The CLI creates a brand-new Checkout Session in your test account, pays it, and Stripe sends the event. What does PayDeck answer, what does it do with the money, and what does its log say? Without Stripe, you can get the same result by changing the `id` in `paid.json` to `cs_test_unknown`.
+
+<Fragment slot="hint">Look at the first `if` in `paid`.</Fragment>
+<Fragment slot="solution">
+
+PayDeck answers `200`: the signature is genuine, so the message is accepted and Stripe will not retry. But PayDeck never opened that session, so there is no row in `stripe_checkouts`, no wallet to credit, and no money moves. The log says:
+
+```
+Stripe reported a payment for a checkout we never opened: cs_test_…
+```
+
+That is the right behaviour. Answering `400` would make Stripe retry for days a message that will never make sense; crediting someone would be wrong, because nobody asked. Logging it lets a person look if it ever happens for real.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="danger" title="Skipping the signature check &quot;for now&quot;">
+An unchecked webhook is a public "add money" button. Check the signature from the very first version, and keep the webhook secret as secret as the API key.
+</Aside>
+
+<Aside type="caution" title="Parsing the body before checking it">
+If the controller takes a record or a `JsonNode` as its `@RequestBody`, the exact text Stripe signed is gone, and the check can never pass. Take a `String`, check it, then parse it.
+</Aside>
+
+<Aside type="caution" title="Answering errors to Stripe for events you ignore">
+Stripe retries anything that is not `2xx`. Answer `200` for events you do not handle, and for duplicates. Keep `400` for messages you could not verify.
+</Aside>
+
+<Aside type="caution" title="Comparing signatures with equals">
+`String.equals` stops at the first difference, which leaks timing. Use `MessageDigest.isEqual`.
+</Aside>
+
+## Recap
+
+- A **webhook** is Stripe calling PayDeck when something happens. PayDeck handles `checkout.session.completed`, `async_payment_succeeded` and `expired`.
+- Every event is **signed**: `Stripe-Signature: t=…,v1=…`, an HMAC-SHA256 of `t.body` with the **webhook secret**. PayDeck recomputes it, compares in constant time, and refuses anything more than five minutes old.
+- The handler is **idempotent**: a locked checkout row, a `PAID` status, and a ledger idempotency key mean a repeated event credits nothing.
+- PayDeck also checks the **amount and currency** against what it asked for, and answers `200` to events it ignores.
+- `stripe listen` forwards real test-mode events to your Mac; a signed `curl` lets you play Stripe yourself.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why can\'t an attacker fake a "paid" webhook?',
+			options: ['The webhook URL is secret', 'They cannot compute the HMAC signature without the webhook secret', 'Stripe blocks other senders'],
+			answer: 1,
+			explanation: 'The URL is public; the signature is what proves the sender knows the secret.',
+		},
+		{
+			question: 'Stripe sends the same "paid" event twice. What happens to the wallet?',
+			options: ['Credited twice', 'Credited once: the checkout is already PAID, and the ledger key would refuse a repeat anyway', 'Not credited at all'],
+			answer: 1,
+			explanation: 'Webhook handlers must be idempotent, because retries are normal.',
+		},
+		{
+			question: 'Why does the webhook take the body as a String?',
+			options: ['Strings are faster', 'The signature covers the exact text that arrived, which parsing would lose', 'Stripe sends plain text, not JSON'],
+			answer: 1,
+			explanation: 'Check the exact bytes first, then parse.',
+		},
+	]}
+/>
+
+<MarkComplete />

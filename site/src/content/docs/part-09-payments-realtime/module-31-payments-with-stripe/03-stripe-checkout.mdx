@@ -1,0 +1,550 @@
+---
+title: "31.3 Stripe Checkout"
+description: "Let PayDeck's API open a Stripe-hosted payment page for a top-up: call Stripe with Spring's RestClient, remember each page in a stripe_checkouts table, and bring the browser back to the app when the person has paid."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson `POST /api/accounts/{id}/top-ups/checkout` asks Stripe for a payment page for the requested amount, remembers it, and answers with the page's URL. After paying, the browser comes back through `GET /payments/return` and is sent on to the app.
+
+## Why it matters
+
+The safest card form is one you never build. **Stripe Checkout** is a payment page that Stripe hosts: it handles card numbers, 3D Secure, error messages in many languages, Apple Pay and Google Pay, and it keeps PayDeck out of PCI DSS's way (lesson 30.8). PayDeck's job shrinks to asking for the page and waiting to hear how it went.
+
+## The idea
+
+### Three steps
+
+1. **The app asks PayDeck** for a $25.00 top-up page. PayDeck asks Stripe to create a **Checkout Session** (a payment page for one payment) and answers with its URL.
+2. **The person pays on Stripe's page**, in the browser. When they finish or give up, Stripe sends the browser to a **return URL** that PayDeck chose, and PayDeck sends it on to the app.
+3. **Stripe tells PayDeck** that the payment succeeded, in a signed webhook, and PayDeck credits the wallet. That is lesson 31.4.
+
+This lesson builds steps 1 and 2. Notice that step 2 adds no money: arriving at "success" in a browser proves nothing, because anyone can type that address.
+
+### Remember every page
+
+When Stripe's message arrives in step 3, it says "Checkout Session `cs_test_…` was paid, $25.00". PayDeck must know which wallet that session was for, and for how much it asked. So step 1 saves a row in a new table, `stripe_checkouts`: the session ID, the account, the amount, the currency, and a status that starts as `OPEN`.
+
+### Calling another API from Java
+
+So far PayDeck's API has only *answered* requests. Now it makes one. Spring's **`RestClient`** builds an HTTP request in Java, much like `curl` on the command line: a method, a URL, headers, a body, then it reads the answer into a record.
+
+### A gateway you can swap
+
+The code that talks to Stripe sits behind a small interface, `CheckoutGateway`. The rest of PayDeck only knows "open a payment page, get an ID and a URL back". In tests (lesson 31.4), a fake gateway answers instead of Stripe, so tests run without a network and without a Stripe account. This is the same idea as the in-memory repository in Module 22: depend on what something does, not on who does it.
+
+### The return trip
+
+Stripe's page can only send a browser to a web address, not to an app link like `paydeck://top-up`. So the return URL points at PayDeck's API, `http://localhost:8080/payments/return?result=success`, which answers with a redirect (`302`) to `paydeck://top-up?result=success`. The phone sees an app link and opens PayDeck, as with Google sign-in in Module 29.
+
+## Worked example
+
+### Dependency
+
+`RestClient` needs Spring Boot's REST client starter. In `pom.xml`, next to the other starters:
+
+```xml
+        <dependency>
+            <!-- RestClient, for calling Stripe -->
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-restclient</artifactId>
+        </dependency>
+```
+
+Without it, the app does not start, and the message tells you what is missing:
+
+```
+Parameter 1 of constructor in dev.paydeck.api.stripe.StripeCheckoutGateway required a bean of type 'org.springframework.web.client.RestClient$Builder' that could not be found.
+```
+
+### The table
+
+`V11__create_stripe_checkouts.sql`:
+
+```sql
+-- A Stripe Checkout page PayDeck opened for a top-up. The wallet is only
+-- credited when Stripe's signed webhook says the payment succeeded.
+CREATE TABLE stripe_checkouts (
+    id            VARCHAR(255) PRIMARY KEY, -- Stripe's Checkout Session ID, cs_test_...
+    account_id    UUID         NOT NULL REFERENCES accounts (id),
+    amount_cents  BIGINT       NOT NULL CHECK (amount_cents > 0),
+    currency      VARCHAR(3)   NOT NULL,
+    status        VARCHAR(10)  NOT NULL CHECK (status IN ('OPEN', 'PAID', 'EXPIRED')),
+    created_at    TIMESTAMPTZ  NOT NULL,
+    completed_at  TIMESTAMPTZ
+);
+```
+
+The primary key is Stripe's ID, a string, not a UUID that PayDeck makes up: Stripe's messages will refer to it.
+
+### The entity and repository
+
+`StripeCheckout.java`:
+
+```java
+package dev.paydeck.api.stripe;
+
+import java.time.Instant;
+import java.util.UUID;
+
+import dev.paydeck.api.money.SupportedCurrency;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+
+/** A Stripe payment page opened for a top-up, and whether it has been paid. */
+@Entity
+@Table(name = "stripe_checkouts")
+public class StripeCheckout {
+
+    public enum Status {
+        OPEN,
+        PAID,
+        EXPIRED
+    }
+
+    /** Stripe's ID for the Checkout Session. */
+    @Id
+    private String id;
+
+    @Column(nullable = false)
+    private UUID accountId;
+
+    @Column(nullable = false)
+    private long amountCents;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private SupportedCurrency currency;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private Status status;
+
+    @Column(nullable = false)
+    private Instant createdAt;
+
+    private Instant completedAt;
+
+    protected StripeCheckout() {
+        // For JPA
+    }
+
+    public StripeCheckout(String id, UUID accountId, long amountCents, SupportedCurrency currency) {
+        this.id = id;
+        this.accountId = accountId;
+        this.amountCents = amountCents;
+        this.currency = currency;
+        this.status = Status.OPEN;
+        this.createdAt = Instant.now();
+    }
+
+    void markPaid() {
+        status = Status.PAID;
+        completedAt = Instant.now();
+    }
+
+    void markExpired() {
+        status = Status.EXPIRED;
+        completedAt = Instant.now();
+    }
+
+    public String getId() {
+        return id;
+    }
+
+    public UUID getAccountId() {
+        return accountId;
+    }
+
+    public long getAmountCents() {
+        return amountCents;
+    }
+
+    public SupportedCurrency getCurrency() {
+        return currency;
+    }
+
+    public Status getStatus() {
+        return status;
+    }
+}
+```
+
+There is no `@GeneratedValue`: the ID is given, by Stripe. `StripeCheckoutRepository.java`:
+
+```java
+package dev.paydeck.api.stripe;
+
+import java.util.Optional;
+
+import jakarta.persistence.LockModeType;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Query;
+
+public interface StripeCheckoutRepository extends JpaRepository<StripeCheckout, String> {
+
+    /** Stripe may send the same event twice at the same moment; the lock makes them take turns. */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select c from StripeCheckout c where c.id = :id")
+    Optional<StripeCheckout> findByIdForUpdate(String id);
+}
+```
+
+`JpaRepository<StripeCheckout, String>`: the second type is the ID's type, a `String` this time. The locking finder is for lesson 31.4.
+
+### The gateway
+
+`CheckoutGateway.java`, the interface:
+
+```java
+package dev.paydeck.api.stripe;
+
+import java.util.UUID;
+
+import dev.paydeck.api.money.SupportedCurrency;
+
+/** Opens a hosted payment page. The real one is Stripe; tests use a fake. */
+public interface CheckoutGateway {
+
+    record CheckoutSession(String id, String url) {
+    }
+
+    CheckoutSession createTopUpSession(UUID accountId, long amountCents, SupportedCurrency currency,
+                                       String idempotencyKey);
+}
+```
+
+And `StripeCheckoutGateway.java`, the real one. It sends the same form fields as your `curl` in lesson 31.2:
+
+```java
+package dev.paydeck.api.stripe;
+
+import java.util.Locale;
+import java.util.UUID;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import dev.paydeck.api.money.SupportedCurrency;
+import org.springframework.http.MediaType;
+import org.springframework.stereotype.Component;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.RestClient;
+
+/**
+ * Creates Stripe Checkout Sessions with a plain HTTP call, so you can see
+ * exactly what is sent. Stripe's API takes form fields, with square brackets
+ * for nested values.
+ * See https://docs.stripe.com/api/checkout/sessions/create
+ */
+@Component
+public class StripeCheckoutGateway implements CheckoutGateway {
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    record StripeSession(String id, String url) {
+    }
+
+    private final StripeProperties properties;
+    private final RestClient http;
+
+    public StripeCheckoutGateway(StripeProperties properties, RestClient.Builder http) {
+        this.properties = properties;
+        this.http = http.baseUrl(properties.apiBaseUrl()).build();
+    }
+
+    @Override
+    public CheckoutSession createTopUpSession(UUID accountId, long amountCents, SupportedCurrency currency,
+                                              String idempotencyKey) {
+        String returnUrl = properties.publicBaseUrl() + "/payments/return";
+        MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
+        form.add("mode", "payment");
+        form.add("line_items[0][quantity]", "1");
+        form.add("line_items[0][price_data][currency]", currency.name().toLowerCase(Locale.ROOT));
+        form.add("line_items[0][price_data][unit_amount]", Long.toString(amountCents));
+        form.add("line_items[0][price_data][product_data][name]", "PayDeck wallet top-up");
+        form.add("client_reference_id", accountId.toString());
+        form.add("metadata[accountId]", accountId.toString());
+        form.add("success_url", returnUrl + "?result=success");
+        form.add("cancel_url", returnUrl + "?result=cancelled");
+
+        StripeSession session = http.post()
+                .uri("/v1/checkout/sessions")
+                .header("Authorization", "Bearer " + properties.secretKey())
+                // Stripe understands idempotency keys too, so a retry never opens two pages.
+                .header("Idempotency-Key", "paydeck-top-up-" + idempotencyKey)
+                .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                .body(form)
+                .retrieve()
+                .body(StripeSession.class);
+        return new CheckoutSession(session.id(), session.url());
+    }
+}
+```
+
+Line by line:
+
+- `RestClient.Builder` is given by Spring; `baseUrl(...)` sets the start of every URL: `https://api.stripe.com`, unless you point `STRIPE_API_BASE_URL` at stripe-mock.
+- `mode=payment` asks for a one-off payment (Checkout can also do subscriptions).
+- Stripe wants the currency in lower case (`usd`) and the amount in the smallest unit, cents, exactly like PayDeck (lesson 24.1).
+- `client_reference_id` and `metadata[accountId]` label the session with the wallet, so the Dashboard shows which wallet each payment was for.
+- `Authorization: Bearer sk_test_…` is the secret key. It is never logged and never sent to the app.
+- **`Idempotency-Key`**: Stripe supports the same idea as PayDeck (lesson 24.5). If PayDeck's request to Stripe times out and the app retries with the same key, Stripe answers with the same session instead of opening a second page.
+- `.retrieve().body(StripeSession.class)` reads the JSON answer into a record. Stripe's answer has dozens of fields; `@JsonIgnoreProperties(ignoreUnknown = true)` says "only `id` and `url` matter, ignore the rest".
+
+### Starting a top-up
+
+`StripeTopUpService.java`, first part. Lesson 31.4 adds the methods that react to Stripe's messages:
+
+```java
+package dev.paydeck.api.stripe;
+
+import dev.paydeck.api.account.Account;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+/**
+ * Topping up with a real (test) card through Stripe Checkout:
+ * <ol>
+ *   <li>{@link #start} asks Stripe for a payment page and remembers it.</li>
+ *   <li>The person pays on Stripe's page, in the browser.</li>
+ *   <li>Stripe calls our webhook; {@link #paid} credits the wallet.</li>
+ * </ol>
+ * The wallet is only ever credited from the webhook, never because the app
+ * says "I paid": the app could be lying, Stripe's signed webhook cannot.
+ */
+@Service
+public class StripeTopUpService {
+
+    private final CheckoutGateway gateway;
+    private final StripeCheckoutRepository checkouts;
+
+    public StripeTopUpService(CheckoutGateway gateway, StripeCheckoutRepository checkouts) {
+        this.gateway = gateway;
+        this.checkouts = checkouts;
+    }
+
+    @Transactional
+    public CheckoutGateway.CheckoutSession start(Account account, long amountCents, String idempotencyKey) {
+        CheckoutGateway.CheckoutSession session = gateway.createTopUpSession(account.getId(), amountCents,
+                account.getCurrency(), idempotencyKey);
+        if (!checkouts.existsById(session.id())) {
+            checkouts.save(new StripeCheckout(session.id(), account.getId(), amountCents, account.getCurrency()));
+        }
+        return session;
+    }
+}
+```
+
+`existsById` matters on a retry: Stripe returns the same session for the same key, and it must not be saved twice.
+
+### The endpoints
+
+`StripeController.java`, with the two endpoints of this lesson:
+
+```java
+package dev.paydeck.api.stripe;
+
+import java.net.URI;
+import java.util.UUID;
+
+import dev.paydeck.api.access.AccessPolicy;
+import dev.paydeck.api.access.AccountAction;
+import dev.paydeck.api.account.Account;
+import dev.paydeck.api.auth.CurrentUser;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.Size;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ProblemDetail;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.util.UriComponentsBuilder;
+
+@RestController
+public class StripeController {
+
+    /** Stripe's smallest charge is about 0.50 in most currencies. */
+    public record CheckoutRequest(@Min(100) @Max(10_000_000) long amountCents) {
+    }
+
+    public record CheckoutResponse(String checkoutId, String url) {
+    }
+
+    private final StripeTopUpService topUps;
+    private final StripeProperties properties;
+    private final AccessPolicy access;
+
+    public StripeController(StripeTopUpService topUps, StripeProperties properties, AccessPolicy access) {
+        this.topUps = topUps;
+        this.properties = properties;
+        this.access = access;
+    }
+
+    /** Step 1: the app asks for a payment page and opens {@code url} in the browser. */
+    @PostMapping("/api/accounts/{accountId}/top-ups/checkout")
+    public ResponseEntity<?> checkout(CurrentUser user, @PathVariable UUID accountId,
+                                      @RequestHeader("Idempotency-Key") @Size(min = 1, max = 100) String key,
+                                      @Valid @RequestBody CheckoutRequest request) {
+        Account account = access.account(user, accountId, AccountAction.MOVE_MONEY);
+        if (!properties.isEnabled()) {
+            ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE,
+                    "Card top-ups are not set up on this server.");
+            problem.setTitle("Stripe is not set up");
+            problem.setProperty("code", "STRIPE_NOT_CONFIGURED");
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(problem);
+        }
+        CheckoutGateway.CheckoutSession session = topUps.start(account, request.amountCents(), key);
+        return ResponseEntity.status(HttpStatus.CREATED).body(new CheckoutResponse(session.id(), session.url()));
+    }
+
+    /** Step 2: after paying (or giving up), Stripe's page sends the browser here, and we hand over to the app. */
+    @GetMapping("/payments/return")
+    public ResponseEntity<Void> backToApp(@RequestParam(defaultValue = "cancelled") String result) {
+        String safe = result.equals("success") ? "success" : "cancelled";
+        URI app = UriComponentsBuilder.fromUriString(properties.appReturnUrl()).queryParam("result", safe)
+                .build().toUri();
+        return ResponseEntity.status(HttpStatus.FOUND).location(app).build();
+    }
+}
+```
+
+- Topping up is moving money into the account, so it uses the same rule as the pretend top-up: `MOVE_MONEY`, owner only (lesson 30.2).
+- No key means `503 Service Unavailable` with the code `STRIPE_NOT_CONFIGURED`: the server is working, but this feature is switched off here. The app can show a clear message instead of a crash.
+- `backToApp` only ever passes on `success` or `cancelled`. Whatever else someone puts in the address is not copied into the app link. Copying input into a redirect unchecked is how **open redirects** happen, a favourite trick for phishing links.
+
+The browser coming back from Stripe has no PayDeck token, so `SecurityConfig` must let it in. Add this line before `.anyRequest().authenticated()`:
+
+```java
+                        // Stripe calls the webhook, and the browser comes back from Stripe's page: no token.
+                        .requestMatchers("/api/stripe/webhook", "/payments/return").permitAll()
+```
+
+The webhook is lesson 31.4's; it is listed now so this line only has to be written once.
+
+### Try it
+
+Start the API **without** a Stripe key, sign in as Asha (`$ASHA`, `$A` is her USD account), and ask for a page:
+
+```sh
+curl -s -X POST localhost:8080/api/accounts/$A/top-ups/checkout -H "Authorization: Bearer $ASHA" \
+  -H "Idempotency-Key: k-topup-2" -H 'Content-Type: application/json' -d '{"amountCents": 2500}'
+```
+
+```json
+{"detail":"Card top-ups are not set up on this server.","instance":"/api/accounts/20f0ebd9-5f0d-4685-b788-d6c386e6ac85/top-ups/checkout","status":503,"title":"Stripe is not set up","code":"STRIPE_NOT_CONFIGURED"}
+```
+
+Now restart it with your test key, `STRIPE_SECRET_KEY=sk_test_… ./mvnw spring-boot:run`, and ask again. You get `201` with `checkoutId` and `url`. Open the `url` in your browser: it is Stripe's payment page, showing "PayDeck wallet top-up" and $25.00. Pay with `4242 4242 4242 4242`, any future date and any code. The browser goes to `localhost:8080/payments/return?result=success`, which redirects to `paydeck://top-up?result=success`; the Mac's browser does not know that link yet, which is fine for now. The payment shows up in the Dashboard under **Payments**.
+
+Here is the same request answered by stripe-mock instead (`STRIPE_API_BASE_URL=http://localhost:12111`, `STRIPE_SECRET_KEY=sk_test_123`), showing the full exchange:
+
+```
+HTTP/1.1 201 
+Content-Type: application/json
+
+{"checkoutId":"cs_test_ReEJ4yDcDvqHAKR","url":"https://checkout.stripe.com/pay/c/cs_test_a1YS1URlnyQCN5fUUduORoQ7Pw41PJqDWkIVQCpJPqkfIhd6tVY8XB1OLY"}
+```
+
+And PayDeck remembered it:
+
+```sh
+docker compose exec postgres psql -U paydeck -c "select id, amount_cents, currency, status from stripe_checkouts"
+```
+
+```
+           id            | amount_cents | currency | status 
+-------------------------+--------------+----------+--------
+ cs_test_ReEJ4yDcDvqHAKR |         2500 | USD      | OPEN
+(1 row)
+```
+
+Asha's balance has not changed: the checkout is `OPEN`. Only Stripe's webhook will change that. Finally, the return trip:
+
+```sh
+curl -s -i "localhost:8080/payments/return?result=success" | grep -E "HTTP|Location"
+```
+
+```
+HTTP/1.1 302 
+Location: paydeck://top-up?result=success
+```
+
+<Aside type="note" title="Testing on the Android emulator">
+Stripe's page sends the browser to `localhost:8080`. Inside the emulator, `localhost` is the emulator itself, so run `adb reverse tcp:8080 tcp:8080` once, as for Google sign-in in Module 29. The browser on the Mac reaches `localhost:8080` directly.
+</Aside>
+
+<Exercise title="Too small to charge">
+Ask for a top-up of 20 cents. What does PayDeck answer, and why does PayDeck check this itself instead of letting Stripe refuse it?
+
+<Fragment slot="hint">Look at the `@Min` on `CheckoutRequest`.</Fragment>
+<Fragment slot="solution">
+
+```json
+{"detail":"Some fields are not valid","instance":"/api/accounts/20f0ebd9-5f0d-4685-b788-d6c386e6ac85/top-ups/checkout","status":400,"title":"Invalid request","fields":{"amountCents":"must be greater than or equal to 100"}}
+```
+
+Stripe would refuse it too (it has a minimum charge of about 50 cents in most currencies), but checking first gives the app a clear, field-level message in PayDeck's usual format, and saves a pointless call to Stripe. Validate at your own edge; do not rely on someone else's error messages.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Crediting the wallet on the return URL">
+`/payments/return?result=success` is just an address. Anyone can open it without paying. It only decides which message the app shows; the money waits for the webhook.
+</Aside>
+
+<Aside type="caution" title="Calling Stripe without an idempotency key">
+If PayDeck's request reaches Stripe but the answer is lost, a retry without a key opens a second page. With the app's key passed on, the retry gets the same page back.
+</Aside>
+
+<Aside type="caution" title="A return URL the browser cannot reach">
+`PAYDECK_PUBLIC_BASE_URL` must be an address the person's **browser** can open. `http://localhost:8080` works on your Mac; once the API is online (Module 36) it becomes the real address.
+</Aside>
+
+## Recap
+
+- **Stripe Checkout** is a payment page hosted by Stripe. PayDeck creates a **Checkout Session** and sends the person to its URL.
+- `stripe_checkouts` remembers each session's wallet, amount and status, starting `OPEN`.
+- **`RestClient`** calls Stripe from Java with form fields, the secret key and an **idempotency key**, behind a `CheckoutGateway` interface that tests can replace.
+- The browser comes back through `/payments/return`, which redirects to `paydeck://top-up`. It adds no money.
+
+<Quiz
+	questions={[
+		{
+			question: 'Asha pays and her browser arrives at /payments/return?result=success. Is her wallet credited now?',
+			options: ['Yes', 'No: only Stripe\'s signed webhook credits it'],
+			answer: 1,
+			explanation: 'Anyone can open that address. It decides what the app shows, not what the ledger says.',
+		},
+		{
+			question: 'Why does PayDeck pass an Idempotency-Key to Stripe?',
+			options: ['Stripe requires it for every request', 'So a retried request returns the same payment page instead of opening a second one', 'To sign the request'],
+			answer: 1,
+			explanation: 'The same idea as PayDeck\'s own idempotency keys, one level further out.',
+		},
+		{
+			question: 'What does the API answer when no Stripe key is set?',
+			options: ['500 Internal Server Error', '503 with the code STRIPE_NOT_CONFIGURED', '201 with a fake URL'],
+			answer: 1,
+			explanation: 'The server works, but this feature is switched off here, and it says so clearly.',
+		},
+	]}
+/>
+
+<MarkComplete />
