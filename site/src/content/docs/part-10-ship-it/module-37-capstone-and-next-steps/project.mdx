@@ -1,0 +1,90 @@
+---
+title: "Mini-project: finished PayDeck in your portfolio"
+description: "The last project of the course: a final polish pass, both READMEs with pictures, a version 1.0 release on GitHub with the apps attached, a short demo, and a written look back at what you built and learned."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+This is the last project of the course. There is no new code to learn: the job is to finish. A finished project has a version number, a page that explains it, something people can download, and an author who can talk about it.
+
+## The tasks
+
+1. **Polish pass.** Lesson 37.1's checklist on every screen. Fix what a customer would notice, each with a test. `npm test` and `./mvnw verify` green.
+2. **READMEs.** Both projects, in the shape of lesson 37.2, with screenshots in `docs/` and every number true.
+3. **Version 1.0.** Set the versions (Android `versionCode 1`, `versionName "1.0"`; Mac `1.0` and `1`), tag both repositories `v1.0.0`, and create a **GitHub release** for each, with the Android `.apk` and the zipped Mac app attached to the app's release.
+4. **A demo.** A screen recording of at most ninety seconds: sign in, pay on one device, see it arrive live on the other, freeze the card, see the next payment declined with the reason.
+5. **A look back.** A page of your own notes: what was hardest, what you are proudest of, what you would do differently, and your next project (lesson 37.4).
+
+<Exercise title="Finish it">
+Do the five tasks.
+
+<Fragment slot="hint">A GitHub release is made on the repository's page: **Releases** (right-hand column) → **Draft a new release**. It can create the tag for you.</Fragment>
+<Fragment slot="solution">
+
+### Polish and tests
+
+The course's own polish pass found the developer messages in `client.ts` (lesson 37.1). After fixing them, the app's tests:
+
+```
+Test Suites: 7 passed, 7 total
+Tests:       23 passed, 23 total
+```
+
+and the API's, unchanged by polish:
+
+```
+[INFO] Tests run: 118, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
+Run lint and the type check too (lesson 36.6), since CI will.
+
+### Version 1.0
+
+Lesson 36.4 and 36.5 already set Android to `1` / `"1.0"` and the Mac to `1.0` / `1`. Tag each repository, after the last commit:
+
+```sh
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+A **tag** is a name for one commit that never moves (unlike a branch). `v1.0.0` follows **semantic versioning**: the first number changes when something stops working the old way, the second when something is added, the third for fixes. Your next bug fix is `v1.0.1`.
+
+On GitHub, **Releases → Draft a new release**, choose the tag, title it "PayDeck 1.0", and write three lines on what it does (the README's first paragraph will do). For the app, drag in `app-release.apk` (lesson 36.4) and `PayDeck-macOS.zip` (lesson 36.5), and add one line for Mac users: "Unsigned: the first time, open it from System Settings → Privacy & Security → Open Anyway." If you set up lesson 36.6's release workflow, the tag built them for you: download them from that run's artifacts.
+
+Do not attach the `.aab`: it is for Google Play, not for people.
+
+### The demo
+
+Command–Shift–5 on the Mac, **Record Selected Portion**, around the Mac app and the emulator side by side. One take, no talking needed; show the four steps slowly. Convert it to a GIF for the README if it is short enough, or drag the `.mp4` into the README while editing it on github.com, which uploads it and inserts the link.
+
+### The look back
+
+Yours, in your words. Some questions to answer, if you need a start:
+
+- Which lesson did you have to repeat, and what made it finally make sense?
+- Which bug took longest, and what did it teach you?
+- Which decision in PayDeck would you defend in an interview, and which would you change?
+
+Keep it with your notes from the start of the course. Reading them side by side is the best measure of how far you came.
+</Fragment>
+</Exercise>
+
+## What to notice
+
+- **Finished is a feature.** A version number, a release and a README turn a folder of code into a product someone else can use.
+- **Everything is checkable.** The tests, the numbers in the README, the download, the demo: a reader can confirm each one.
+- **You built all of it.** An API that moves money correctly, an app on two platforms, live updates, push, tests, a deployment. From a first terminal command to a release.
+
+## The end of the course
+
+That is PayDeck, and that is the course. You started with what a computer, a file and the internet are. You finish with a full-stack payments app, tested, deployed, and in your portfolio.
+
+Thank you for staying with it to the last lesson. Go and build the next thing.
+
+<MarkComplete />

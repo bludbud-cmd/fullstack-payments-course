@@ -1,0 +1,267 @@
+---
+title: "35.2 What to test and what not to"
+description: "Decide which tests are worth writing for PayDeck's app: behaviour a person relies on, decisions and errors, not styles, library internals or whole-screen snapshots. See a snapshot fail for a harmless colour change, break code on purpose to check a test, and test the notification switches."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can decide whether a test is worth writing, explain where each kind of PayDeck test belongs, and check that a test can actually fail.
+
+## Why it matters
+
+Tests cost something: time to write, time to run, and time to fix when they break. A test that fails every time someone changes a colour teaches people to update tests without reading them. A test that can never fail gives confidence it has not earned. The goal is not "as many tests as possible", but "a test fails exactly when something a person relies on breaks".
+
+## The idea
+
+### Layers
+
+PayDeck now has four kinds of automated tests, and each is good at something different:
+
+| Kind | Example | Speed | Good for |
+|---|---|---|---|
+| Plain functions | `pkce.test.ts`, `stomp.test.ts` | milliseconds | Logic with many cases: money parsing, frames, codes |
+| Components, API mocked | `PayScreen.test.tsx` | about a second | What a screen shows and sends, errors, validation |
+| The API's own tests (Java) | `CardPaymentApiTest` | a minute | Rules about money and access: the real decisions |
+| Live, against a running API | `__tests__/live/push.test.ts` | seconds, plus setup | That the app and API really fit together |
+
+Most tests should be in the first three rows. Live tests are the slowest and need the API, Docker and test data, so PayDeck keeps only a few, for the joins that mocks cannot check.
+
+### Test each rule once, where it lives
+
+"A payment over the card's limit is declined" is a rule in the API, tested in Java (Module 32). The app should **not** test that rule again with its own numbers: it does not decide it. The app's test is "when the API says declined, the screen says Declined and shows the reason". If the limit rule changes, only the Java test changes.
+
+### Worth testing
+
+- **What a person relies on:** amounts formatted correctly, the right card named, Approved and Declined, the switches showing what was saved.
+- **Decisions the app makes itself:** validation ("Enter an amount like 25 or 25.50"), which banner shows (lesson 34.6), which rows are new.
+- **Errors:** what happens when the API fails. These are the hardest to try by hand, and the easiest with a mock: `mockRejectedValue`.
+- **Bugs you have fixed:** a test that would have caught it keeps it fixed. The reconnect bug in lesson 33.4 is a good candidate.
+
+### Not worth testing
+
+- **Styles and layout.** Whether a button is blue is checked by looking. A test that checks it fails for every redesign and never for a real bug.
+- **Library code.** That TanStack Query caches, or that `Switch` switches. Their authors test that.
+- **Implementation details.** Which state variable holds the amount, or that a hook was called. Refactor the screen and those tests break, though nothing a person sees changed.
+- **Whole-screen snapshots.** Jest can save a component's entire output and fail when anything differs (`toMatchSnapshot`). It is quick to write and tests nothing in particular, which is shown below.
+
+### A test you have never seen fail
+
+A test that passes proves nothing until you have seen it fail for the right reason. The quick check: break the code it protects, run it, see it fail, put the code back. Several API lessons did this to their Java tests; it works the same in the app.
+
+## Worked example
+
+### A snapshot, and what it catches
+
+The course wrote a snapshot test for `ActivityRow`:
+
+```tsx
+it('looks the same as last time', async () => {
+  const { toJSON } = await render(<ActivityRow currency="USD" item={{ /* Corner Café, −$12.50 */ }} />);
+  expect(toJSON()).toMatchSnapshot();
+});
+```
+
+The first run saves the snapshot (`Snapshots: 1 written`). Then the date's grey was changed to a slightly different grey, `#6b6f85`, and the test failed:
+
+```
+  ● looks the same as last time
+
+    expect(received).toMatchSnapshot()
+
+    - Snapshot  - 1
+    + Received  + 1
+
+          <Text
+            style={
+              {
+    -           "color": "#5d6177",
+    +           "color": "#6b6f85",
+              }
+            }
+          >
+            2026-11-04
+```
+
+Nothing a person relies on broke. The fix is to run the tests with `-u` to accept the new snapshot, and after a few of those, everyone presses `-u` without reading. Meanwhile, the snapshot would happily accept `+$12.50` instead of `−$12.50` if both were in the first snapshot by mistake. `ActivityRow.test.tsx` from lesson 35.1 says what matters, and only that. The course deleted the snapshot test.
+
+### Break it on purpose
+
+Does `PayScreen`'s decline test really check the reason? In `PayScreen.tsx`, the course changed `{!approved && <Text …>{result.declineMessage}</Text>}` to `{false && …}`, so the reason is never shown:
+
+```
+    ✓ says which card is paying (342 ms)
+    ✓ sends the payment and shows Approved (93 ms)
+    ✕ shows Declined with the reason (67 ms)
+    ✓ does not ask the API about an amount that is not money (59 ms)
+    Unable to find an element with text: The payment is over the card's spending limit.
+```
+
+Exactly one test fails, and its name says what broke. Put the line back.
+
+### Testing the switches
+
+The notification switches (lesson 34.5) are a good target: they show saved data, send a request, and must behave when it fails. `NotificationSwitches` lives inside `ProfileScreen.tsx`; add `export` in front of `function NotificationSwitches` so a test can render it on its own, without the rest of the **You** screen (which needs the signed-in session from `AuthProvider`).
+
+`__tests__/NotificationSwitches.test.tsx`:
+
+```tsx
+import { fireEvent, screen } from '@testing-library/react-native';
+import * as authApi from '../src/api/auth';
+import { ApiError } from '../src/api/client';
+import * as api from '../src/api/paydeck';
+import { NotificationSwitches } from '../src/screens/ProfileScreen';
+import { asha } from '../testing/data';
+import { renderScreen } from '../testing/renderScreen';
+
+jest.mock('../src/api/auth');
+jest.mock('../src/api/paydeck');
+const mocked = jest.mocked(api);
+
+beforeEach(() => {
+  jest.mocked(authApi.getMe).mockResolvedValue(asha);
+  mocked.getNotificationSettings.mockResolvedValue({ payments: true, declines: true });
+});
+
+describe('NotificationSwitches', () => {
+  it('shows what the API has saved', async () => {
+    mocked.getNotificationSettings.mockResolvedValue({ payments: false, declines: true });
+    await renderScreen(<NotificationSwitches />);
+
+    expect(await screen.findByLabelText('Money in and out')).toHaveProp('value', false);
+    expect(screen.getByLabelText('Declined card payments')).toHaveProp('value', true);
+  });
+
+  it('saves a flip straight away, sending both settings', async () => {
+    mocked.setNotificationSettings.mockResolvedValue({ payments: false, declines: true });
+    await renderScreen(<NotificationSwitches />);
+
+    await fireEvent(await screen.findByLabelText('Money in and out'), 'valueChange', false);
+
+    // TanStack Query passes a second argument of its own, which this test does not care about.
+    expect(mocked.setNotificationSettings).toHaveBeenCalledWith({ payments: false, declines: true }, expect.anything());
+    expect(await screen.findByLabelText('Money in and out')).toHaveProp('value', false);
+  });
+
+  it('keeps the old value and says why when saving fails', async () => {
+    mocked.setNotificationSettings.mockRejectedValue(new ApiError(503, 'Unavailable', 'PayDeck is not answering. Try again.'));
+    await renderScreen(<NotificationSwitches />);
+
+    await fireEvent(await screen.findByLabelText('Money in and out'), 'valueChange', false);
+
+    expect(await screen.findByText('PayDeck is not answering. Try again.')).toBeOnTheScreen();
+    expect(screen.getByLabelText('Money in and out')).toHaveProp('value', true);
+  });
+
+  it('tells someone with no phone what to do', async () => {
+    mocked.sendTestNotification.mockResolvedValue({ sent: 0 });
+    await renderScreen(<NotificationSwitches />);
+
+    await fireEvent.press(await screen.findByText('Send me a test notification'));
+
+    expect(await screen.findByText(/No phone is set up for notifications yet/)).toBeOnTheScreen();
+  });
+});
+```
+
+- `toHaveProp('value', false)` checks what the switch shows, which is what Asha sees.
+- `fireEvent(switch, 'valueChange', false)` is how a test flips a `Switch`: there is no `fireEvent.flip`, so it calls the `onValueChange` prop by its event name.
+- The failure test is the one you would never check by hand: you would have to stop the API at exactly the right moment.
+
+The first version of the second test failed, and the message is worth reading:
+
+```
+    expect(jest.fn()).toHaveBeenCalledWith(...expected)
+
+    - Expected
+    + Received
+
+      {"declines": true, "payments": false},
+    + {"client": {}, "meta": undefined, "mutationKey": undefined},
+```
+
+TanStack Query calls `mutationFn` with a second argument of its own, and `useSetNotificationSettings` passes `api.setNotificationSettings` itself as `mutationFn`, so the mock receives both. The test cares about the first, so it accepts anything as the second with `expect.anything()`.
+
+```sh
+npx jest NotificationSwitches --verbose
+```
+
+```
+    ✓ shows what the API has saved (314 ms)
+    ✓ saves a flip straight away, sending both settings (61 ms)
+    ✓ keeps the old value and says why when saving fails (112 ms)
+    ✓ tells someone with no phone what to do (107 ms)
+Tests:       4 passed, 4 total
+```
+
+<Exercise title="Keep or cut?">
+For each proposed test of PayDeck's app, decide: keep it, cut it, or move it to another layer. Say why.
+
+1. The Wallet screen shows the balance in large text with font size 32.
+2. The Top up screen shows "Card top-ups are not set up on this server." when the API answers `503 STRIPE_NOT_CONFIGURED`.
+3. `parseMoneyInput('12,50')` returns `1250`.
+4. A card with a $50.00 limit is declined for $50.01.
+5. Signing out calls `stopPush` before the tokens are forgotten.
+6. The Cards screen matches its snapshot.
+
+<Fragment slot="hint">Ask, for each: what would a person notice if this broke? And who decides it: the app, the API, or a library?</Fragment>
+<Fragment slot="solution">
+
+1. **Cut.** A style. Look at it.
+2. **Keep.** An error a person sees, and hard to cause by hand. A component test with `mockRejectedValue(new ApiError(503, …))`.
+3. **Keep.** Logic with cases (comma, dot, too many decimals), fast as a plain function test. Europeans type commas.
+4. **Move to the API.** The limit rule lives in Java and is tested there (Module 32). The app only shows the answer.
+5. **Keep, as a live or a mocked test.** It protects a real privacy bug (the next person on the phone getting your notifications). It is about order, so the test can mock `unregisterDevice` and check it was called while the access token still existed.
+6. **Cut.** It fails for every redesign and does not say what matters. Write the two or three specific checks you care about instead.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Testing the same rule in every layer">
+When a rule changes, every copy of its test must change too, and the ones that are forgotten fail or, worse, keep passing with old numbers. Test a rule where it is decided.
+</Aside>
+
+<Aside type="caution" title="Updating snapshots without reading them">
+If `-u` has become a reflex, the snapshot is not testing anything. Replace it with specific checks.
+</Aside>
+
+<Aside type="caution" title="Trusting a test you have never seen fail">
+A typo in a `findByText` that matches something else, or an `expect` that is never reached, passes forever. Break the code once and watch the test go red.
+</Aside>
+
+## Recap
+
+- Plain function tests for logic, component tests for what screens show and send, the API's tests for rules, a few live tests for the joins.
+- Test each rule once, where it is decided.
+- Worth testing: what people rely on, the app's own decisions, errors, fixed bugs. Not: styles, libraries, implementation details, whole-screen snapshots.
+- Break the code on purpose to prove a test can fail.
+
+<Quiz
+	questions={[
+		{
+			question: 'Where should "a payment over the limit is declined" be tested?',
+			options: ['In the app\'s PayScreen test', 'In the API\'s tests, where the rule is decided', 'In both, to be safe'],
+			answer: 1,
+			explanation: 'The app\'s test checks that it shows a decline the API reports, whatever the reason.',
+		},
+		{
+			question: 'A snapshot test fails after a designer changes a grey. What does that tell you?',
+			options: ['A bug was introduced', 'The snapshot tests appearance, which nobody needed a test for', 'The test runner is broken'],
+			answer: 1,
+			explanation: 'A test should fail when something a person relies on breaks.',
+		},
+		{
+			question: 'How do you check that a new test is worth something?',
+			options: ['Run it twice', 'Break the code it protects and see it fail for that reason', 'Make sure it has many expect lines'],
+			answer: 1,
+			explanation: 'A test that cannot fail cannot protect anything.',
+		},
+	]}
+/>
+
+<MarkComplete />

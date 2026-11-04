@@ -1,0 +1,147 @@
+---
+title: "37.4 Where to go next"
+description: "Look back at what you can now do, choose a direction (deeper back end, deeper mobile, the web, or the ground under it all), pick a next project that stretches one thing at a time, and find the people and habits that keep you learning."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you have chosen one direction to grow in, a next project that fits it, and a plan for the next month.
+
+## Why it matters
+
+A course ends; learning to build software does not. The most common thing that happens after a long course is nothing: the habit stops with the last lesson. The second most common is trying everything at once. A clear next step, small enough to start this week, beats both.
+
+## The idea
+
+### What you can do now
+
+Look at how far you came. When you started, "the terminal" was new. Now you can:
+
+- build a **REST API** in Java and Spring Boot, with a real database, migrations, validation and error answers that explain themselves;
+- move **money** correctly: cents, a double-entry ledger, transactions, locks, idempotency keys;
+- **secure** it: hashed passwords, JWTs, refresh tokens, Google sign-in, roles, an audit log, secrets kept out of code;
+- build a **React Native app** for Android and macOS, with navigation, forms, server state, live updates and push;
+- **test** both sides: JUnit with Testcontainers, Jest with React Native Testing Library;
+- **ship** it: Docker, a server, HTTPS, CI, signed release builds.
+
+That is the shape of a junior full-stack developer's work. What is left is depth, which comes from building more.
+
+### Four directions
+
+Pick one. You can change later; you cannot go four ways at once.
+
+**Deeper on the back end.** Where PayDeck would need to grow next with real customers.
+- **Messaging**: a queue (RabbitMQ, Kafka) between "payment made" and "send notification", so a slow push service never slows a payment.
+- **Observability**: metrics with Micrometer and Prometheus, dashboards in Grafana, traces with OpenTelemetry. "Is it slow?" answered with numbers.
+- **Databases in depth**: indexes and `EXPLAIN`, how PostgreSQL chooses a plan, partitioning a ledger that grows forever.
+- Read *Designing Data-Intensive Applications* (Martin Kleppmann): the best single book on why back ends are built the way they are.
+
+**Deeper on mobile.**
+- **iOS**: react-native-macos taught you Apple's tools; an iPhone target is a small step, with a paid developer account.
+- **Animations and gestures** with Reanimated and Gesture Handler: the difference between an app that works and one that feels good.
+- **Offline first**: a local database (SQLite) that syncs with the API, so PayDeck shows your cards in a tunnel.
+- **Native modules**: write a small one in Kotlin or Swift, to know what is under React Native.
+
+**The web.**
+- React on the web is the same React. A **web dashboard for PayDeck's support staff** reuses your API, your types and your TanStack Query hooks, with a different set of components.
+- Then the web's own concerns: HTML and CSS properly, CORS (which native apps never needed, lesson 26.4), cookies, and frameworks like Next.js.
+
+**The ground under it all.**
+- **Data structures and algorithms**: lists, maps, trees, graphs, and how fast things are (big-O). Many interviews ask about them, and they make you faster at everything else.
+- **How computers and networks really work**: *The Missing Semester of Your CS Education* (MIT, free online) for tools; *Computer Networking: A Top-Down Approach* for networks.
+
+### A next project
+
+The best next project is one where **one** thing is new and everything else is something you already know. Some ideas, each stretching one direction:
+
+| Project | New thing | Reuses |
+|---|---|---|
+| A support web dashboard for PayDeck | React on the web | The API, auth, TanStack Query |
+| Shared bills: split a dinner between friends' PayDeck accounts | Harder money rules and their tests | Ledger, transfers, live feed |
+| A budget app with offline storage | SQLite and syncing | React Native, your API skills |
+| PayDeck's notifications through a queue | Messaging | Spring Boot, push |
+| Your own idea, for something you or a friend actually needs | Whatever it needs | Everything |
+
+The last row is the best one when you have an idea. A real user, even one, teaches more than any course.
+
+### Habits that keep you going
+
+- **A little, often.** Thirty minutes four times a week beats one lost Saturday.
+- **Build in public.** Push to GitHub as you go; write a short post about one thing you learned, even if three people read it. Explaining is the best test of understanding.
+- **Read code** (lesson 37.3): one small open-source library a month, with one question.
+- **Contribute.** Many projects label beginner-friendly issues **good first issue**. A documentation fix is a real contribution, and the review you get is free mentoring.
+- **Find people.** A local meetup, an online community for Spring or React Native, a friend who is also learning. Stuck alone for a day is normal; stuck alone for a week is how people quit.
+- **Ask good questions** (lesson 2.5): what you tried, what you expected, what happened, the exact error.
+
+### Applying for jobs
+
+If PayDeck is for a job search: your two repositories with their READMEs (lesson 37.2), a deployed API if you can afford one, and a ninety-second video of the live feed are a stronger portfolio than many people's three tutorial apps. Be ready to talk about one decision in depth (the ledger, idempotency, the reconnect bug from lesson 33.4) and one thing you would do differently. "I don't know yet, here is how I would find out" is a good answer in an interview.
+
+<Exercise title="Your next month">
+Write down, in your own notes: the direction you choose, the project, the first three steps (each small enough for one evening), and when you will do them.
+
+<Fragment slot="hint">If a step needs more than one evening, split it. The first one should be possible today.</Fragment>
+<Fragment slot="solution">
+
+An example, for the web direction:
+
+- **Direction:** the web.
+- **Project:** a support dashboard for PayDeck, where Sam (support) searches customers and refunds payments.
+- **Step 1 (Tuesday):** create a React project with Vite, call `GET /api/me` with Sam's token, show his name. (This meets CORS on the first evening, which is the point.)
+- **Step 2 (Thursday):** a sign-in form, tokens in memory, the customer search from lesson 30's staff endpoints.
+- **Step 3 (Saturday):** the refund button, with the same idempotency key habit as the app.
+
+Yours will be different. What matters is that step 1 is small, dated, and starts this week.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Collecting courses">
+Starting a third course instead of building something is comfortable and slow. After a course, build.
+</Aside>
+
+<Aside type="caution" title="Waiting until you feel ready">
+Nobody feels ready to apply, to contribute, or to show their code. Do it anyway; the feeling comes after.
+</Aside>
+
+<Aside type="caution" title="Rewriting PayDeck forever">
+Polish it once (lesson 37.1), then let it be finished. A new project teaches more than a fourth refactor.
+</Aside>
+
+## Recap
+
+- You can build, secure, test and ship a full-stack app with a mobile client.
+- Choose one direction: back end, mobile, web, or foundations.
+- Next project: one new thing, everything else familiar; best of all, something a real person needs.
+- Small, regular steps, in public, with other people.
+
+<Quiz
+	questions={[
+		{
+			question: 'What makes a good next project?',
+			options: ['As many new technologies as possible', 'One new thing, with everything else familiar', 'A copy of a big famous app'],
+			answer: 1,
+			explanation: 'One new thing at a time means you know what you are learning, and you finish.',
+		},
+		{
+			question: 'Why are "good first issue" contributions worth doing?',
+			options: ['They pay well', 'You read real code, and get a free review from experienced developers', 'They are required for jobs'],
+			answer: 1,
+			explanation: 'A merged documentation fix is real experience with a real team\'s process.',
+		},
+		{
+			question: 'You are stuck on something for a whole day. What now?',
+			options: ['Keep going alone; asking is weakness', 'Ask a good question in a community, with what you tried and the exact error', 'Give up on the project'],
+			answer: 1,
+			explanation: 'A day stuck is normal. Asking well is a skill developers use every week.',
+		},
+	]}
+/>
+
+<MarkComplete />

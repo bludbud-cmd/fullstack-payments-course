@@ -1,0 +1,257 @@
+---
+title: "36.1 Docker images"
+description: "Package the PayDeck API and everything it needs to run into one Docker image: a two-stage Dockerfile, a .dockerignore, layers and the build cache, a non-root user, and why localhost inside a container is not your Mac."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can build the PayDeck API into a Docker image, explain each line of its `Dockerfile`, and run the image as a container.
+
+## Why it matters
+
+On your Mac, the API runs because you installed Java 25, Maven downloaded the libraries, and `./mvnw spring-boot:run` put it all together. A server on the internet has none of that. You could install Java there by hand, copy the code over and build it, and then do it again, slightly differently, on the next server.
+
+A **Docker image** is the API with everything it needs to run, packed into one file: the right Java, the finished program, and the command that starts it. Any computer with Docker runs it the same way. You have used images since Module 20: `postgres:17-alpine` is someone else's database, packed like this. Now PayDeck gets its own.
+
+## The idea
+
+### Image, container, Dockerfile
+
+- An **image** is the packed program. It never changes once built.
+- A **container** is an image running. One image can run as many containers as you like (you have run `postgres:17-alpine` as several).
+- A **Dockerfile** is the recipe that builds the image: a list of steps, each run in order.
+
+### Layers and the cache
+
+Each step in a Dockerfile makes a **layer**: the files that step added or changed. Docker remembers layers. When you build again, it reuses every layer whose step and inputs have not changed, and only redoes the steps after the first change. Order the steps from "rarely changes" to "changes all the time", and most builds only redo the last few.
+
+For PayDeck, the libraries in `pom.xml` change rarely; the code in `src` changes all the time. So the Dockerfile downloads the libraries in one step, before it even copies the code.
+
+### Two stages
+
+Building the API needs the full JDK and Maven. Running it needs only the Java runtime (the JRE), which is much smaller. A **multi-stage** Dockerfile builds in a first image and copies only the finished `.jar` into a second, smaller one. The final image has no compiler, no Maven and no source code: less to download, and less for an attacker to use.
+
+## Worked example
+
+### The Dockerfile
+
+In the API folder, next to `pom.xml`, create a file called `Dockerfile` (no extension):
+
+```dockerfile
+# Builds the PayDeck API into a container image that runs on any host.
+#   docker build -t paydeck-api .
+#
+# Stage 1 compiles with the full JDK and Maven. Stage 2 copies only the
+# finished jar onto a smaller Java runtime, so the image stays small and has
+# no build tools in it.
+FROM eclipse-temurin:25-jdk AS build
+WORKDIR /src
+# Dependencies change less often than code. Downloading them in their own
+# step lets Docker reuse that layer when only the code changed.
+COPY .mvn .mvn
+COPY mvnw pom.xml ./
+RUN ./mvnw -B -q dependency:go-offline
+COPY src src
+# The tests already ran in CI (they need Docker for PostgreSQL, which a
+# Docker build does not have), so the image build only packages the jar.
+RUN ./mvnw -B -q package -DskipTests && cp target/paydeck-api-*.jar app.jar
+
+FROM eclipse-temurin:25-jre
+WORKDIR /app
+# Never run a server as root.
+RUN groupadd --system paydeck && useradd --system --gid paydeck paydeck
+COPY --from=build /src/app.jar app.jar
+USER paydeck
+EXPOSE 8080
+ENV SPRING_PROFILES_ACTIVE=production \
+    JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75"
+ENTRYPOINT ["java", "-jar", "app.jar"]
+```
+
+Line by line:
+
+- `FROM eclipse-temurin:25-jdk AS build` starts from an image with Java 25's full JDK (Temurin is the same free Java you installed in Module 15) and names this stage `build`.
+- `WORKDIR /src` is `cd` inside the image, creating the folder if needed.
+- `COPY` copies files from your project into the image. First only the Maven wrapper and `pom.xml`.
+- `RUN ./mvnw ... dependency:go-offline` downloads every library. `-B` is "batch mode" (no colours or progress bars, for logs); `-q` is quiet.
+- `COPY src src`, then `package -DskipTests` compiles and makes the `.jar`. The tests are skipped here on purpose, and not forgotten: they need Testcontainers, which needs Docker, which is not available inside a Docker build. Lesson 36.6 runs them on every push, before any image is published.
+- The second `FROM eclipse-temurin:25-jre` starts a fresh, smaller image. Nothing from the first stage comes along unless it is copied.
+- `groupadd` and `useradd` make a user called `paydeck`, and `USER paydeck` runs everything after it as that user. By default a container runs as `root`; if someone found a hole in the API, they should not get the whole container with it.
+- `COPY --from=build` takes only `app.jar` from the first stage.
+- `EXPOSE 8080` documents the port the API listens on.
+- `ENV` sets environment variables inside the image. `SPRING_PROFILES_ACTIVE=production` turns on the production profile (lesson 21.4) for every container from this image. `MaxRAMPercentage=75` lets Java use three quarters of the memory the container is given (by default it takes only a quarter).
+- `ENTRYPOINT` is the command that runs when a container starts.
+
+### What not to send
+
+`docker build` sends the whole folder to Docker first, the **build context**. Your `target` folder (old builds) and your `.env` file (secrets) must not go into an image. Create `.dockerignore` next to the Dockerfile:
+
+```
+target
+.idea
+*.iml
+.DS_Store
+.env
+```
+
+It works like `.gitignore`. An image can be shared and downloaded; a secret inside it is a secret given away.
+
+### Build it
+
+```sh
+docker build -t paydeck-api .
+```
+
+`-t paydeck-api` names (tags) the image; the `.` is the build context, this folder. The first build takes a few minutes, mostly Maven downloading the libraries. Then:
+
+```sh
+docker images paydeck-api
+```
+
+```
+IMAGE                ID             DISK USAGE   CONTENT SIZE   EXTRA
+paydeck-api:latest   3302524e90c2        620MB          186MB   U
+```
+
+620 MB on disk once unpacked, 186 MB to download. `docker image history` shows the layers, newest first:
+
+```sh
+docker image history paydeck-api --format '{{.Size}}\t{{.CreatedBy}}'
+```
+
+```
+0B	ENTRYPOINT ["java" "-jar" "app.jar"]
+0B	ENV SPRING_PROFILES_ACTIVE=production JAVA_T…
+0B	EXPOSE [8080/tcp]
+0B	USER paydeck
+76.2MB	COPY /src/app.jar app.jar # buildkit
+41kB	RUN /bin/sh -c groupadd --system paydeck && …
+8.19kB	WORKDIR /app
+...
+201MB	RUN /bin/sh -c set -eux;     ARCH="$(dpkg --…
+```
+
+PayDeck itself, with its libraries, is the 76.2 MB `app.jar`. The 201 MB layer further down is the Java runtime from `eclipse-temurin:25-jre`. The JDK and Maven from the first stage are not there at all.
+
+### The cache at work
+
+Change one Java file (add a blank line) and build again. The build log shows every step up to and including `dependency:go-offline` as `CACHED`; only `COPY src src`, the `package` step (6.5 seconds) and the final `COPY --from=build` run again. The whole build took 10 seconds. Had `COPY src src` come before the download, every code change would download every library again.
+
+### Who runs it
+
+```sh
+docker run --rm --entrypoint id paydeck-api
+```
+
+```
+uid=999(paydeck) gid=999(paydeck) groups=999(paydeck)
+```
+
+`--entrypoint id` runs the `id` command instead of Java, just to ask who the container runs as: `paydeck`, not `root`. `--rm` deletes the container when it stops.
+
+### Run it
+
+```sh
+docker run --rm paydeck-api
+```
+
+It stops after a second or two:
+
+```
+java.lang.IllegalStateException: PayDeck is not ready for production:
+  - Set JWT_SECRET to a long random value, for example from: openssl rand -base64 48
+  - Set DATABASE_URL to jdbc:postgresql://HOST:5432/DATABASE (and DATABASE_USERNAME, DATABASE_PASSWORD)
+  - Set PAYDECK_PUBLIC_BASE_URL to the API's own https:// address
+```
+
+That is the check from lesson 30.7, refusing to start with development settings; lesson 36.3 grows it from one problem to these three. An image built for a server is right to refuse.
+
+### localhost is the container
+
+Give it the three settings with `-e` (environment variable), pointing at the database that `docker compose up -d` started on your Mac, on port 5432:
+
+```sh
+docker run --rm \
+  -e JWT_SECRET=$(openssl rand -base64 48) \
+  -e DATABASE_URL=jdbc:postgresql://localhost:5432/paydeck \
+  -e PAYDECK_PUBLIC_BASE_URL=https://api.example.com \
+  paydeck-api
+```
+
+```
+Message    : Connection to localhost:5432 refused. Check that the hostname and port are correct and that the postmaster is accepting TCP/IP connections.
+```
+
+The database is running, so why refused? Inside a container, `localhost` means **the container itself**, not your Mac. There is no database inside PayDeck's container. Containers reach each other by name on a shared network, which is exactly what Docker Compose sets up. Lesson 36.2 runs the API and its database side by side with Compose, the way a server will.
+
+<Exercise title="A cache-friendly order">
+A teammate "simplifies" the first stage to:
+
+```dockerfile
+FROM eclipse-temurin:25-jdk AS build
+WORKDIR /src
+COPY . .
+RUN ./mvnw -B -q package -DskipTests && cp target/paydeck-api-*.jar app.jar
+```
+
+It builds the same image. What gets slower, and what else can go wrong with `COPY . .`?
+
+<Fragment slot="hint">Which layer changes when you edit one Java file? And what is in `.`?</Fragment>
+<Fragment slot="solution">
+
+`COPY . .` copies everything, so any change to any file (code, a lesson note, a test) invalidates that layer, and the `RUN` after it downloads every library again: every build takes minutes instead of seconds. And `.` is the whole build context: without a `.dockerignore`, the `target` folder and the `.env` file with your real secrets are copied into the first stage. They do not reach the final image (only `app.jar` is copied over), but the build machine and its cache now hold them. Copy only what each step needs, in order of how often it changes.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Secrets in the image">
+`COPY .env` or `ENV JWT_SECRET=...` in a Dockerfile bakes the secret into a layer, and `docker image history` (or anyone who downloads the image) can read it. Secrets are given to the **container** when it starts (lesson 36.3), never to the image.
+</Aside>
+
+<Aside type="caution" title="localhost from inside a container">
+`localhost` is the container. To reach another container, use its service name on a Compose network (`postgres`), not `localhost`.
+</Aside>
+
+<Aside type="caution" title="Building with the full JDK only">
+A one-stage image with the JDK and Maven works, and is hundreds of megabytes bigger, with tools an attacker would be glad to find. Build in one stage, run in another.
+</Aside>
+
+## Recap
+
+- An image is a program with everything it needs; a container is an image running; a Dockerfile builds the image.
+- Two stages: build with the JDK and Maven, run on the JRE with only `app.jar`.
+- Steps that change rarely go first, so the cache skips them.
+- `.dockerignore` keeps `target` and `.env` out of the build.
+- The image runs as a non-root user with the production profile.
+- `localhost` inside a container is the container itself.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why does the Dockerfile copy pom.xml and download the libraries before it copies src?',
+			options: ['Maven requires that order', 'So a code change reuses the cached library layer and the build takes seconds', 'To make the image smaller'],
+			answer: 1,
+			explanation: 'Docker redoes every step after the first changed one; libraries change rarely, code often.',
+		},
+		{
+			question: 'What ends up in the final image of a two-stage build?',
+			options: ['Everything from both stages', 'Only the second stage, plus what is copied into it with COPY --from', 'Only the source code'],
+			answer: 1,
+			explanation: 'The JDK, Maven and the source stay behind in the build stage.',
+		},
+		{
+			question: 'The API in a container cannot reach jdbc:postgresql://localhost:5432 although Postgres runs on your Mac. Why?',
+			options: ['Postgres is not running', 'localhost inside a container is the container itself', 'Port 5432 is blocked by macOS'],
+			answer: 1,
+			explanation: 'Containers reach each other by name on a shared network, which Compose provides.',
+		},
+	]}
+/>
+
+<MarkComplete />

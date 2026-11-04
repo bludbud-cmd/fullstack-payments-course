@@ -1,0 +1,313 @@
+---
+title: "36.6 CI with GitHub Actions"
+description: "Let GitHub run PayDeck's tests on every push and pull request: workflows, jobs and steps for the API and the app, the two problems the course found by running CI's commands locally first, and a release workflow that signs the Android app with secrets kept in GitHub."
+sidebar:
+  order: 6
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson both PayDeck projects have a workflow that GitHub runs on every push, you can read its result on a pull request, and you know how a release workflow uses secrets.
+
+## Why it matters
+
+The API has 118 tests and the app 20, and they only help when someone runs them. On a busy day, nobody does. **Continuous integration** (CI) means a machine runs every check on every change, automatically, and marks the change green or red. A red cross on a pull request, before it is merged, is the cheapest moment to find a bug. It is also what lets a team (or you, six months from now) change code without fear.
+
+## The idea
+
+### GitHub Actions
+
+GitHub Actions runs **workflows**: YAML files in `.github/workflows/` in your repository.
+
+- A workflow says **when** it runs (`on:`): on a push to `main`, on a pull request, on a tag.
+- It has one or more **jobs**. Each job gets a fresh machine, a **runner**, from GitHub: Ubuntu Linux, Windows or macOS. Jobs run at the same time unless one says it `needs` another.
+- Each job has **steps**: either `run:` a shell command, or `uses:` a ready-made **action**, such as `actions/checkout` (get the code) or `actions/setup-java` (install a Java).
+
+For public repositories it is free. Private repositories get a monthly allowance of minutes, where macOS minutes count ten times.
+
+### The same commands as on your Mac
+
+CI is not magic: it runs the commands you already run, on a clean machine. That is its value: nothing is installed "by accident", no file is left over from last week. And it suggests the best habit: run those same commands yourself before you push.
+
+## Worked example
+
+### The API's workflow
+
+In the API project, `.github/workflows/ci.yml`:
+
+```yaml
+name: CI
+
+# Runs every test on every push and pull request, then checks that the
+# Docker image still builds. GitHub's Linux machines have Docker, so the
+# Testcontainers database works there exactly as on your Mac.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 25
+          cache: maven
+      - run: ./mvnw -B verify
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --tag paydeck-api:ci .
+```
+
+- `on: push: branches: [main]` and `pull_request:` run it for every change on `main` and for every pull request.
+- `permissions: contents: read`: this workflow may read the code and nothing else. Give workflows the least they need.
+- `setup-java` installs Temurin 25; `cache: maven` keeps the downloaded libraries between runs, so the second run is faster.
+- `./mvnw -B verify` compiles and runs every test, Testcontainers included: GitHub's Ubuntu runners have Docker.
+- The `docker` job checks that lesson 36.1's Dockerfile still builds. A Dockerfile that only builds on your Mac is found out here, not on deploy day.
+
+### The app's workflow
+
+In the app project, `.github/workflows/ci.yml`:
+
+```yaml
+name: CI
+
+# Checks every push and pull request: the same four commands you run before
+# a commit. A red cross on GitHub means one of them failed; click it to see which.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - run: npm ci
+      - name: Build the Android app
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon
+```
+
+- `npm ci` installs exactly what `package-lock.json` says (`npm install` may update it). It is the install command for machines.
+- `lint`, `typecheck` and `test` are your three `package.json` scripts. `npm test` runs without the API, thanks to Module 35's split: the live tests are not run here.
+- The `android` job proves the native project still builds. React Native's Android build uses Java 17, not 25. Ubuntu runners come with the Android SDK.
+
+You can add a `macos` job too: `runs-on: macos-15`, `pod install` in `macos`, then lesson 36.5's `xcodebuild` with `-configuration Debug`. It takes about ten minutes each time, and on a private repository those minutes count ten times, so many projects build the Mac app only for releases.
+
+### Run CI's commands before CI does
+
+Before pushing, the course ran the four commands on the app. Two of them failed.
+
+```sh
+npm run lint
+```
+
+```
+~/PayDeck/jest.setup.js
+   1:1   error  'jest' is not defined  no-undef
+   7:1   error  'jest' is not defined  no-undef
+   ...
+✖ 18 problems (11 errors, 7 warnings)
+```
+
+ESLint checks every file as app code, where `jest` does not exist. `jest.setup.js` is plain JavaScript (not TypeScript), so nothing tells ESLint it runs inside Jest. One comment at the top of the file does:
+
+```js
+/* eslint-env jest */
+```
+
+`✖ 7 problems (0 errors, 7 warnings)`. Warnings do not fail the command; errors do. The seven warnings are style hints (an inline style in `Button`, bit operations in `pkce.ts`) that the course chose to keep.
+
+```sh
+npm run typecheck
+```
+
+```
+__tests__/live/push.test.ts(1,30): error TS2307: Cannot find module 'child_process' or its corresponding type declarations.
+```
+
+The live push test (lesson 34.2) uses Node's `child_process` to ask the database, and the app's TypeScript settings only know React Native's and Jest's types, not Node's. The live tests are not run in CI anyway (they need the API), so `tsconfig.json` leaves them out of the check:
+
+```json
+  "exclude": ["**/node_modules", "**/Pods", "__tests__/live"]
+```
+
+Then all four commands pass: lint with warnings only, typecheck silent, `Tests: 20 passed, 20 total`. Had the course pushed first, the first CI run would have been red for reasons that had nothing to do with the change being pushed.
+
+### Reading a run
+
+Push the workflow files (commit them like any other file). On GitHub, the repository's **Actions** tab lists every run; a pull request shows a check per job at the bottom, with a green tick or a red cross. Click a job to see each step's output, exactly as a terminal would show it.
+
+For timing, here are the course's own runs of the same jobs, in the course repository: the API's `test` job took about a minute (`Tests run: 89, Failures: 0, Errors: 0, Skipped: 0` at the time, `BUILD SUCCESS`) and `docker` a minute and a half; the app's `test` job under a minute, `android` four and a half minutes, and a `macos` job ten.
+
+### Protect main
+
+In the repository's **Settings → Branches**, add a rule for `main`: **Require status checks to pass before merging**, and pick the jobs. Now GitHub will not let anyone merge a red pull request, including you on a tired evening.
+
+### A release workflow with secrets
+
+CI builds debug versions. Releases can be built by a workflow too, so that every release is built the same way, on a clean machine. It needs your upload key (lesson 36.4), which must never be in the repository. GitHub keeps such values as **secrets**: **Settings → Secrets and variables → Actions → New repository secret**. A workflow can read them; nobody can read them back, and logs show `***` in their place.
+
+A keystore is a binary file, and a secret is text, so encode it as **Base64** (the text encoding you met inside a JWT in lesson 27.5) first, and copy it:
+
+```sh
+base64 -i ~/paydeck-upload.keystore | pbcopy
+```
+
+Save that as `ANDROID_UPLOAD_KEYSTORE_BASE64`, and the two passwords and the alias as `ANDROID_UPLOAD_STORE_PASSWORD`, `ANDROID_UPLOAD_KEY_PASSWORD` and `ANDROID_UPLOAD_KEY_ALIAS`. The release workflow, `.github/workflows/release.yml`, runs when you push a tag such as `v1.0.0`:
+
+```yaml
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - run: npm ci
+      - run: npm test
+      # The upload key lives in the repository's secrets, base64-encoded.
+      - name: Unpack the upload key
+        env:
+          UPLOAD_KEYSTORE_BASE64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
+        run: |
+          echo "$UPLOAD_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/upload.keystore"
+          echo "ORG_GRADLE_PROJECT_PAYDECK_UPLOAD_STORE_FILE=$RUNNER_TEMP/upload.keystore" >> "$GITHUB_ENV"
+      - name: Build the release
+        working-directory: android
+        env:
+          ORG_GRADLE_PROJECT_PAYDECK_UPLOAD_STORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_STORE_PASSWORD }}
+          ORG_GRADLE_PROJECT_PAYDECK_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+          ORG_GRADLE_PROJECT_PAYDECK_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+        run: ./gradlew bundleRelease --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: paydeck-android
+          path: android/app/build/outputs/bundle/release/*.aab
+```
+
+- `${{ secrets.NAME }}` reads a secret. It is passed through `env:`, never written into a command line, where it could end up in a log.
+- `$RUNNER_TEMP` is a folder that is deleted after the job. The key exists only there, only for this job.
+- Writing a line to `$GITHUB_ENV` sets an environment variable for the steps after it. Gradle reads `ORG_GRADLE_PROJECT_PAYDECK_UPLOAD_STORE_FILE` as the property `PAYDECK_UPLOAD_STORE_FILE`: lesson 36.4's `build.gradle` needs no change.
+- `upload-artifact` attaches the `.aab` to the run, for you to download and upload to Google Play.
+
+Release with:
+
+```sh
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+<Aside type="note" title="Not run by the course">
+The course repository has this release workflow (with a Mac job as well), but has not set an upload key in its secrets or run a release, because publishing PayDeck is yours to do, not the course's. Its CI workflows above run on every change.
+</Aside>
+
+<Exercise title="Make CI catch a bug">
+Prove that CI protects you. On a new branch, break something a test checks (for example, change `−` to `-` in `formatSignedMoney`), push the branch and open a pull request. What does the pull request show, and where do you find which test failed?
+
+<Fragment slot="hint">`git switch -c try-ci`, change, commit, `git push -u origin try-ci`, then GitHub offers to open a pull request.</Fragment>
+<Fragment slot="solution">
+
+The `test` job gets a red cross, and with branch protection the **Merge** button is disabled. Click **Details** next to the job, open the `npm test` step, and you see Jest's output, as on your Mac: `ActivityRow › shows what happened, when, and how much` failing, `Unable to find an element with text: −$12.50`. Close the pull request without merging and delete the branch. A test that you have seen fail on CI is a test you can trust (lesson 35.2).
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Writing a secret into the workflow file">
+The workflow is in Git, and the repository may be public. Secrets go in **Settings → Secrets**, and into steps through `env:`.
+</Aside>
+
+<Aside type="caution" title="npm install in CI">
+It can change `package-lock.json` and install versions you never tested. `npm ci` installs exactly the locked versions, or fails.
+</Aside>
+
+<Aside type="caution" title="Pushing to find out">
+A CI run takes minutes; the same command on your Mac takes seconds, and does not leave a red cross in the history. Run lint, typecheck and tests before you push.
+</Aside>
+
+## Recap
+
+- A workflow in `.github/workflows/` says when it runs, and has jobs (one fresh runner each) made of steps (`run:` or `uses:`).
+- The API's CI runs `./mvnw -B verify` (Testcontainers works on Ubuntu runners) and builds the Docker image; the app's runs `npm ci`, lint, typecheck, `npm test`, and builds Android.
+- Run CI's commands locally first; the course found a lint error and a type error that way.
+- Branch protection makes green checks required.
+- Release workflows read signing keys from Actions secrets, through `env:`, into a temporary folder.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why does the app\'s CI run npm ci rather than npm install?',
+			options: ['It is faster to type', 'It installs exactly the versions in package-lock.json, or fails', 'npm install does not work on Linux'],
+			answer: 1,
+			explanation: 'CI should test what you tested, not whatever is newest today.',
+		},
+		{
+			question: 'Where does the Android upload key live for the release workflow?',
+			options: ['In the repository, in android/app', 'In the repository\'s Actions secrets, base64-encoded, unpacked into a temporary folder during the job', 'In the workflow file'],
+			answer: 1,
+			explanation: 'Secrets are readable by workflows and never shown again, not even to you.',
+		},
+		{
+			question: 'Why are the live tests not run in CI?',
+			options: ['They are too slow to write', 'They need a running API, database and test data, which CI does not have', 'Jest cannot run them'],
+			answer: 1,
+			explanation: 'npm test skips __tests__/live (Module 35); you run them with npm run test:live.',
+		},
+	]}
+/>
+
+<MarkComplete />

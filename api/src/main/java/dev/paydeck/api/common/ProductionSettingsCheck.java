@@ -4,20 +4,27 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Function;
 
-import org.springframework.context.annotation.Profile;
-import org.springframework.core.env.Environment;
-import org.springframework.stereotype.Component;
+import org.springframework.boot.context.event.ApplicationEnvironmentPreparedEvent;
+import org.springframework.context.ApplicationListener;
+import org.springframework.core.env.ConfigurableEnvironment;
 
 /**
  * Refuses to start a deployed API that still has the settings meant for your
  * own Mac. Runs only with {@code SPRING_PROFILES_ACTIVE=production}: a clear
- * message at start-up beats a database error, or a guessable signing key, later.
+ * message at start-up beats a guessable signing key later.
+ *
+ * <p>It listens for the moment the settings are read, before anything else
+ * starts (even the database connection), so a missing setting is reported
+ * first. {@link dev.paydeck.api.PayDeckApplication#main} registers it.
  */
-@Component
-@Profile("production")
-public class ProductionSettingsCheck {
+public class ProductionSettingsCheck implements ApplicationListener<ApplicationEnvironmentPreparedEvent> {
 
-    public ProductionSettingsCheck(Environment environment) {
+    @Override
+    public void onApplicationEvent(ApplicationEnvironmentPreparedEvent event) {
+        ConfigurableEnvironment environment = event.getEnvironment();
+        if (!environment.matchesProfiles("production")) {
+            return;
+        }
         List<String> problems = problems(environment::getProperty);
         if (!problems.isEmpty()) {
             throw new IllegalStateException("PayDeck is not ready for production:\n  - "

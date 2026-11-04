@@ -1,0 +1,164 @@
+---
+title: "36.5 Packaging the macOS app"
+description: "Build PayDeck for the Mac in the Release configuration, close the HTTP loophole the template leaves open, zip the .app so it survives being downloaded, and know what Gatekeeper will say to the people who open it."
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can build a release `PayDeck.app`, package it as a zip someone else can download, and explain what macOS shows them the first time they open it.
+
+<Aside type="note" title="What the course ran">
+Building a Mac app needs a Mac with Xcode, and the course's own build machine is Linux, so the commands in this lesson are the standard ones, with their results described rather than pasted. The course's GitHub Actions build the same macOS project on one of GitHub's Macs on every change (lesson 36.6).
+</Aside>
+
+## Why it matters
+
+`npm run macos` builds a **Debug** app that loads its JavaScript from Metro, exactly like the Android debug build. To give PayDeck to someone with a Mac, you need a **Release** `.app` with the JavaScript inside, talking to your `https://` API, packaged so that downloading it does not break it.
+
+## The idea
+
+### A .app is a folder
+
+`PayDeck.app` looks like one file in Finder, but it is a folder (a **bundle**): the program, its icon, `Info.plist`, the JavaScript bundle and the libraries. Right-click it and choose **Show Package Contents** to see. Copying a folder through email or a website loses details (permissions, links between files), so apps are shared zipped, with a tool that keeps them: `ditto`.
+
+### Signing on the Mac
+
+macOS checks apps from the internet with **Gatekeeper**. An app signed with an Apple **Developer ID** and **notarized** (checked by Apple) opens normally. An app without that opens only after the person allows it once in System Settings. Signing needs a paid Apple Developer membership, which this course does not require: lesson 36.7 is the optional bonus. This lesson makes the unsigned version, which is fine for you, your friends and a portfolio.
+
+## Worked example
+
+### Close the HTTP loophole
+
+Release builds should talk only `https://`. Android already refuses plain `http://` in release builds (lesson 26.4). On the Mac, the react-native-macos template's `macos/PayDeck-macOS/Info.plist` is more generous than lesson 26.4 suggested:
+
+```xml
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>localhost</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
+```
+
+`NSAllowsArbitraryLoads` set to `true` switches App Transport Security off for **every** address: a release would happily send Asha's password over plain `http://` if `config.ts` had a typo. Delete those two lines (the key and its `<true/>`), and keep the `localhost` exception, which is all development needs:
+
+```xml
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>localhost</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
+```
+
+Run `npm run macos` once to check development still works. The sandbox entitlement `com.apple.security.network.client` (lesson 26.4) stays: the release needs the network too.
+
+### Build the Release configuration
+
+Xcode can build from the Terminal. In the `macos` folder:
+
+```sh
+cd macos
+xcodebuild -workspace PayDeck.xcworkspace -scheme PayDeck-macOS \
+  -configuration Release -destination 'platform=macOS' \
+  -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+```
+
+- `-workspace` and `-scheme` are what Xcode shows in its toolbar: the CocoaPods workspace that adding the macOS target made (lesson 11.2) and the app.
+- `-configuration Release` is the release build: JavaScript bundled, `__DEV__` false.
+- `-derivedDataPath build` puts the results in `macos/build` instead of Xcode's hidden folder, so you can find them.
+- `CODE_SIGNING_ALLOWED=NO` builds without signing, so it works without any Apple account (and on GitHub's Macs, which have none of your certificates).
+
+It takes a few minutes and ends with `** BUILD SUCCEEDED **`. The app is at `macos/build/Build/Products/Release/PayDeck.app`. Double-click it: no Metro window, and it talks to your server.
+
+### Zip it
+
+```sh
+cd build/Build/Products/Release
+ditto -c -k --keepParent PayDeck.app ~/Desktop/PayDeck-macOS.zip
+```
+
+`-c -k` makes a zip; `--keepParent` puts the `PayDeck.app` folder itself in the zip, not just its contents. That zip is what you share.
+
+### What the person opening it sees
+
+When someone downloads the zip, macOS marks it as "from the internet" (the **quarantine** flag). Unzipped, the unsigned app does not open the first time: macOS says it could not verify that PayDeck is free of malware. On macOS 15 and later, the way past is:
+
+1. Try to open PayDeck once, and close the message.
+2. Open **System Settings → Privacy & Security**, scroll to the message about PayDeck, and press **Open Anyway**.
+3. Confirm with the Mac's password.
+
+From then on it opens normally. This is a reasonable thing to ask a friend or a reviewer looking at your portfolio. It is not something to ask the public: for that, lesson 36.7 signs and notarizes the app, and the warning disappears.
+
+<Exercise title="Version in the About box">
+PayDeck's About window (the app menu → **About PayDeck**) shows a version. Where does it come from, and how do you make it say 1.0 (1) for this first release?
+
+<Fragment slot="hint">Open `macos/PayDeck-macOS/Info.plist` and look for "Version".</Fragment>
+<Fragment slot="solution">
+
+The About box shows two keys from `Info.plist`: `CFBundleShortVersionString`, the version people see (`1.0`), and `CFBundleVersion`, the build number (`1`). PayDeck's template already has exactly those values, so the first release says 1.0 (1). Raise them with every release, like Android's `versionName` and `versionCode` (lesson 36.4): `1.1` and `2` for the next one.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Zipping with Finder's Compress, then emailing">
+Finder's **Compress** works too, but some mail and chat services rewrite or block zips containing apps. Share through a download link (GitHub's releases or Actions artifacts, lesson 36.6), and zip with `ditto`.
+</Aside>
+
+<Aside type="caution" title="Leaving NSAllowsArbitraryLoads on">
+It is the template's convenience for development. In a payments app it means a mistyped `http://` address silently sends passwords unencrypted. Allow only `localhost`.
+</Aside>
+
+<Aside type="caution" title="Sharing the Debug build">
+A Debug `.app` asks Metro on *your* Mac for its JavaScript; on anyone else's Mac it shows a red screen. Build with `-configuration Release`.
+</Aside>
+
+## Recap
+
+- A `.app` is a folder; share it zipped with `ditto -c -k --keepParent`.
+- Remove `NSAllowsArbitraryLoads` so the release can only use `https://` (and `localhost` while you develop).
+- `xcodebuild ... -configuration Release ... CODE_SIGNING_ALLOWED=NO build` makes an unsigned release in `macos/build/Build/Products/Release`.
+- Unsigned apps open after **Open Anyway** in Privacy & Security; signing and notarizing (lesson 36.7) removes the warning.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why share the Mac app as a zip made with ditto?',
+			options: ['Zips are smaller', 'A .app is a folder, and ditto keeps everything inside it intact', 'Apple requires zips'],
+			answer: 1,
+			explanation: 'Copying a bundle loosely can lose permissions and links that the app needs.',
+		},
+		{
+			question: 'What does NSAllowsArbitraryLoads: true allow?',
+			options: ['Plain http:// to any server', 'Loading images', 'Running without a sandbox'],
+			answer: 0,
+			explanation: 'It switches App Transport Security off everywhere. PayDeck only needs an exception for localhost.',
+		},
+		{
+			question: 'A friend cannot open your unsigned PayDeck.app. What do they do?',
+			options: ['Reinstall macOS', 'Try once, then System Settings → Privacy & Security → Open Anyway', 'Rename the app'],
+			answer: 1,
+			explanation: 'Gatekeeper lets a person allow an unsigned app once, explicitly.',
+		},
+	]}
+/>
+
+<MarkComplete />

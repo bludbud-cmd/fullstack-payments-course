@@ -1,0 +1,212 @@
+---
+title: "37.1 Polish"
+description: "Go over PayDeck as a stranger would: the words people read, what each screen shows while loading, when empty and when broken, how it sounds to a screen reader, and what changes in a release build. Then fix the first thing found, test first: error messages written for developers."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you have a polish checklist for any app, and you have used it on PayDeck to find and fix a real problem, with a test that keeps it fixed.
+
+## Why it matters
+
+PayDeck works. Polish is the difference between "it works when I use it" and "it works when someone else uses it": someone on a slow train, someone who uses a screen reader, someone who has never seen your code and does not know what "the API" is. It is also what people notice first in a portfolio. A reviewer opens your app for two minutes; in those two minutes, one confusing message counts for more than a hundred passing tests they never see.
+
+## The idea
+
+### The checklist
+
+Go through every screen with these questions. Most problems hide in the states you see least often while developing.
+
+1. **Words.** Is every sentence something a customer understands? No "API", "null", "500", "token". Does it say what to do next?
+2. **Four states.** What does the screen show while **loading**, when **empty**, when it **fails**, and when it **works**? (Lesson 26.2's `QueryState` covers loading and failing; "No transactions yet." covers empty.)
+3. **Release, not debug.** What changes when the app talks to a server on the internet: slower answers, a lost connection on a train, the server restarting during a deploy?
+4. **Accessibility.** Turn on VoiceOver (Mac: Command–F5) or TalkBack (Android: Settings → Accessibility) and use one task with your eyes closed. Is every button named? Does each value make sense read aloud? Make the text larger in the system settings: does anything get cut off?
+5. **Small details.** Do money amounts always have the currency? Are buttons disabled while their request runs? Does the keyboard cover the field you are typing in?
+
+### Fix with a test first
+
+Every problem polish finds is a small bug. Treat it like one (lesson 35.2): write a test that shows it, watch it fail, fix, and keep the test.
+
+## Worked example
+
+### What the course found
+
+The course went through the list with PayDeck's release settings in mind, and the third question found something at once. Two messages come from `src/api/client.ts`, the one file every request goes through:
+
+- When no answer comes at all (`fetch` throws): `Could not reach PayDeck. Check that the API is running.` On your Mac, that was helpful: it was usually true. To Asha on a train, "the API" means nothing, and she cannot start it.
+- When the server answers with an error and no explanation: `The server answered 502`. During a deploy (lesson 36.2), Caddy answers exactly that while the new API starts, with an empty body. The course stopped the API behind Caddy and asked:
+
+```sh
+curl -sk -i https://localhost:8443/api/me
+```
+
+```
+HTTP/2 502
+alt-svc: h3=":8443"; ma=2592000
+server: Caddy
+content-length: 0
+```
+
+So for about ten seconds per release, every customer who opens PayDeck reads "The server answered 502".
+
+### The tests first
+
+`__tests__/client.test.ts`:
+
+```ts
+import { request } from '../src/api/client';
+
+// What a person sees when the network or the server lets them down.
+describe('request when things go wrong', () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  it('blames the connection, not the API, when nothing answers', async () => {
+    globalThis.fetch = jest.fn().mockRejectedValue(new TypeError('Network request failed'));
+
+    await expect(request('/api/me')).rejects.toThrow(
+      'Could not reach PayDeck. Check your internet connection and try again.',
+    );
+  });
+
+  it('says PayDeck is briefly unavailable when the server is down', async () => {
+    // What Caddy answers while the API restarts: an empty 502, no JSON.
+    globalThis.fetch = jest.fn().mockResolvedValue(new Response('', { status: 502 }));
+
+    await expect(request('/api/me')).rejects.toThrow(
+      'PayDeck is not available right now. Try again in a minute.',
+    );
+  });
+
+  it('still shows what the API says when it explains itself', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(
+      new Response(JSON.stringify({ title: 'Card frozen', detail: 'Unfreeze the card to pay with it.' }), {
+        status: 422,
+      }),
+    );
+
+    await expect(request('/api/payments')).rejects.toThrow('Unfreeze the card to pay with it.');
+  });
+});
+```
+
+- These tests replace `fetch` itself, the very edge of the app (lesson 35.2's "mock at the edges"). `globalThis` is the object that holds everything global, in any JavaScript environment; `afterEach` puts the real `fetch` back.
+- `new Response(...)` builds an HTTP answer by hand, as the network would deliver it.
+- `rejects.toThrow('...')` checks that the promise fails, with an error whose message is that text.
+- The third test protects what already works: when the API explains (lesson 22.4's problem details), its explanation wins.
+
+```sh
+npx jest client
+```
+
+```
+    ✕ blames the connection, not the API, when nothing answers (24 ms)
+    ✕ says PayDeck is briefly unavailable when the server is down (7 ms)
+    ✓ still shows what the API says when it explains itself (2 ms)
+    Expected substring: "Could not reach PayDeck. Check your internet connection and try again."
+    Received message:   "Could not reach PayDeck. Check that the API is running."
+    Expected: "PayDeck is not available right now. Try again in a minute."
+    Received: "The server answered 502"
+```
+
+Two failures, for exactly the two problems.
+
+### The fix
+
+In `src/api/client.ts`, the message in `send`'s `catch`:
+
+```ts
+    throw new ApiError(0, 'No connection', 'Could not reach PayDeck. Check your internet connection and try again.');
+```
+
+and in `read`, the fallback when the answer has no `detail`:
+
+```ts
+      json?.detail ?? fallbackMessage(response.status),
+```
+
+with a small function below `read`:
+
+```ts
+/** For answers without the API's own explanation, such as the proxy's 502 while the API restarts. */
+function fallbackMessage(status: number): string {
+  return status >= 500
+    ? 'PayDeck is not available right now. Try again in a minute.'
+    : `The server answered ${status}`;
+}
+```
+
+Every status from 500 up means "the server's problem, not yours": the person can only wait. Anything else without an explanation (a `404` from a mistyped path, say) is a bug in the app, and keeping the number helps you find it.
+
+```sh
+npm test
+```
+
+```
+Test Suites: 7 passed, 7 total
+Tests:       23 passed, 23 total
+```
+
+Because every screen shows errors through `QueryState` or its own `error.message`, one change in one file fixes the message on every screen.
+
+<Exercise title="Your own polish pass">
+Go through the checklist on two screens you have not looked at in a while, for example **Top up** and **Card**. Write down every problem, however small, and fix the two that would bother a customer most, each with a test.
+
+<Fragment slot="hint">Do the empty and failing states first: stop the API (`docker compose stop` in lesson 36.2's stack, or just stop `spring-boot:run`) and open each screen. Then VoiceOver.</Fragment>
+<Fragment slot="solution">
+
+Answers vary. A few things to look for: with the API stopped, each screen should now say "Could not reach PayDeck. Check your internet connection and try again." with a **Try again** button; a card should be read aloud with its nickname, last four digits and limit, in an order that makes sense; and the **Top up** button already says what it will do ("Pay $25.00 by card") rather than just "Pay", which is the kind of detail worth keeping everywhere. A test for a polish fix looks like any screen test from Module 35: render, find the words a person reads, check them.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Polishing only the happy path">
+Loading, empty and failing states are where apps look unfinished. Check them first; you see the working state every day anyway.
+</Aside>
+
+<Aside type="caution" title="Hiding the API's own explanation">
+A friendlier fallback is for answers with **no** explanation. When the API says "The payment is over the card's spending limit.", show that: it is the most precise sentence anyone could write.
+</Aside>
+
+<Aside type="caution" title="Polishing without a test">
+A reworded message is easy to reword back by accident. If people rely on a sentence, a test should know it.
+</Aside>
+
+## Recap
+
+- Polish checklist: words, four states, release conditions, accessibility, small details.
+- Each problem found is a small bug: test, fail, fix.
+- PayDeck now tells customers about their connection, and about a server restarting, in words they can act on, while keeping every explanation the API gives.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which message is best for a customer when nothing answers?',
+			options: ['Network request failed', 'Could not reach PayDeck. Check that the API is running.', 'Could not reach PayDeck. Check your internet connection and try again.'],
+			answer: 2,
+			explanation: 'It names the likely cause in their world, and what to do.',
+		},
+		{
+			question: 'Why keep "The server answered 404" for statuses under 500?',
+			options: ['Customers like numbers', 'An unexplained 4xx is a bug in the app, and the number helps you find it', 'It is shorter'],
+			answer: 1,
+			explanation: '5xx is the server\'s problem and only waiting helps; an unexplained 4xx means the app asked for something wrong.',
+		},
+		{
+			question: 'Where do problems most often hide?',
+			options: ['In the working state', 'In the loading, empty and failing states', 'In the tests'],
+			answer: 1,
+			explanation: 'They are the states you see least while developing.',
+		},
+	]}
+/>
+
+<MarkComplete />

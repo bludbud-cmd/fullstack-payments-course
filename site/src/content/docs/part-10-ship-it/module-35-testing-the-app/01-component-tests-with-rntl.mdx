@@ -1,0 +1,428 @@
+---
+title: "35.1 Component tests with React Native Testing Library"
+description: "Test PayDeck's screens the way a person uses them: render a component in Jest, find things by their text and labels, type and press, and check what appears, with the API replaced by mocks so the tests run in seconds without a server."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can write a Jest test that renders a PayDeck component, finds what a person would see, types and presses like a person would, and checks the result, without the API running.
+
+## Why it matters
+
+PayDeck's API has more than a hundred tests, so a change to a Java class is checked in a minute. The app has had a few tests for small pieces (`pkce`, `stomp`), and everything else you checked by hand: open the app, sign in, tap, look. That takes minutes, and you only check the screen you just changed. A change to `formatMoney` or to `usePayWithCard` can quietly break a screen you have not opened in weeks. Component tests check every screen on every change, in seconds.
+
+## The idea
+
+### Jest, briefly
+
+You have already run Jest (lesson 29.2), the test runner that comes with every React Native project. Its tests look a lot like JUnit's (lesson 18.4):
+
+```ts
+describe('formatMoney', () => {
+  it('puts the dollar sign first', () => {
+    expect(formatMoney(1250, 'USD')).toBe('$12.50');
+  });
+});
+```
+
+- `describe` groups tests; `it` is one test, named as a sentence.
+- `expect(value).toBe(other)` is JUnit's `assertEquals`. There are many more **matchers**: `toEqual` (same contents), `toHaveLength`, `toHaveBeenCalledWith`, `not.` in front of any of them.
+- Jest finds every file in `__tests__/` and every file ending in `.test.ts` or `.test.tsx`. `npm test` runs them all; `npx jest PayScreen` runs only files whose path matches.
+
+### React Native Testing Library
+
+A component test needs a screen to look at. **React Native Testing Library** (RNTL) renders components in memory, without a phone or a Mac, and lets you ask questions about the result:
+
+- `render(<ActivityRow ... />)` draws it.
+- `screen.getByText('Corner Café')` finds the element showing that text, or fails the test.
+- `screen.getByLabelText('Amount (USD)')` finds an element by its accessibility label. PayDeck's `Field` gives every input its label (lesson 13.2), so tests find inputs exactly the way a screen reader does.
+- `screen.findByText(...)` waits (up to a second) for something to appear, for anything that happens after a request.
+- `screen.queryByText(...)` returns `null` instead of failing, for checking that something is **not** there.
+- `fireEvent.changeText(input, '12.50')` types; `fireEvent.press(button)` taps.
+- `expect(element).toBeOnTheScreen()` and `toHaveProp('value', false)` are matchers RNTL adds.
+
+RNTL's principle is: **test what the person sees and does.** Not which state variable changed, not which hook was called, but "after typing 12.50 and pressing Pay, the screen says Approved". A test written like that keeps passing when you rearrange the code inside, and fails when the screen stops working.
+
+### No API: mock the module
+
+Screens fetch data. In a component test, the API is not running, and should not be: a test that depends on the database's contents breaks whenever the data changes. Instead, Jest replaces the module that talks to the API:
+
+```ts
+jest.mock('../src/api/paydeck');
+```
+
+Every function in `src/api/paydeck.ts` becomes a **mock**: a function that does nothing and records how it was called. Each test then says what it should answer:
+
+```ts
+jest.mocked(api.getAccount).mockResolvedValue(ashasAccount);
+```
+
+`mockResolvedValue` makes it return a promise that resolves to that value, as the real request would. `mockRejectedValue` makes it fail. This works because PayDeck has always kept every request in `src/api/` (Module 26): screens never call `fetch` themselves.
+
+### Everything around a screen
+
+A screen expects the app around it: TanStack Query's client, the current account (`AccountGate`), navigation. One helper, `renderScreen`, provides all three, so each test can be about its screen.
+
+## Worked example
+
+### Install RNTL
+
+```sh
+npm install --save-dev @testing-library/react-native
+```
+
+npm also installs `test-renderer`, which RNTL draws with. Its matchers (`toBeOnTheScreen` and friends) are ready as soon as a test imports RNTL.
+
+### Test data
+
+`testing/data.ts` holds made-up objects that the tests share:
+
+```ts
+import type { Me } from '../src/api/auth';
+import type { Account, Card, CardPayment } from '../src/types';
+
+// Made-up data for component tests. Each test copies what it needs and changes one thing.
+
+export const ashasAccount: Account = {
+  id: 'account-1',
+  ownerName: 'Asha Rao',
+  currency: 'USD',
+  balanceCents: 24_800,
+  createdAt: '2026-10-01T09:00:00Z',
+};
+
+export const groceries: Card = {
+  id: 'card-1',
+  accountId: 'account-1',
+  nickname: 'Groceries',
+  last4: '1669',
+  status: 'ACTIVE',
+  spendingLimitCents: 5_000,
+  cardholderId: null,
+  createdAt: '2026-10-02T09:00:00Z',
+};
+
+export const asha: Me = {
+  user: {
+    id: 'user-1',
+    email: 'asha@example.com',
+    displayName: 'Asha Rao',
+    role: 'CUSTOMER',
+    signInMethods: ['PASSWORD'],
+  },
+  accounts: [ashasAccount],
+  heldCards: [],
+};
+
+export function payment(changes: Partial<CardPayment>): CardPayment {
+  return {
+    id: 'payment-1',
+    cardId: 'card-1',
+    merchant: 'Corner Café',
+    amountCents: 1_250,
+    status: 'APPROVED',
+    declineReason: null,
+    declineMessage: null,
+    createdAt: '2026-11-04T10:00:00Z',
+    ...changes,
+  };
+}
+```
+
+`payment(changes)` returns an approved payment, with whatever the test changes on top: `payment({ status: 'DECLINED' })`. Each test then shows only what matters to it.
+
+### The helper
+
+`testing/renderScreen.tsx`:
+
+```tsx
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { render } from '@testing-library/react-native';
+import type { ReactElement } from 'react';
+import { NavigationContext, type Navigation } from '../src/navigation/NavigationContext';
+import { AccountGate } from '../src/state/AccountContext';
+
+/**
+ * Renders one screen with everything the real app puts around it: the query
+ * cache, the current account, and navigation. Tests mock the API modules
+ * (jest.mock('../src/api/paydeck')) so nothing goes over the network.
+ */
+export async function renderScreen(screen: ReactElement) {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      // A failed request should fail the test at once, not be retried three times.
+      // gcTime: Infinity means no clean-up timer is left running, so Jest can exit.
+      queries: { retry: false, gcTime: Infinity },
+      mutations: { retry: false, gcTime: Infinity },
+    },
+  });
+  const navigation: Navigation = {
+    navigate: jest.fn(),
+    goBack: jest.fn(),
+    switchTab: jest.fn(),
+    canGoBack: true,
+  };
+  await render(
+    <QueryClientProvider client={queryClient}>
+      <AccountGate openAccount={() => null}>
+        <NavigationContext.Provider value={navigation}>{screen}</NavigationContext.Provider>
+      </AccountGate>
+    </QueryClientProvider>,
+  );
+  return { navigation, queryClient };
+}
+```
+
+- `retry: false`: TanStack Query retries a failed request three times by default, with pauses, which would make a failing test slow.
+- `gcTime: Infinity`: by default the cache sets a timer to clean up unused data after five minutes. Jest waits for running timers before it exits, so without this it prints `Jest did not exit one second after the test run has completed.` and hangs.
+- `navigate: jest.fn()`: a mock, so a test can check `expect(navigation.navigate).toHaveBeenCalledWith(...)`.
+- `AccountGate` calls `getMe` from `src/api/auth.ts`, so tests mock that module too.
+
+### A first test: one row
+
+`ActivityRow` takes everything it shows as props, so it needs no helper and no mocks. `__tests__/ActivityRow.test.tsx`:
+
+```tsx
+import { render, screen } from '@testing-library/react-native';
+import { ActivityRow } from '../src/components/ActivityRow';
+
+describe('ActivityRow', () => {
+  it('shows what happened, when, and how much', async () => {
+    await render(
+      <ActivityRow
+        currency="USD"
+        item={{
+          transactionId: 't-1',
+          type: 'CARD_PAYMENT',
+          description: 'Corner Café',
+          amountCents: -1_250,
+          createdAt: '2026-11-04T10:00:00Z',
+        }}
+      />,
+    );
+
+    expect(screen.getByText('Corner Café')).toBeOnTheScreen();
+    expect(screen.getByText('2026-11-04')).toBeOnTheScreen();
+    expect(screen.getByText('−$12.50')).toBeOnTheScreen();
+  });
+
+  it('shows money coming in with a plus', async () => {
+    await render(
+      <ActivityRow
+        currency="EUR"
+        item={{ transactionId: 't-2', type: 'TOP_UP', description: 'Top-up', amountCents: 2_000, createdAt: '2026-11-04T10:00:00Z' }}
+      />,
+    );
+
+    expect(screen.getByText('+€20.00')).toBeOnTheScreen();
+  });
+});
+```
+
+The minus sign is `−` (Unicode's minus, from `formatSignedMoney` in lesson 26.1), not the hyphen on your keyboard: copy it from the source if your test cannot find the text.
+
+### The Pay screen
+
+`__tests__/PayScreen.test.tsx` plays the person paying at a shop:
+
+```tsx
+import { fireEvent, screen } from '@testing-library/react-native';
+import * as authApi from '../src/api/auth';
+import * as api from '../src/api/paydeck';
+import { PayScreen } from '../src/screens/PayScreen';
+import { asha, ashasAccount, groceries, payment } from '../testing/data';
+import { renderScreen } from '../testing/renderScreen';
+
+// Every function in these modules becomes a jest.fn() that returns undefined.
+jest.mock('../src/api/auth');
+jest.mock('../src/api/paydeck');
+const mocked = jest.mocked(api);
+
+beforeEach(() => {
+  jest.mocked(authApi.getMe).mockResolvedValue(asha);
+  mocked.getAccount.mockResolvedValue(ashasAccount);
+  mocked.listCards.mockResolvedValue([groceries]);
+});
+
+async function payAt(shop: string, amount: string) {
+  await fireEvent.changeText(screen.getByLabelText('Shop'), shop);
+  await fireEvent.changeText(screen.getByLabelText('Amount (USD)'), amount);
+  await fireEvent.press(screen.getByText('Pay'));
+}
+
+describe('PayScreen', () => {
+  it('says which card is paying', async () => {
+    await renderScreen(<PayScreen cardId="card-1" />);
+
+    expect(await screen.findByText('Paying with Groceries, the card ending 1669.')).toBeOnTheScreen();
+  });
+
+  it('sends the payment and shows Approved', async () => {
+    mocked.payWithCard.mockResolvedValue(payment({ amountCents: 1_250, merchant: 'Corner Café' }));
+    await renderScreen(<PayScreen cardId="card-1" />);
+    await screen.findByText(/Paying with Groceries/);
+
+    await payAt('Corner Café', '12.50');
+
+    expect(await screen.findByText('Approved')).toBeOnTheScreen();
+    expect(screen.getByText('$12.50')).toBeOnTheScreen();
+    expect(screen.getByText('at Corner Café with Groceries')).toBeOnTheScreen();
+    expect(mocked.payWithCard).toHaveBeenCalledWith('card-1', 1_250, 'Corner Café', expect.any(String));
+  });
+
+  it('shows Declined with the reason', async () => {
+    mocked.payWithCard.mockResolvedValue(
+      payment({
+        merchant: 'Gadget Shop',
+        amountCents: 8_999,
+        status: 'DECLINED',
+        declineReason: 'OVER_LIMIT',
+        declineMessage: "The payment is over the card's spending limit.",
+      }),
+    );
+    await renderScreen(<PayScreen cardId="card-1" />);
+    await screen.findByText(/Paying with Groceries/);
+
+    await payAt('Gadget Shop', '89.99');
+
+    expect(await screen.findByText('Declined')).toBeOnTheScreen();
+    expect(screen.getByText("The payment is over the card's spending limit.")).toBeOnTheScreen();
+  });
+
+  it('does not ask the API about an amount that is not money', async () => {
+    await renderScreen(<PayScreen cardId="card-1" />);
+    await screen.findByText(/Paying with Groceries/);
+
+    await payAt('Corner Café', 'twelve');
+
+    expect(screen.getByText('Enter an amount like 25 or 25.50')).toBeOnTheScreen();
+    expect(mocked.payWithCard).not.toHaveBeenCalled();
+  });
+});
+```
+
+```sh
+npx jest ActivityRow PayScreen --verbose
+```
+
+```
+PASS __tests__/ActivityRow.test.tsx
+    ✓ shows what happened, when, and how much (73 ms)
+    ✓ shows money coming in with a plus (4 ms)
+PASS __tests__/PayScreen.test.tsx
+    ✓ says which card is paying (301 ms)
+    ✓ sends the payment and shows Approved (94 ms)
+    ✓ shows Declined with the reason (65 ms)
+    ✓ does not ask the API about an amount that is not money (60 ms)
+Tests:       6 passed, 6 total
+```
+
+Six tests, under a second of work, no API, no emulator.
+
+### The mistake the course made first
+
+The first time these tests ran, the last one failed:
+
+```
+  ● PayScreen › does not ask the API about an amount that is not money
+
+    expect(jest.fn()).not.toHaveBeenCalled()
+
+    Expected number of calls: 0
+    Received number of calls: 2
+
+    1: "card-1", 1250, "Corner Café", "72aa7452-64a7-439b-8218-878da4b04289"
+    2: "card-1", 8999, "Gadget Shop", "6ddb76a4-de69-4e24-bb8c-a914cf97521d"
+```
+
+The two calls are from the *previous* tests. A mock remembers every call until it is told to forget, and by default Jest does not tell it to. The fix is one setting in `jest.config.js`:
+
+```js
+module.exports = {
+  preset: 'react-native',
+  setupFiles: ['<rootDir>/jest.setup.js'],
+  // Forget what every jest.fn() was called with before each test.
+  clearMocks: true,
+};
+```
+
+`clearMocks` forgets the calls, but keeps what each mock answers (`mockResolvedValue`) until a test or `beforeEach` changes it. That is why `beforeEach` sets the answers every test relies on.
+
+<Exercise title="Pay again">
+After a result, **Pay again** should bring back an empty form for the same card. Write the test: pay, press **Pay again**, and check that the form is back with an empty amount. Then check that the second payment gets a **different** idempotency key from the first.
+
+<Fragment slot="hint">The amount field's value is its `value` prop: `toHaveProp('value', '')`. The key is the fourth argument of each call: `mocked.payWithCard.mock.calls[0][3]`.</Fragment>
+<Fragment slot="solution">
+
+```tsx
+  it('pays again with a new key', async () => {
+    mocked.payWithCard.mockResolvedValue(payment({}));
+    await renderScreen(<PayScreen cardId="card-1" />);
+    await screen.findByText(/Paying with Groceries/);
+
+    await payAt('Corner Café', '12.50');
+    await fireEvent.press(await screen.findByText('Pay again'));
+    expect(screen.getByLabelText('Amount (USD)')).toHaveProp('value', '');
+    await payAt('Corner Café', '12.50');
+    await screen.findByText('Approved');
+
+    const [first, second] = mocked.payWithCard.mock.calls;
+    expect(second[3]).not.toBe(first[3]);
+  });
+```
+
+Two payments of the same amount at the same shop are two payments, so they need two keys; a double tap within one payment must reuse the key (lesson 24.5). This test protects exactly that line in `payAgain`.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="getBy for something that arrives later">
+`getByText` looks once, right now. Anything that appears after a request needs `findByText`, which waits. If a test fails with "Unable to find an element" but the screen clearly shows it, this is usually why.
+</Aside>
+
+<Aside type="caution" title="Finding elements by test IDs or styles">
+`testID` and styles are invisible to people. Find by the text and labels a person would use; if you cannot, a screen reader cannot either, and the screen needs a label.
+</Aside>
+
+<Aside type="caution" title="Mocks that remember the last test">
+Without `clearMocks: true`, a call from one test counts in the next. Tests that pass alone but fail together are a classic sign.
+</Aside>
+
+## Recap
+
+- Jest runs the tests: `describe`, `it`, `expect` and matchers. `npm test` runs them all.
+- RNTL renders components in memory. Find with `getBy…` (now), `findBy…` (wait) and `queryBy…` (may be missing); act with `fireEvent`.
+- `jest.mock('../src/api/paydeck')` replaces the API module; each test sets answers with `mockResolvedValue`.
+- `renderScreen` puts a screen inside the query client, the account and navigation, with `retry: false` and `gcTime: Infinity`.
+- `clearMocks: true` keeps tests from seeing each other's calls.
+
+<Quiz
+	questions={[
+		{
+			question: 'A test presses Pay, then checks for "Approved", and fails with "Unable to find an element". The app works. What is the most likely cause?',
+			options: ['The test used getByText for something that appears after a request; it should use findByText', 'RNTL cannot find text', 'The mock was not cleared'],
+			answer: 0,
+			explanation: 'findBy waits for the answer of the (mocked) request to arrive.',
+		},
+		{
+			question: 'What does jest.mock(\'../src/api/paydeck\') do?',
+			options: ['Starts a fake server', 'Replaces every function in that module with a mock that the test controls', 'Deletes the module'],
+			answer: 1,
+			explanation: 'The screen calls the same functions as always; they just answer what the test says.',
+		},
+		{
+			question: 'Which is the better way to find the amount input?',
+			options: ['By its style', 'By a testID', 'By its accessibility label, "Amount (USD)"'],
+			answer: 2,
+			explanation: 'That is how a person (and a screen reader) knows what the field is for.',
+		},
+	]}
+/>
+
+<MarkComplete />

@@ -126,7 +126,7 @@ describe('signing in', () => {
     await user.press(screen.getByRole('button', { name: 'Sign in' }));
     expect(
       await screen.findByText(
-        'Could not reach PayDeck. Check that the API is running.',
+        'Could not reach PayDeck. Check your internet connection and try again.',
       ),
     ).toBeOnTheScreen();
   });

@@ -89,7 +89,7 @@ async function send(
     throw new ApiError(
       0,
       'No connection',
-      'Could not reach PayDeck. Check that the API is running.',
+      'Could not reach PayDeck. Check your internet connection and try again.',
     );
   }
 }
@@ -103,12 +103,19 @@ async function read<T>(response: Response): Promise<T> {
     throw new ApiError(
       response.status,
       json?.title ?? 'Something went wrong',
-      json?.detail ?? `The server answered ${response.status}`,
+      json?.detail ?? fallbackMessage(response.status),
       json?.code,
       json?.fields,
     );
   }
   return json as T;
+}
+
+/** For answers without the API's own explanation, such as the proxy's 502 while the API restarts. */
+function fallbackMessage(status: number): string {
+  return status >= 500
+    ? 'PayDeck is not available right now. Try again in a minute.'
+    : `The server answered ${status}`;
 }
 
 /**
