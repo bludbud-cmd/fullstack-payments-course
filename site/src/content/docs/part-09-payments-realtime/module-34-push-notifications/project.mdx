@@ -1,0 +1,195 @@
+---
+title: "Mini-project: a notification for every payment and decline"
+description: "Add a \"Send me a test notification\" button that proves a phone is set up, then walk through every kind of event and check which phones hear about it, with the notification switches on and off."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Push has more moving parts than anything else in PayDeck: a Firebase project, a key file, a permission prompt, a token, two switches, and an API that decides who hears what. When a notification does not arrive, which part is to blame? This project adds the tool every real app has for that question, a **test notification**, and then uses it and the API's log to check every kind of event, end to end.
+
+## The tasks
+
+1. **The endpoint.** `POST /api/me/notifications/test` sends "PayDeck: Notifications work on this phone." to every phone of the signed-in person, whatever their switches say (they asked for it). It answers how many phones it reached, as `{"sent": 1}`, and deletes any phone Firebase says is gone.
+2. **A test** in `PushNotificationTest`: two phones, one of them gone. The first call reaches one phone and forgets the other; the second call does not try the gone phone again.
+3. **The button.** Under the switches on **You**: **Send me a test notification**, and below it "Sent to 1 phone." or, for zero, a sentence that says what to do.
+4. **The full check.** With the API's log open, make every kind of event happen and check who is notified (the table in the solution).
+5. Commit.
+
+<Exercise title="Build it">
+Do the five tasks.
+
+<Fragment slot="hint">The endpoint belongs in `DeviceController`, which needs `PushSender` in its constructor. It looks a lot like `LiveUpdates.notifyPhones`, but counts.</Fragment>
+<Fragment slot="hint2">For the button, a mutation with no input: `useMutation({ mutationFn: api.sendTestNotification })`. Its answer is in `test.data`.</Fragment>
+<Fragment slot="solution">
+
+### The endpoint
+
+In `DeviceController`, add `PushSender push` to the fields and constructor, a record:
+
+```java
+    public record TestNotificationResult(int sent) {
+    }
+```
+
+and the endpoint:
+
+```java
+    /** "Does this work?": one notification to each of your phones, whatever your settings say. */
+    @PostMapping("/api/me/notifications/test")
+    @Transactional
+    public TestNotificationResult sendTest(CurrentUser user) {
+        int sent = 0;
+        for (Device device : devices.findByUserId(user.id())) {
+            PushSender.Result result = push.send(device.getToken(), "PayDeck", "Notifications work on this phone.");
+            if (result == PushSender.Result.SENT) {
+                sent++;
+            } else if (result == PushSender.Result.TOKEN_GONE) {
+                devices.delete(device);
+            }
+        }
+        return new TestNotificationResult(sent);
+    }
+```
+
+Only `SENT` counts. A phone whose token is gone is deleted, and a failure (Firebase down, wrong key) is simply not counted, so "Sent to 0 phones" with a phone registered points at the server's setup, and the API's log says what went wrong (lesson 34.4).
+
+### The test
+
+In `PushNotificationTest`:
+
+```java
+    @Test
+    void aTestNotificationGoesToEveryPhoneThatStillWorks() throws Exception {
+        TestUser asha = register("Asha");
+        String phone = "phone-" + UUID.randomUUID();
+        String oldPhone = "old-" + UUID.randomUUID();
+        when(push.send(eq(phone), anyString(), anyString())).thenReturn(PushSender.Result.SENT);
+        when(push.send(eq(oldPhone), anyString(), anyString())).thenReturn(PushSender.Result.TOKEN_GONE);
+        registerPhone(asha, phone);
+        registerPhone(asha, oldPhone);
+
+        mvc.perform(post("/api/me/notifications/test").with(as(asha)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sent").value(1));
+        mvc.perform(post("/api/me/notifications/test").with(as(asha)))
+                .andExpect(jsonPath("$.sent").value(1));
+
+        verify(push, Mockito.times(2)).send(eq(phone), eq("PayDeck"), eq("Notifications work on this phone."));
+        verify(push, Mockito.times(1)).send(eq(oldPhone), anyString(), anyString());
+    }
+```
+
+```
+[INFO] Tests run: 6, Failures: 0, Errors: 0, Skipped: 0
+```
+
+The whole API suite now has 117 tests, all passing.
+
+### The button
+
+`src/api/paydeck.ts`:
+
+```ts
+/** One notification to each of your phones. Answers how many it reached. */
+export const sendTestNotification = () =>
+  request<{ sent: number }>('/api/me/notifications/test', { method: 'POST' });
+```
+
+`src/api/hooks.ts`:
+
+```ts
+export function useSendTestNotification() {
+  return useMutation({ mutationFn: api.sendTestNotification });
+}
+```
+
+In `NotificationSwitches`, `const test = useSendTestNotification();` next to `save`, and below the error text:
+
+```tsx
+      <Button title="Send me a test notification" variant="secondary" onPress={() => test.mutate()} />
+      {test.data !== undefined && (
+        <Text style={styles.muted}>
+          {test.data.sent === 0
+            ? 'No phone is set up for notifications yet. On Android, allow notifications when PayDeck asks.'
+            : `Sent to ${test.data.sent} ${test.data.sent === 1 ? 'phone' : 'phones'}.`}
+        </Text>
+      )}
+      {test.error && <Text style={styles.error}>{test.error.message}</Text>}
+```
+
+### Try it
+
+With the API running without a Firebase key, and the phones from lesson 34.3 registered:
+
+```sh
+curl -s -X POST localhost:8080/api/me/notifications/test -H "Authorization: Bearer $ASHA"
+```
+
+```json
+{"sent":1}
+```
+
+```
+dev.paydeck.api.push.PushConfig          : Push (not sent, Firebase is not set up): PayDeck: Notifications work on this phone.
+```
+
+(The log-only sender counts as sent: it did everything it was asked.) In the app, a test pressed the button as three people: Asha and Eve, who each have one registered phone, and Mo, a new customer who has none:
+
+```
+asha@example.com -> Sent to 1 phone.
+eve.moreau@gmail.com -> Sent to 1 phone.
+mo@example.com -> No phone is set up for notifications yet. On Android, allow notifications when PayDeck asks.
+```
+
+With Firebase set up (lesson 34.4) and the emulator signed in, put PayDeck in the background and press the button from the Mac app as the same person: the emulator shows the notification.
+
+### The full check
+
+With both switches on, Asha's and Eve's phones registered, and Eve holding the "For Eve" card on Asha's account, this is what the API's log showed for each event in lessons 34.4 and 34.5:
+
+| Event | Asha's phone | Eve's phone |
+|---|---|---|
+| Asha tops up $10.00 | Money added | |
+| Eve pays $4.50 at Bakery with "For Eve" | You paid Bakery | You paid Bakery |
+| Groceries declined, $75.00 at Gadget Shop | Payment declined | |
+| Asha freezes and unfreezes Groceries | | |
+| "Money in and out" off; Groceries pays $12.50 | | |
+| "Money in and out" off; Groceries declined, $89.99 | Payment declined | |
+
+Every row matches a rule: the owner hears about her account, the cardholder about her card, card changes stay quiet, and each switch silences exactly its kind.
+
+Commit both projects.
+</Fragment>
+</Exercise>
+
+<Exercise title="Refunds reach the cardholder">
+Support refunds Eve's $4.50 bakery payment (lesson 32.3). Predict which phones are notified and what they say, then check with the log. Is the wording right for both people?
+
+<Fragment slot="hint">A refund event carries the card's ID, like the payment it refunds. Read the event's body in `CardPaymentService.refund`.</Fragment>
+<Fragment slot="solution">
+
+Both phones, because the refund event names the card, and `LiveUpdates` adds the card's holder to the people involved. The log:
+
+```
+dev.paydeck.api.push.PushConfig          : Push (not sent, Firebase is not set up): Refund from Bakery: $4.50 is back in your wallet
+dev.paydeck.api.push.PushConfig          : Push (not sent, Firebase is not set up): Refund from Bakery: $4.50 is back in your wallet
+```
+
+Telling Eve is right: she made the payment. But "back in **your** wallet" is only true for Asha. Eve has no wallet on that account; the money went back to Asha's. The same sentence goes to everyone because `AccountEvent` has one body. A fix: give `AccountEvent` an optional second body for the cardholder (`"$4.50 went back to the card's account"`), and let `LiveUpdates` choose by person, as it already chooses the topic and `withoutBalance()`. Write the test first: it should check what Eve's phone is sent.
+</Fragment>
+</Exercise>
+
+## What to notice
+
+- **Make the invisible testable.** Push fails silently by design. A button that reports "Sent to 1 phone" splits the problem in two: the phone and Firebase, or the server.
+- **The server decides, every time.** Who hears what is decided in one method, `LiveUpdates.deliver`, from the person's settings. The phone only shows what it is sent.
+- **Optional by design.** Without Firebase, without permission, or on the Mac, PayDeck loses nothing but the buzz: the live feed and the Activity list still tell the whole story.
+
+Part 10 tests the app as a whole and puts PayDeck on the internet.
+
+<MarkComplete />

@@ -1,0 +1,254 @@
+---
+title: "31.2 Stripe test mode"
+description: "Create a free Stripe account, find your test-mode secret key, keep it out of your code, learn the test card numbers, install the Stripe CLI, and try Stripe's API with curl, either against your test account or against Stripe's official offline mock."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you have a Stripe account in test mode, its secret key in an environment variable (not in your code), the Stripe CLI on your Mac, and you have made your first call to Stripe's API with `curl`.
+
+## Why it matters
+
+You cannot learn payments with real money: every mistake would cost something, and you would need a registered business. **Test mode** is a complete copy of Stripe in which nothing is real. Pretend cards are charged, pretend money moves, and Stripe sends the same messages it sends for real payments. When PayDeck is ready for real customers, only the keys change.
+
+## The idea
+
+### Test mode and live mode
+
+Every Stripe account has two separate worlds:
+
+- **Test mode**: fake cards, fake money, no business details needed. Everything in this course happens here.
+- **Live mode**: real cards and real money. Stripe only switches it on after you give it your business's details and bank account.
+
+They never mix. Data made in test mode is invisible in live mode, and a test key cannot charge a real card.
+
+### API keys
+
+Stripe gives you two kinds of key for each mode:
+
+| Key | Starts with | Where it may go |
+|---|---|---|
+| Publishable key | `pk_test_` | In apps and web pages. It can only start a payment, not see or move money. |
+| Secret key | `sk_test_` (`sk_live_` in live mode) | **Only on your server.** It can do anything with your Stripe account. |
+
+PayDeck's API uses only the **secret key**: the app never talks to Stripe directly, it asks PayDeck's API, which asks Stripe. So the app needs no Stripe key at all.
+
+A secret key is a password to your money. It follows the rules from lesson 30.7: an environment variable, never in Git, never in the app.
+
+### Test cards
+
+In test mode, Stripe's payment page accepts special card numbers. Use any future expiry date, any three-digit security code, and any postcode:
+
+| Card number | What happens |
+|---|---|
+| `4242 4242 4242 4242` | The payment succeeds. |
+| `4000 0000 0000 0002` | The bank declines it. |
+| `4000 0000 0000 9995` | Declined: insufficient funds. |
+| `4000 0025 0000 3155` | The bank asks for 3D Secure (lesson 31.1); a test page lets you approve or fail it. |
+
+Stripe's documentation lists many more, for every situation you might want to try.
+
+### The Stripe CLI
+
+The **Stripe CLI** is a command-line tool from Stripe. You will use it in lesson 31.4 to pass Stripe's messages (webhooks) on to the PayDeck API running on your Mac, which Stripe's servers cannot reach directly.
+
+### stripe-mock: Stripe without an account
+
+Stripe also publishes **stripe-mock**, a small program that answers like Stripe's API but runs on your own computer, with no account and no internet. It checks that your requests are shaped correctly and answers with made-up, correctly shaped data. It never charges anything, it does not remember what you created, and it never sends webhooks. It is handy for trying requests, and for when you cannot reach Stripe, but the real test is always your test-mode account.
+
+<Aside type="note" title="About the outputs in this module">
+The Stripe outputs shown in this module come from **stripe-mock**, because the computer used to check these lessons cannot reach Stripe. They are real outputs of real requests, but the IDs and URLs are the mock's made-up values. With your own test-mode key you will see the same shapes, with your own values.
+</Aside>
+
+## Worked example
+
+### 1. A Stripe account
+
+1. Go to [stripe.com](https://stripe.com) and create an account with your email. It is free.
+2. You can skip "activate payments" and every question about your business: test mode works without them.
+3. In the Dashboard, make sure you are in **test mode** (Stripe shows a clear "Test mode" or sandbox label).
+4. Open **Developers → API keys**. Reveal the **Secret key**, which starts with `sk_test_`, and copy it.
+
+### 2. Keep the key out of your code
+
+In the terminal where you start the API, put the key in an environment variable:
+
+```sh
+export STRIPE_SECRET_KEY=sk_test_...your key...
+```
+
+Paste your own key in place of `sk_test_...your key...`. The variable lasts until you close that terminal window. To avoid pasting it every time, keep it in a file that Git ignores, as in lesson 30.7, and load it before starting the API.
+
+The API reads it through `application.yml`. Add a `stripe` group under `paydeck:`:
+
+```yaml
+  stripe:
+    # Test-mode keys from https://dashboard.stripe.com/test/apikeys. Leave empty to switch card top-ups off.
+    secret-key: ${STRIPE_SECRET_KEY:}
+    webhook-secret: ${STRIPE_WEBHOOK_SECRET:}
+    public-base-url: ${PAYDECK_PUBLIC_BASE_URL:http://localhost:8080}
+    app-return-url: ${PAYDECK_APP_TOP_UP_RETURN_URL:paydeck://top-up}
+    # Only change this to try PayDeck against stripe-mock instead of Stripe's test mode.
+    api-base-url: ${STRIPE_API_BASE_URL:https://api.stripe.com}
+```
+
+`${STRIPE_SECRET_KEY:}` means "the environment variable, or empty if it is not set" (lesson 21.4). Empty is a deliberate choice: an API without a key still starts, and card top-ups simply say they are switched off. The other settings are explained in lessons 31.3 and 31.4.
+
+Now a record that holds them, in a new package `dev.paydeck.api.stripe`, `StripeProperties.java`:
+
+```java
+package dev.paydeck.api.stripe;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+
+/**
+ * The {@code paydeck.stripe.*} settings. Use test-mode keys (sk_test_…) from
+ * the Stripe dashboard: no real money ever moves.
+ *
+ * @param secretKey      Stripe's secret API key. Empty switches Stripe off.
+ * @param webhookSecret  The signing secret of the webhook endpoint (whsec_…).
+ * @param publicBaseUrl  Where this API can be reached from a browser, for Stripe's return links.
+ * @param appReturnUrl   The app link people are sent to after paying.
+ * @param apiBaseUrl     Where Stripe's API lives: https://api.stripe.com, or a stripe-mock on your Mac.
+ */
+@ConfigurationProperties("paydeck.stripe")
+public record StripeProperties(String secretKey, String webhookSecret, String publicBaseUrl, String appReturnUrl,
+                               String apiBaseUrl) {
+
+    public boolean isEnabled() {
+        return secretKey != null && !secretKey.isBlank();
+    }
+}
+```
+
+This is the same pattern as `AuthProperties` and lesson 21.4: `@ConfigurationPropertiesScan` on `PayDeckApplication` finds the record, and Spring fills `secretKey` from `paydeck.stripe.secret-key`.
+
+### 3. The Stripe CLI
+
+```sh
+brew install stripe/stripe-cli/stripe
+stripe login
+```
+
+`stripe login` opens your browser and asks you to allow the CLI to use your account. It saves its own key on your Mac, separate from the secret key above.
+
+### 4. Your first call to Stripe
+
+Stripe's API takes **form fields**, like an HTML form, rather than JSON. `-u` sends the secret key as the username of a basic login, which is how Stripe expects it with `curl` (the colon after the key means "no password"). Create a **Checkout Session**, a payment page for $25.00, which lesson 31.3 explains:
+
+```sh
+curl -s https://api.stripe.com/v1/checkout/sessions -u "$STRIPE_SECRET_KEY:" \
+  -d mode=payment \
+  -d "line_items[0][quantity]=1" \
+  -d "line_items[0][price_data][currency]=usd" \
+  -d "line_items[0][price_data][unit_amount]=2500" \
+  -d "line_items[0][price_data][product_data][name]=PayDeck wallet top-up" \
+  -d "success_url=http://localhost:8080/payments/return?result=success" \
+  | jq '{id, url, amount_total, currency, payment_status, status, mode}'
+```
+
+Square brackets in field names are how Stripe writes nested data in a form: `line_items[0][price_data][currency]` is the currency of the first line item's price. `jq` picks out the interesting fields of a long answer.
+
+With your test key you get an ID starting `cs_test_`, a `url` on `checkout.stripe.com` that you can open in your browser and pay with `4242 4242 4242 4242`, and `"amount_total": 2500`. Open the Dashboard's **Payments** page afterwards: the test payment is there.
+
+### Or: the same call against stripe-mock
+
+Without an account, start the mock in Docker and point the same request at it:
+
+```sh
+docker run --rm -d --name stripe-mock -p 12111:12111 -p 12112:12112 stripe/stripe-mock:latest
+curl -s localhost:12111/v1/checkout/sessions -u sk_test_123: \
+  -d mode=payment \
+  -d "line_items[0][quantity]=1" \
+  -d "line_items[0][price_data][currency]=usd" \
+  -d "line_items[0][price_data][unit_amount]=2500" \
+  -d "line_items[0][price_data][product_data][name]=PayDeck wallet top-up" \
+  -d "success_url=http://localhost:8080/payments/return?result=success" \
+  | jq '{id, url, amount_total, currency, payment_status, status, mode}'
+```
+
+stripe-mock listens for plain HTTP on port 12111 and accepts any key that looks like a test key. Its answer (a real stripe-mock output):
+
+```json
+{
+  "id": "cs_test_ReEIfkxfqiiH2gs",
+  "url": "https://checkout.stripe.com/pay/c/cs_test_a1YS1URlnyQCN5fUUduORoQ7Pw41PJqDWkIVQCpJPqkfIhd6tVY8XB1OLY",
+  "amount_total": null,
+  "currency": null,
+  "payment_status": "unpaid",
+  "status": "open",
+  "mode": "payment"
+}
+```
+
+The shape is right (an ID, a URL, the status fields), but the details are the mock's fixed sample data: `amount_total` is `null` instead of `2500`, and the URL is not a page you can pay on. That is the mock's limit. Stop it with `docker stop stripe-mock` when you are done.
+
+<Exercise title="Break the request on purpose">
+Send the request again, but leave out the `mode` field. Then try it with a made-up key, `-u sk_test_wrong:`. What does Stripe (or stripe-mock) answer, and what HTTP status? Why is it good that Stripe answers this way instead of guessing?
+
+<Fragment slot="hint">Add `-i` to `curl` (and remove the `| jq ...` part) to see the status line.</Fragment>
+<Fragment slot="solution">
+
+With your test key, real Stripe answers `400` without `mode`, with an `error` object whose `message` names the missing parameter, and `401` for a made-up key, with an error saying the API key is invalid.
+
+stripe-mock is less strict, which shows its limits. It answers `200` even without `mode`, and it accepts any key that looks like a test key, so `sk_test_wrong` passes too. Only a key that does not look like a test key at all is refused. With `-u wrongkey:`:
+
+```
+HTTP/1.1 401 Unauthorized
+    "message": "Please authenticate by specifying an `Authorization` header with any valid looking testmode secret API key. For example, `Authorization: Bearer sk_test_123`. Authorization was 'Basic d3JvbmdrZXk6'.",
+```
+
+Refusing loudly is the right behaviour for anything that moves money. A guess (for example, "no mode, so probably a payment") could charge someone in a way nobody intended. It is the same reason PayDeck's own API answers `400` for invalid requests rather than doing its best.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="danger" title="Committing the secret key">
+`sk_test_` keys cannot charge real cards, but they can read and change everything in your test account, and the habit carries over to `sk_live_` keys, which can. If a key ever reaches Git, roll it in the Dashboard (**Developers → API keys**) at once, then remove it from the code.
+</Aside>
+
+<Aside type="caution" title="Putting the secret key in the app">
+Anything inside an app can be read by whoever installs it. The app asks PayDeck's API; only the API holds the key.
+</Aside>
+
+<Aside type="caution" title="Using a real card in test mode">
+It does not work, and it should not be tried: test mode only accepts test card numbers. Never type a real card number into anything you are building.
+</Aside>
+
+## Recap
+
+- Stripe has **test mode** (fake cards, fake money) and **live mode**, completely separate. This course uses test mode only.
+- The **secret key** (`sk_test_…`) lives only on the server, in an environment variable; `StripeProperties` reads it, and an empty key switches card top-ups off.
+- `4242 4242 4242 4242` succeeds, `4000 0000 0000 0002` is declined, and there is a test card for every situation.
+- Stripe's API takes form fields with square brackets for nested values. **stripe-mock** answers like Stripe offline, with sample data and no webhooks.
+
+<Quiz
+	questions={[
+		{
+			question: 'Which Stripe key does the PayDeck app on the phone need?',
+			options: ['The secret key', 'The publishable key', 'None: the app asks PayDeck\'s API, which holds the secret key'],
+			answer: 2,
+			explanation: 'In this design the app never talks to Stripe directly, so it needs no key at all.',
+		},
+		{
+			question: 'You want to see a declined card in test mode. Which number do you use?',
+			options: ['4242 4242 4242 4242', '4000 0000 0000 0002', 'Your own card'],
+			answer: 1,
+			explanation: '4242… succeeds; 4000 0000 0000 0002 is a generic decline. Never use a real card.',
+		},
+		{
+			question: 'What does stripe-mock NOT do?',
+			options: ['Answer requests in Stripe\'s format', 'Send webhooks or remember what you created', 'Run offline'],
+			answer: 1,
+			explanation: 'It is a stateless mock of the API. Webhooks need real test mode, or your own signed test events (lesson 31.4).',
+		},
+	]}
+/>
+
+<MarkComplete />

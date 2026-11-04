@@ -1,0 +1,363 @@
+---
+title: "34.2 Firebase Cloud Messaging for Android"
+description: "Create a Firebase project, add PayDeck's Android app to it, install React Native Firebase, and write the app code that asks for permission, gets a device token from FCM, and hands it to the API."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson PayDeck's Android app is connected to your own Firebase project, asks to show notifications after sign-in, and gets a device token from Firebase Cloud Messaging.
+
+## Why it matters
+
+Lesson 34.1 described the chain: permission, token, API, push service, phone. This lesson builds the first two links on the phone. Without a token, the API has nowhere to send anything.
+
+## The idea
+
+### Firebase
+
+**Firebase** is Google's set of services for apps. PayDeck uses one of them, **Cloud Messaging**. Firebase needs to know your app, so that only your server can send to it:
+
+- In the **Firebase console**, you create a **project** and add an **Android app** to it with PayDeck's package name, `com.paydeck` (from `applicationId` in `android/app/build.gradle`).
+- Firebase gives you a file, `google-services.json`, that tells the app which project it belongs to. It goes in `android/app/`.
+- A Gradle plugin from Google reads that file when the app is built.
+
+`google-services.json` contains identifiers, not secrets that let anyone send notifications, but each learner has their own, so PayDeck keeps it out of Git (lesson 30.7). The secret part, the key that lets a *server* send, comes in lesson 34.4.
+
+### React Native Firebase
+
+`@react-native-firebase/app` and `@react-native-firebase/messaging` are the React Native packages for Firebase. They give JavaScript three functions PayDeck needs:
+
+- `getMessaging()`: the messaging service of the app's Firebase project.
+- `getToken(messaging)`: this phone's device token.
+- `onTokenRefresh(messaging, callback)`: tells you when Firebase replaces the token.
+
+### Only on Android, only when set up
+
+PayDeck also runs on the Mac, where Firebase messaging does not exist, and a learner may not have created a Firebase project yet. Neither should break the app. So all of the push code sits in one file, `src/push/push.ts`, which does nothing unless it is on Android **and** Firebase is set up.
+
+## Worked example
+
+### 1. Create the Firebase project
+
+1. Open [console.firebase.google.com](https://console.firebase.google.com) and sign in with a Google account.
+2. **Create a project**. Call it `paydeck-yourname` (project names are shared by everyone, so add something of your own). Google Analytics is not needed: turn it off.
+3. In the project, choose **Add app**, then the **Android** icon.
+4. **Android package name:** `com.paydeck`. The nickname can be "PayDeck". Leave the SHA-1 field empty. Click **Register app**.
+5. Click **Download google-services.json**, and move the file into your app's `android/app/` folder.
+6. Skip the remaining steps of the wizard: the next sections do them, the React Native way.
+
+Add the file to `.gitignore`, so it stays on your Mac:
+
+```gitignore
+# Each learner's own Firebase project (Module 34)
+android/app/google-services.json
+```
+
+### 2. Install the packages
+
+```sh
+npm install @react-native-firebase/app @react-native-firebase/messaging
+```
+
+Then teach Gradle about `google-services.json`. In `android/build.gradle`, add one line to `dependencies` inside `buildscript`:
+
+```groovy
+    dependencies {
+        classpath("com.android.tools.build:gradle")
+        classpath("com.facebook.react:react-native-gradle-plugin")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin")
+        // Reads google-services.json for Firebase push notifications (Module 34).
+        classpath("com.google.gms:google-services:4.4.2")
+    }
+```
+
+And at the very end of `android/app/build.gradle`:
+
+```groovy
+// Push notifications (Module 34) need your own google-services.json from the
+// Firebase console. Without it the app still builds, with push turned off.
+if (file("google-services.json").exists()) {
+    apply plugin: "com.google.gms.google-services"
+}
+```
+
+The `if` is so that a classmate who has not made a Firebase project yet can still build the app.
+
+### 3. Permission
+
+In `android/app/src/main/AndroidManifest.xml`, next to the `INTERNET` permission that is already there:
+
+```xml
+    <!-- Android 13 and newer: needed to show push notifications. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+```
+
+A manifest permission only says that the app *may* ask. Android 13 and newer still shows the person a prompt, and the code below asks at the right moment.
+
+### 4. The app code
+
+The API calls for lesson 34.3 go in `src/api/paydeck.ts`, next to the others:
+
+```ts
+/** Tells the API where to send this person's push notifications. Safe to repeat. */
+export const registerDevice = (token: string) =>
+  request<void>('/api/devices', { method: 'POST', body: { platform: 'ANDROID', token } });
+
+/** This phone should stop getting this person's notifications. */
+export const unregisterDevice = (token: string) =>
+  request<void>('/api/devices/unregister', { method: 'POST', body: { token } });
+```
+
+Create `src/push/push.ts`:
+
+```ts
+import { PermissionsAndroid, Platform } from 'react-native';
+import { registerDevice, unregisterDevice } from '../api/paydeck';
+
+/**
+ * Push notifications on Android, through Firebase Cloud Messaging (FCM).
+ *
+ * Firebase needs android/app/google-services.json from your own Firebase
+ * project. Without it, and on the Mac, push stays off and the live banner
+ * (src/live) still tells people what happened while the app is open.
+ */
+let registeredToken: string | null = null;
+let stopListening: (() => void) | null = null;
+
+/** Loads Firebase only on Android, and only if it is set up. */
+function firebase() {
+  if (Platform.OS !== 'android') {
+    return null;
+  }
+  try {
+    const fcm = require('@react-native-firebase/messaging');
+    return { ...fcm, messaging: fcm.getMessaging() };
+  } catch {
+    return null; // No google-services.json: Firebase has no app to use.
+  }
+}
+
+/** Asks to show notifications, then tells the API where to send them. */
+export async function startPush(): Promise<boolean> {
+  const fcm = firebase();
+  if (!fcm) {
+    return false;
+  }
+  // Android 13 and newer asks the person first.
+  if (Number(Platform.Version) >= 33) {
+    const answer = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
+    if (answer !== PermissionsAndroid.RESULTS.GRANTED) {
+      return false;
+    }
+  }
+  try {
+    const token: string = await fcm.getToken(fcm.messaging);
+    await registerDevice(token);
+    registeredToken = token;
+    // Firebase can swap the token at any time; the API needs the new one.
+    // (Stop any earlier listener first: this runs again when you switch accounts.)
+    stopListening?.();
+    stopListening = fcm.onTokenRefresh(fcm.messaging, (fresh: string) => {
+      registeredToken = fresh;
+      registerDevice(fresh).catch(() => {});
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** On sign-out: this phone should stop getting this person's notifications. */
+export async function stopPush() {
+  stopListening?.();
+  stopListening = null;
+  const token = registeredToken;
+  registeredToken = null;
+  if (token) {
+    await unregisterDevice(token).catch(() => {});
+  }
+}
+```
+
+- **`require` inside a function** loads the Firebase package only when it is needed, on Android. A plain `import` at the top would load it on the Mac too.
+- **`try … catch` around it**: without `google-services.json`, Firebase has no project, and `getMessaging()` throws. That is not an error for PayDeck: push is simply off.
+- **`Platform.Version`** is Android's API level. 33 is Android 13, the first version that asks.
+- **`registeredToken`** remembers which token this phone registered, so that `stopPush` can tell the API to forget it.
+
+### 5. When to start, and when to stop
+
+Start after sign-in, when PayDeck knows who the notifications are for. `LiveUpdates` (lesson 33.3) already runs exactly then, so add one call at the top of its effect, after the `userId` check:
+
+```tsx
+    // Android: notifications for when the app is closed. Does nothing on the Mac.
+    startPush();
+```
+
+And stop when signing out, *before* the tokens are forgotten, because unregistering is an API call that needs the access token. In `src/auth/AuthContext.tsx`, import `stopPush` and make it the first step of `signOut`:
+
+```tsx
+    signOut: async () => {
+      // While still signed in: stop sending notifications to this phone.
+      await stopPush();
+```
+
+and in `signOutEverywhere`, after the API call and before `forget()`:
+
+```tsx
+      await authApi.signOutEverywhere(); // If this fails, stay signed in and show why.
+      await stopPush();
+      await forget();
+```
+
+### 6. Test it without a phone
+
+Firebase's native side does not exist in Jest, so play it in `jest.setup.js`. Every "phone" gets the same token:
+
+```js
+// Firebase (push notifications) has no native side in tests. Every phone gets the same token.
+jest.mock('@react-native-firebase/messaging', () => ({
+  getMessaging: jest.fn(() => ({})),
+  getToken: jest.fn(async () => 'test-phone-token'),
+  onTokenRefresh: jest.fn(() => jest.fn()),
+}));
+```
+
+Then `__tests__/push.test.ts` pretends to be Android 14, signs in as Asha against your running API, and looks in the database (the API side is lesson 34.3; come back to this test after it):
+
+```ts
+import { execFileSync } from 'child_process';
+import { PermissionsAndroid, Platform } from 'react-native';
+import { login } from '../src/api/auth';
+import { setTokenSource } from '../src/api/client';
+import { startPush, stopPush } from '../src/push/push';
+
+// Runs against your API on localhost:8080, like the other live tests.
+const devices = () =>
+  execFileSync('docker', ['exec', 'paydeck-api-postgres-1', 'psql', '-U', 'paydeck', '-d', 'paydeck', '-tAc',
+    "SELECT u.email || ' ' || d.token FROM devices d JOIN users u ON u.id = d.user_id WHERE d.token = 'test-phone-token'"]).toString().trim();
+
+beforeEach(async () => {
+  const { accessToken } = await login('asha@example.com', 'correct horse battery');
+  setTokenSource({ accessToken: () => accessToken, refresh: async () => false });
+  jest.replaceProperty(Platform, 'OS', 'android');
+  jest.spyOn(Platform, 'Version', 'get').mockReturnValue(34);
+});
+
+afterEach(() => {
+  setTokenSource(null);
+  jest.restoreAllMocks();
+});
+
+it('asks first, registers the phone, and forgets it on sign-out', async () => {
+  const ask = jest.spyOn(PermissionsAndroid, 'request').mockResolvedValue(PermissionsAndroid.RESULTS.GRANTED);
+
+  expect(await startPush()).toBe(true);
+  expect(ask).toHaveBeenCalledWith(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
+  console.log('AFTER START', devices());
+
+  await stopPush();
+  console.log('AFTER STOP', devices() || '(none)');
+});
+
+it('stays off when the person says no', async () => {
+  jest.spyOn(PermissionsAndroid, 'request').mockResolvedValue(PermissionsAndroid.RESULTS.DENIED);
+  expect(await startPush()).toBe(false);
+  expect(devices()).toBe('');
+});
+
+it('stays off on the Mac', async () => {
+  jest.replaceProperty(Platform, 'OS', 'macos');
+  expect(await startPush()).toBe(false);
+});
+```
+
+```
+AFTER START asha@example.com test-phone-token
+AFTER STOP (none)
+  ✓ asks first, registers the phone, and forgets it on sign-out (961 ms)
+  ✓ stays off when the person says no (213 ms)
+  ✓ stays off on the Mac (111 ms)
+```
+
+### 7. On the emulator
+
+With `google-services.json` in place, run `npm run android`. FCM needs Google Play services on the phone; the **Google APIs** system image from lesson 11.1 has them. Sign in as Asha: Android asks **"Allow PayDeck to send you notifications?"**. Allow it. Lesson 34.3 checks that the token reached the API, and lesson 34.4 sends the first notification.
+
+<Aside type="note" title="What the course checked">
+The course's own checks ran the code above in tests, with Firebase played by the mock, because its build machines have no Android phone signed in to Google. The Firebase console steps follow Firebase's own guide; if a screen looks different when you do it, the [React Native Firebase documentation](https://rnfirebase.io) and the Firebase console's own help have the current steps.
+</Aside>
+
+<Exercise title="Ask again, politely">
+If Asha says no to the prompt, `startPush` returns `false`, and PayDeck never asks again. On the **You** screen, add a line for Android only: "Notifications are off. You can turn them on in Settings → Apps → PayDeck → Notifications." How do you know whether to show it?
+
+<Fragment slot="hint">`PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS)` answers `true` or `false` without asking.</Fragment>
+<Fragment slot="solution">
+
+In `ProfileScreen`, a small hook:
+
+```tsx
+function useNotificationsAllowed() {
+  const [allowed, setAllowed] = useState(true);
+  useEffect(() => {
+    if (Platform.OS === 'android' && Number(Platform.Version) >= 33) {
+      PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS).then(setAllowed);
+    }
+  }, []);
+  return allowed;
+}
+```
+
+and `{!allowed && <Text>Notifications are off. …</Text>}`. Android does not let an app show the prompt again after the person has said no twice, so pointing to Settings is the only honest option. (`Linking.openSettings()` opens PayDeck's settings page directly, which makes a nice button.)
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Committing google-services.json">
+It is not a password, but it is yours, and a classmate who pulls your repository would send their tokens to your project. Keep it in `.gitignore`.
+</Aside>
+
+<Aside type="caution" title="An emulator without Google Play services">
+On a plain Android image, `getToken` fails and push stays off. Use a **Google APIs** or **Google Play** image.
+</Aside>
+
+<Aside type="caution" title="Unregistering after signing out">
+`unregisterDevice` needs the access token. Call `stopPush` first, then forget the tokens; the other way round, the API answers `401` and the phone keeps getting the previous person's notifications.
+</Aside>
+
+## Recap
+
+- A Firebase project, an Android app in it with package name `com.paydeck`, and `google-services.json` in `android/app/` (not in Git).
+- The `google-services` Gradle plugin, applied only when the file exists, and the `POST_NOTIFICATIONS` permission in the manifest.
+- `src/push/push.ts` asks for permission on Android 13+, gets the token with `getToken`, registers it, and follows `onTokenRefresh`. On the Mac, or without Firebase, it does nothing.
+- `startPush` runs after sign-in; `stopPush` runs first thing on sign-out.
+
+<Quiz
+	questions={[
+		{
+			question: 'What does google-services.json tell the app?',
+			options: ['The server key for sending notifications', 'Which Firebase project it belongs to', 'The person\'s device token'],
+			answer: 1,
+			explanation: 'The key for sending is the server\'s, and comes in lesson 34.4. The token comes from FCM at run time.',
+		},
+		{
+			question: 'Why does push.ts load Firebase with require inside a try block?',
+			options: ['So the Mac and apps without Firebase set up keep working, with push off', 'Because import is not allowed in React Native', 'To make the app start faster on Android'],
+			answer: 0,
+			explanation: 'Push is an extra. Missing it must never break signing in or paying.',
+		},
+		{
+			question: 'When does PayDeck call stopPush?',
+			options: ['When the app goes to the background', 'At the start of signing out, while the access token still works', 'Never; the API forgets tokens on its own'],
+			answer: 1,
+			explanation: 'Unregistering is an API call, and it needs the person to still be signed in.',
+		},
+	]}
+/>
+
+<MarkComplete />

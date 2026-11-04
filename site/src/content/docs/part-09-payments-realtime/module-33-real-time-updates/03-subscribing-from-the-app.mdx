@@ -1,0 +1,470 @@
+---
+title: "33.3 Subscribing from the app"
+description: "Give PayDeck's app a small STOMP client: write and read frames, connect with the access token, subscribe to the account's topic and the person's own topic, and refresh every screen with a banner when a message arrives."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson PayDeck's app keeps a WebSocket open while someone is signed in, and when money moves anywhere (another device, a shop, Stripe), every screen refreshes and a banner says what happened.
+
+## Why it matters
+
+Lesson 33.2 gave the API a live feed, and a terminal script proved it works. Now the feed has to reach the person it is for. Asha should not have to know that a feed exists: she opens PayDeck, and when Eve pays at the bakery, Asha's balance changes in front of her.
+
+## The idea
+
+### A small client of our own
+
+There are STOMP libraries for JavaScript, but PayDeck needs only four commands, and lesson 33.2 already showed in `watch.mjs` that a frame is just text: a command, `name:value` header lines, a blank line, a body and a NULL character (`\0`). A file of about a hundred lines does the job, and you can read every line of it. It has three parts:
+
+- `encodeFrame` and `decodeFrame`: turn a frame into text and back. These are plain functions, so they are easy to test.
+- `connectStomp`: opens the WebSocket, sends `CONNECT` with the token, subscribes once the server says `CONNECTED`, and hands each `MESSAGE` body to the caller.
+- A way to stop: `connectStomp` returns a function that closes the connection for good.
+
+### One connection for the whole app
+
+The connection belongs to the signed-in person, not to a screen. So a component called `LiveUpdates` wraps the whole navigator, inside `AccountGate` (lesson 28.3). It opens the connection in a `useEffect` when it knows who is signed in, and its clean-up function closes it again on sign-out.
+
+### The message says "go and look"
+
+Lesson 33.1 warned against trusting the live message instead of the API. So when a message arrives, the app does two things:
+
+1. `queryClient.invalidateQueries()`: every query is marked stale, and the screens on display fetch again (lesson 26.3). The balance and the activity list come from the API, as always.
+2. It shows the message's `title` and `body` in a banner for five seconds.
+
+If a message is ever lost, the next fetch still shows the truth.
+
+### Which topics?
+
+From lesson 33.2: the account's topic, `/topic/accounts/{accountId}`, and the person's own topic, `/topic/users/{userId}`, for cards someone else gave them. The app knows the account from `useAccountId()` and the user ID from `GET /api/me` (`useMe()`, Module 28).
+
+## Worked example
+
+### Frames
+
+Create `src/live/stomp.ts`:
+
+```ts
+/**
+ * A very small STOMP client. STOMP is a text protocol that runs on top of a
+ * WebSocket: each message (a "frame") is a command, some "name:value" header
+ * lines, a blank line, a body, and a NULL character to finish.
+ *
+ *   SUBSCRIBE
+ *   id:sub-0
+ *   destination:/topic/accounts/1234
+ *
+ *   ^@
+ *
+ * PayDeck only needs four commands: CONNECT and SUBSCRIBE going out,
+ * CONNECTED and MESSAGE (or ERROR) coming back.
+ */
+export type Frame = {
+  command: string;
+  headers: Record<string, string>;
+  body: string;
+};
+
+export function encodeFrame(command: string, headers: Record<string, string>, body = ''): Uint8Array {
+  const lines = Object.entries(headers).map(([name, value]) => `${name}:${value}`);
+  const text = [command, ...lines, '', body].join('\n') + '\0';
+  // Sent as bytes, because React Native's WebSocket drops the NULL from text
+  // messages. Every frame PayDeck sends is plain ASCII: one letter, one byte.
+  return Uint8Array.from(text, (letter) => letter.charCodeAt(0));
+}
+
+/** Reads one frame. Returns null for a heartbeat (an empty line). */
+export function decodeFrame(data: string): Frame | null {
+  const text = data.replace(/\0$/, '').replace(/^[\r\n]+/, '');
+  if (text === '') {
+    return null;
+  }
+  const blankLine = text.indexOf('\n\n');
+  const head = blankLine < 0 ? text : text.slice(0, blankLine);
+  const body = blankLine < 0 ? '' : text.slice(blankLine + 2);
+  const [command, ...lines] = head.split('\n');
+  const headers: Record<string, string> = {};
+  for (const line of lines) {
+    const colon = line.indexOf(':');
+    if (colon > 0) {
+      headers[line.slice(0, colon)] = line.slice(colon + 1);
+    }
+  }
+  return { command, headers, body };
+}
+
+type Options = {
+  /** For example ws://localhost:8080/ws */
+  url: string;
+  /** Read again on every connection, so a reconnect uses a fresh token. */
+  accessToken: () => string | null;
+  topics: string[];
+  onMessage: (body: string) => void;
+  /** The server said no, usually because the access token has expired. */
+  onRefused: () => void;
+};
+
+/**
+ * Connects, subscribes to `topics`, and reconnects whenever the connection
+ * drops (the phone lost signal, the API restarted). Returns a function that
+ * disconnects for good.
+ */
+export function connectStomp(options: Options): () => void {
+  let socket: WebSocket | null = null;
+  let stopped = false;
+  let retry: ReturnType<typeof setTimeout> | null = null;
+  let delay = 1000;
+
+  function open() {
+    const ws = new WebSocket(options.url);
+    socket = ws;
+    ws.onopen = () =>
+      ws.send(
+        encodeFrame('CONNECT', {
+          'accept-version': '1.2',
+          host: 'paydeck',
+          'heart-beat': '0,0',
+          Authorization: `Bearer ${options.accessToken() ?? ''}`,
+        }),
+      );
+    ws.onmessage = (event) => {
+      const frame = typeof event.data === 'string' ? decodeFrame(event.data) : null;
+      if (frame?.command === 'CONNECTED') {
+        delay = 1000;
+        options.topics.forEach((destination, i) => ws.send(encodeFrame('SUBSCRIBE', { id: `sub-${i}`, destination })));
+      } else if (frame?.command === 'MESSAGE') {
+        options.onMessage(frame.body);
+      } else if (frame?.command === 'ERROR') {
+        options.onRefused();
+      }
+    };
+    ws.onclose = () => {
+      if (!stopped) {
+        // Wait a little longer after each failure, up to a minute.
+        retry = setTimeout(open, delay);
+        delay = Math.min(delay * 2, 60_000);
+      }
+    };
+  }
+
+  open();
+  return () => {
+    stopped = true;
+    if (retry !== null) {
+      clearTimeout(retry);
+    }
+    socket?.close();
+  };
+}
+```
+
+Things to notice:
+
+- **Bytes, not text.** React Native's WebSocket drops a NULL character at the end of a text message, and the server then waits for the end of a frame that never comes. Sending the same characters as bytes (`Uint8Array`) keeps the NULL. Every character PayDeck sends is plain ASCII (a token, an ID, a path), so one character is one byte.
+- **`heart-beat: 0,0`** asks for no heartbeats in either direction. Lesson 33.4 says when you would want them.
+- **`accessToken` is a function**, not a string. It is called on every connection, so after a reconnect the app uses the token it has *now*, not the one it had an hour ago.
+- **`onRefused`** is called when the server answers with an `ERROR` frame. For a signed-in person that almost always means "this access token has expired".
+- **`onclose`** waits and opens a new connection, waiting twice as long after each failure. Lesson 33.4 looks at this part closely, and finds a bug in it.
+
+Test the frame functions in `__tests__/stomp.test.ts`:
+
+```ts
+import { decodeFrame, encodeFrame } from '../src/live/stomp';
+
+const text = (bytes: Uint8Array) => String.fromCharCode(...bytes);
+
+describe('STOMP frames', () => {
+  it('writes a command, headers, a blank line and a NULL', () => {
+    expect(
+      text(encodeFrame('SUBSCRIBE', { id: 'sub-0', destination: '/topic/a' })),
+    ).toBe('SUBSCRIBE\nid:sub-0\ndestination:/topic/a\n\n\0');
+  });
+
+  it('reads a message, with or without the NULL', () => {
+    const frame =
+      'MESSAGE\ndestination:/topic/a\ncontent-type:application/json\n\n{"a":1}';
+    for (const data of [frame + '\0', frame]) {
+      expect(decodeFrame(data)).toEqual({
+        command: 'MESSAGE',
+        headers: {
+          destination: '/topic/a',
+          'content-type': 'application/json',
+        },
+        body: '{"a":1}',
+      });
+    }
+  });
+
+  it('keeps colons in header values', () => {
+    expect(decodeFrame('ERROR\nmessage:Sign in: please\n\n')?.headers).toEqual({
+      message: 'Sign in: please',
+    });
+  });
+
+  it('treats an empty line as a heartbeat', () => {
+    expect(decodeFrame('\n')).toBeNull();
+  });
+});
+```
+
+```sh
+npx jest __tests__/stomp.test.ts --verbose
+```
+
+```
+PASS __tests__/stomp.test.ts
+    ✓ writes a command, headers, a blank line and a NULL (2 ms)
+    ✓ reads a message, with or without the NULL (2 ms)
+    ✓ keeps colons in header values
+    ✓ treats an empty line as a heartbeat (1 ms)
+Tests:       4 passed, 4 total
+```
+
+The third test matters more than it looks: `message:Sign in: please` has two colons, and only the first one separates the name from the value.
+
+### The token, from outside `client.ts`
+
+The access token lives inside `src/api/client.ts` (lesson 28.4), and only `request` could use it so far. Add two small exports below `setTokenSource`:
+
+```ts
+/** The access token right now, for connections that are not plain requests (the WebSocket). */
+export function currentAccessToken(): string | null {
+  return tokens?.accessToken() ?? null;
+}
+
+/** Gets a fresh access token. Resolves false if the person must sign in again. */
+export function refreshTokens(): Promise<boolean> {
+  return tokens?.refresh() ?? Promise.resolve(false);
+}
+```
+
+`refreshTokens` does what `request` does after a `401`: use the refresh token to get a new access token. The next connection then picks up the new one through `currentAccessToken`.
+
+### The message type
+
+In `src/types.ts`, the shape of lesson 33.2's `LiveMessage`:
+
+```ts
+/** What the API pushes over the WebSocket when something happens to an account. */
+export type LiveMessage = {
+  accountId: string;
+  kind: 'MONEY_IN' | 'MONEY_OUT' | 'CARD_PAYMENT' | 'CARD_DECLINED' | 'REFUND' | 'CARD_UPDATED';
+  title: string;
+  body: string;
+  cardId: string | null;
+  /** The account's balance just after it happened; null on a card someone gave you. */
+  balanceCents: number | null;
+  at: string;
+};
+```
+
+### LiveUpdates
+
+Create `src/live/LiveUpdates.tsx`:
+
+```tsx
+import { useQueryClient } from '@tanstack/react-query';
+import { useEffect, useState, type ReactNode } from 'react';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { currentAccessToken, refreshTokens } from '../api/client';
+import { useMe } from '../api/hooks';
+import { API_BASE_URL } from '../config';
+import { useAccountId } from '../state/AccountContext';
+import type { LiveMessage } from '../types';
+import { connectStomp } from './stomp';
+
+/** How long the banner stays up. */
+const BANNER_MS = 5000;
+
+/**
+ * Keeps a WebSocket open to the API while someone is signed in. When money
+ * moves or a card changes, every screen refreshes its data and a banner
+ * says what happened, without anyone pulling to refresh.
+ */
+export function LiveUpdates({ children }: { children: ReactNode }) {
+  const queryClient = useQueryClient();
+  const accountId = useAccountId();
+  const userId = useMe().data?.user.id;
+  const [latest, setLatest] = useState<LiveMessage | null>(null);
+
+  useEffect(() => {
+    if (userId === undefined) {
+      return;
+    }
+    return connectStomp({
+      url: API_BASE_URL.replace(/^http/, 'ws') + '/ws',
+      accessToken: currentAccessToken,
+      // Your account, plus anything about cards other people gave you.
+      topics: [`/topic/accounts/${accountId}`, `/topic/users/${userId}`],
+      onMessage: (body) => {
+        queryClient.invalidateQueries();
+        setLatest(JSON.parse(body) as LiveMessage);
+      },
+      onRefused: () => {
+        refreshTokens();
+      },
+    });
+  }, [accountId, userId, queryClient]);
+
+  useEffect(() => {
+    if (latest === null) {
+      return;
+    }
+    const timer = setTimeout(() => setLatest(null), BANNER_MS);
+    return () => clearTimeout(timer);
+  }, [latest]);
+
+  const declined = latest?.kind === 'CARD_DECLINED';
+  return (
+    <View style={styles.root}>
+      {children}
+      {latest && (
+        <Pressable
+          accessibilityRole="alert"
+          accessibilityHint="Dismisses this message"
+          onPress={() => setLatest(null)}
+          style={[styles.banner, declined && styles.declinedBanner]}
+        >
+          <Text style={[styles.title, declined && styles.declinedTitle]}>{latest.title}</Text>
+          <Text style={styles.body}>{latest.body}</Text>
+        </Pressable>
+      )}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1 },
+  banner: {
+    position: 'absolute',
+    top: 24,
+    left: 16,
+    right: 16,
+    maxWidth: 480,
+    alignSelf: 'center',
+    padding: 16,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: '#3c4fe0',
+    backgroundColor: '#ffffff',
+    gap: 4,
+    elevation: 6,
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  declinedBanner: { borderColor: '#b3261e' },
+  title: { fontWeight: '700', fontSize: 16, color: '#14162b' },
+  declinedTitle: { color: '#b3261e' },
+  body: { color: '#5d6177' },
+});
+```
+
+- **The URL** is the API's address with `http` turned into `ws`: `ws://localhost:8080/ws` on the Mac, `ws://10.0.2.2:8080/ws` on the Android emulator (lesson 26.4).
+- **`return connectStomp(...)`** hands the "disconnect for good" function to React as the effect's clean-up. When Asha signs out, `LiveUpdates` disappears, the clean-up runs, and the connection closes. If she switches to another account, the effect runs again with the new `accountId`: the old connection closes and a new one subscribes to the new topic.
+- **`userId === undefined`** means `useMe()` has not answered yet. There is nothing to subscribe to until it does.
+- **The banner** is a `Pressable` with the role `alert`, so a screen reader announces it, and a tap dismisses it. A decline gets a red border.
+- **The second `useEffect`** hides the banner after five seconds. Each new message replaces `latest`, so the timer starts again.
+
+### Wiring it in
+
+In `App.tsx`, wrap the navigator, inside `AccountGate` so that `useAccountId()` works:
+
+```tsx
+import { LiveUpdates } from './src/live/LiveUpdates';
+```
+
+```tsx
+    <AccountGate openAccount={OpenAccountScreen}>
+      <LiveUpdates>
+        <AppNavigator />
+      </LiveUpdates>
+    </AccountGate>
+```
+
+### See it work
+
+Start the API, then the app (`npm run macos`), and sign in as Asha. Leave the Wallet screen open. In a terminal, top up Asha's account as if from another device:
+
+```sh
+curl -s -X POST localhost:8080/api/accounts/$A/top-ups \
+  -H "Authorization: Bearer $ASHA" -H "Idempotency-Key: $(uuidgen)" \
+  -H 'Content-Type: application/json' \
+  -d '{"amountCents": 1000, "description": "From my laptop"}'
+```
+
+Within a moment, without touching the app, the banner appears and the balance changes. The course checked this with a test that drives the real app against the real API and prints what the screen shows (balances are from the course's test data):
+
+```
+BEFORE $248.00
+CURL 201
+BANNER Money added | $10.00 added: From my laptop
+AFTER $258.00
+```
+
+Then sign in on a second device as Eve (or use the Module 32 project's "Pay a shop" button with the "For Eve" card) and pay at the bakery. Both banners say "You paid Bakery", and only Asha's Wallet shows a new balance.
+
+<Exercise title="A quieter banner for your own changes">
+When Asha moves money herself in the app, she already sees the result, and then the banner says the same thing again. Make the banner skip messages about something Asha did on *this* screen in the last two seconds. Is that worth it? What could go wrong?
+
+<Fragment slot="hint">You would need to remember when this app last changed something, for example in a `useRef` that `useTopUp` and friends set. Then compare it with the time the message arrives.</Fragment>
+<Fragment slot="hint2">Think about a payment that Asha makes at the same moment a top-up arrives from somewhere else.</Fragment>
+<Fragment slot="solution">
+
+It can be done: a small context with `markLocalChange()` that the mutation hooks call in `onSuccess`, and `LiveUpdates` ignores the banner (but still invalidates) when a message arrives within two seconds of a local change.
+
+But timing is a guess. A top-up from Asha's laptop that lands one second after she changes a card limit on her phone would be hidden, and a slow network can deliver her own message after three seconds and show it anyway. A reliable version would need the message to say which request caused it, for example by having the app send an ID with each change and the API copy it into the event. For PayDeck, a banner that confirms your own action is harmless, so it is simpler to leave it.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Opening the connection in a screen">
+If the Wallet screen opens the WebSocket, it closes when Asha moves to Cards, and a payment while she is there goes unnoticed. Open it once, above the navigator.
+</Aside>
+
+<Aside type="caution" title="Forgetting the clean-up">
+An effect that opens a connection and does not return a way to close it leaves the old connection open after sign-out, still subscribed to the previous person's account. Always return the disconnect function.
+</Aside>
+
+<Aside type="caution" title="Updating the balance from the message">
+`balanceCents` is there for small displays and for Module 34's notifications. The screens still ask the API: that one path decides what the app shows, and a lost or out-of-order message cannot leave a wrong number behind.
+</Aside>
+
+## Recap
+
+- `src/live/stomp.ts` writes and reads STOMP frames, connects with `CONNECT` and the access token, and subscribes after `CONNECTED`.
+- Frames go out as bytes so the NULL at the end survives.
+- `LiveUpdates` wraps the navigator, opens one connection per signed-in person, and closes it in the effect's clean-up.
+- A message makes every query stale (`invalidateQueries`) and shows a banner; the data itself still comes from the API.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why does connectStomp take accessToken as a function instead of a string?',
+			options: ['Functions are faster than strings', 'So each new connection uses the token the app has at that moment, not an expired one', 'STOMP requires it'],
+			answer: 1,
+			explanation: 'Access tokens expire. A reconnect an hour later must send the current one.',
+		},
+		{
+			question: 'What does the app do first when a live message arrives?',
+			options: ['Writes the new balance from the message into the screen', 'Marks every query stale so the screens fetch fresh data from the API', 'Closes the WebSocket'],
+			answer: 1,
+			explanation: 'The message says that something changed; the API says what is true.',
+		},
+		{
+			question: 'Where should LiveUpdates sit in the app?',
+			options: ['Inside the Home screen', 'Around the navigator, inside AccountGate', 'Around SignInScreen'],
+			answer: 1,
+			explanation: 'One connection for as long as someone is signed in, whatever screen they are on.',
+		},
+	]}
+/>
+
+<MarkComplete />
