@@ -1,0 +1,278 @@
+---
+title: "32.1 Checking balance, spending limits and frozen cards"
+description: "What happens between tapping a card and hearing \"approved\", and how PayDeck answers the question \"may this card pay this much?\" with four checks in a fixed order, written as one small method you can test without a database."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can explain who answers when a card is used in a shop, and PayDeck has one method that decides whether a payment is approved, or why it is declined, with a unit test for each rule.
+
+## Why it matters
+
+Since Module 23, PayDeck cards have had a status, a spending limit and a wallet behind them. None of that mattered yet, because nothing ever paid with a card. A freeze button that does not stop payments is a decoration. This module makes the card's rules real: from now on, every payment is checked against them, and the answer comes back in a way a person can act on.
+
+## The idea
+
+### Who answers "approved"?
+
+When you tap a card on a shop's card machine, four businesses take part in under a couple of seconds:
+
+1. The **merchant** (the shop) sends the card details and the amount to its **acquirer**, the bank or payment company that handles card payments for that shop.
+2. The acquirer passes the request to the **card network** (Visa or Mastercard, for example).
+3. The network sends it to the **issuer**, the company that gave out the card.
+4. The issuer decides, and the answer travels back the same way.
+
+That request is called an **authorization request**, and its question is always the same: *may this card pay this much, right now?* The issuer is the only one who can answer, because only the issuer knows the card's status, its limits and the money behind it.
+
+PayDeck issues cards, so **PayDeck is the issuer**. In this course there is no real card network, so the app will play the shop and ask PayDeck directly (the mini-project builds that "card machine"). The decision PayDeck makes is the same one a real issuer makes.
+
+### Authorize, then capture
+
+Real card payments often happen in two steps. **Authorization** checks the card and reserves the money, so it cannot be spent twice. **Capture** later takes it for real, which is why a hotel can authorize $200 at check-in and capture $163 when you leave. Most everyday shop payments are authorized and captured together.
+
+PayDeck keeps it simple: an approved payment moves the money straight away, in one ledger transaction. That is the "together" case, and it is enough to learn every rule in this module. Lesson 31.1 tells the same story from the other side, when PayDeck is the one taking a card payment through Stripe.
+
+### Four checks
+
+PayDeck declines a payment when:
+
+1. the card is **frozen**;
+2. the card is **cancelled**;
+3. the amount is over the card's **spending limit** (a limit per payment, from lesson 22.2);
+4. the wallet does not have **enough money**.
+
+Otherwise it approves.
+
+### Order matters
+
+A $200 payment on a frozen card with a $50 limit and an empty wallet breaks all of the rules at once, but the answer can only give one reason. Which one is most useful?
+
+The one the person can act on first. "The card is frozen" tells them exactly what to do (unfreeze it, if it is theirs). Saying "not enough money" instead would send them to top up, and then the payment would still fail. So the card's own state comes first, then the card's limit, and the wallet last. Fixed order also means the same payment always gets the same answer, which matters to support staff trying to explain a decline.
+
+### A decision you can test on its own
+
+Lesson 25.1 split code into pieces that need a database and pieces that do not. The decision is pure logic: given a card, a balance and an amount, it returns a reason or nothing. So it gets its own small method with no database in it, and it can be tested in milliseconds.
+
+## Worked example
+
+### Decline reasons
+
+Create the package `dev.paydeck.api.payments` and in it `DeclineReason.java`:
+
+```java
+package dev.paydeck.api.payments;
+
+/** Why a card payment was turned down, in words the cardholder can act on. */
+public enum DeclineReason {
+    CARD_FROZEN("The card is frozen."),
+    CARD_CANCELLED("The card has been cancelled."),
+    OVER_LIMIT("The payment is over the card's spending limit."),
+    INSUFFICIENT_FUNDS("There is not enough money in the wallet.");
+
+    private final String message;
+
+    DeclineReason(String message) {
+        this.message = message;
+    }
+
+    public String message() {
+        return message;
+    }
+}
+```
+
+An enum can carry data: each value is created once, with its own message, by the enum's constructor. Lesson 32.2 explains why both the code (`OVER_LIMIT`) and the message are sent to the app.
+
+### The decision
+
+Create `CardPaymentService.java`. For now it only holds the rule; lesson 32.2 adds the rest of the service around it:
+
+```java
+package dev.paydeck.api.payments;
+
+import dev.paydeck.api.card.Card;
+import dev.paydeck.api.card.CardStatus;
+
+public class CardPaymentService {
+
+    /** The checks, in the order a person would want to hear about them. */
+    static DeclineReason declineReason(Card card, long balanceCents, long amountCents) {
+        if (card.getStatus() == CardStatus.FROZEN) {
+            return DeclineReason.CARD_FROZEN;
+        }
+        if (card.getStatus() == CardStatus.CANCELLED) {
+            return DeclineReason.CARD_CANCELLED;
+        }
+        if (card.getSpendingLimitCents() != null && amountCents > card.getSpendingLimitCents()) {
+            return DeclineReason.OVER_LIMIT;
+        }
+        if (balanceCents < amountCents) {
+            return DeclineReason.INSUFFICIENT_FUNDS;
+        }
+        return null;
+    }
+}
+```
+
+- `null` means "no reason to decline": approved.
+- `getSpendingLimitCents()` is a `Long` (with a capital L), which can be `null`, meaning "no limit". Checking for `null` first matters: comparing a `null` `Long` with `>` throws a `NullPointerException`.
+- The limit test is `>`, not `>=`: a $50.00 payment on a card with a $50.00 limit is allowed.
+- The method is `static` and package-private (no `public`): it uses nothing from the service's fields, and only code in the same package, such as its test, needs to call it.
+
+### Tests, one per rule
+
+In `src/test/java/dev/paydeck/api/payments/DeclineRulesTest.java`:
+
+```java
+package dev.paydeck.api.payments;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.util.UUID;
+
+import dev.paydeck.api.card.Card;
+import org.junit.jupiter.api.Test;
+
+class DeclineRulesTest {
+
+    @Test
+    void approvesWhenEverythingIsFine() {
+        Card card = Card.issue(UUID.randomUUID(), "Everyday", 5_000L, null);
+        assertThat(CardPaymentService.declineReason(card, 10_000, 5_000)).isNull();
+    }
+
+    @Test
+    void aFrozenCardIsReportedBeforeAnythingElse() {
+        Card card = Card.issue(UUID.randomUUID(), "Everyday", 100L, null);
+        card.freeze();
+        assertThat(CardPaymentService.declineReason(card, 0, 5_000)).isEqualTo(DeclineReason.CARD_FROZEN);
+    }
+
+    @Test
+    void theLimitIsCheckedBeforeTheBalance() {
+        Card card = Card.issue(UUID.randomUUID(), "Everyday", 100L, null);
+        assertThat(CardPaymentService.declineReason(card, 0, 101)).isEqualTo(DeclineReason.OVER_LIMIT);
+    }
+
+    @Test
+    void aCancelledCardNeverPays() {
+        Card card = Card.issue(UUID.randomUUID(), "Old", null, null);
+        card.cancel();
+        assertThat(CardPaymentService.declineReason(card, 1_000_000, 1)).isEqualTo(DeclineReason.CARD_CANCELLED);
+    }
+}
+```
+
+`Card.issue(accountId, nickname, limit, cardholder)` is the factory method from Module 23, with the cardholder added in the Module 30 mini-project; `null` means the owner keeps the card. No database, no Spring: these tests build a `Card` object in memory and ask the question.
+
+Look at the second and third tests. They do not just check each rule; they check the **order**, by breaking several rules at once (frozen *and* over the limit *and* an empty wallet) and expecting the reason that comes first.
+
+```sh
+./mvnw test -Dtest=DeclineRulesTest
+```
+
+```
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0
+```
+
+### Proving the order test works
+
+A test is only useful if it fails when the code is wrong. Swap the limit check and the balance check in `declineReason`, so the balance is checked first, and run the tests again:
+
+```
+[ERROR] Tests run: 4, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.170 s <<< FAILURE! -- in dev.paydeck.api.payments.DeclineRulesTest
+[ERROR]   DeclineRulesTest.theLimitIsCheckedBeforeTheBalance:28 
+expected: OVER_LIMIT
+ but was: INSUFFICIENT_FUNDS
+```
+
+Swap them back. This trick, breaking the code on purpose to see a test catch it, is called **mutation testing**, and you used it by hand in Module 30.
+
+<Exercise title="Predict, then test">
+For each payment, write down which reason PayDeck gives (or "approved"), then add a test that proves it.
+
+1. An active card with no limit, a balance of 2,000 cents, a payment of 2,000 cents.
+2. A cancelled card with a limit of 100 cents, a payment of 500 cents.
+3. An active card with a limit of 1,000 cents, a balance of 50,000 cents, a payment of 1,000 cents.
+
+<Fragment slot="hint">The balance check is `balanceCents < amountCents`, and the limit check is `amountCents > limit`. Both let the exact amount through.</Fragment>
+<Fragment slot="solution">
+
+1. Approved: spending exactly the whole balance is allowed.
+2. `CARD_CANCELLED`: the status is checked before the limit.
+3. Approved: a payment equal to the limit is within it.
+
+```java
+@Test
+void theExactBalanceCanBeSpent() {
+    Card card = Card.issue(UUID.randomUUID(), "Everyday", null, null);
+    assertThat(CardPaymentService.declineReason(card, 2_000, 2_000)).isNull();
+}
+
+@Test
+void aCancelledCardIsReportedBeforeTheLimit() {
+    Card card = Card.issue(UUID.randomUUID(), "Old", 100L, null);
+    card.cancel();
+    assertThat(CardPaymentService.declineReason(card, 0, 500)).isEqualTo(DeclineReason.CARD_CANCELLED);
+}
+
+@Test
+void aPaymentEqualToTheLimitIsAllowed() {
+    Card card = Card.issue(UUID.randomUUID(), "Groceries", 1_000L, null);
+    assertThat(CardPaymentService.declineReason(card, 50_000, 1_000)).isNull();
+}
+```
+
+Edges like "exactly the limit" are where bugs hide, so they deserve their own tests.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Checking the balance with a stale number">
+The balance must be read inside the same database transaction that moves the money, after locking the account (lesson 24.4). Otherwise two payments at the same moment can both see $20, both be approved, and spend $40. Lesson 32.2 does this.
+</Aside>
+
+<Aside type="caution" title="Comparing a nullable limit directly">
+`amountCents > card.getSpendingLimitCents()` throws a `NullPointerException` when the card has no limit. Check for `null` first.
+</Aside>
+
+<Aside type="caution" title="Telling the shop too much">
+A real issuer sends the shop a short code, not the cardholder's balance. "Insufficient funds" is fine; "the wallet has $3.12" is not. PayDeck's messages never include the balance.
+</Aside>
+
+## Recap
+
+- A card payment is an **authorization request** that travels from the merchant through the acquirer and the card network to the **issuer**, which decides. PayDeck is the issuer.
+- PayDeck declines for a frozen card, a cancelled card, a payment over the limit, or not enough money, **in that order**, so the first reason is the one the person can fix first.
+- The rule is a small, static method with no database, tested one rule at a time, including tests that break several rules at once to pin down the order.
+
+<Quiz
+	questions={[
+		{
+			question: 'Who decides whether a PayDeck card payment is approved?',
+			options: ['The shop', 'The card network', 'PayDeck, as the issuer'],
+			answer: 2,
+			explanation: 'Only the issuer knows the card\'s status, limits and the money behind it.',
+		},
+		{
+			question: 'A frozen card with an empty wallet is used for $10. What reason does PayDeck give?',
+			options: ['CARD_FROZEN', 'INSUFFICIENT_FUNDS', 'Both'],
+			answer: 0,
+			explanation: 'Only one reason is given, and the card\'s own state is checked first.',
+		},
+		{
+			question: 'A card has a $50.00 limit. Is a $50.00 payment over the limit?',
+			options: ['Yes', 'No'],
+			answer: 1,
+			explanation: 'The check is amount > limit, so exactly the limit is allowed.',
+		},
+	]}
+/>
+
+<MarkComplete />

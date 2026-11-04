@@ -1,0 +1,274 @@
+---
+title: "Mini-project: a merchant checkout that approves or declines PayDeck cards"
+description: "Add a \"Pay a shop\" screen to the PayDeck app that plays a shop's card machine: it asks the API to pay, then shows Approved or Declined with the reason, for your own cards and for cards someone gave you."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Everything in this module so far happened in `curl`. Real people meet card rules at a till: they tap, they wait a second, and they see a green or red answer. This project builds that moment into the app. A **Pay a shop** screen plays the shop's card machine (in real life the shop would ask the card network, which would ask PayDeck), so you can feel every rule from lessons 32.1 to 32.3 with your thumb.
+
+## The tasks
+
+1. **Types.** `TransactionType` in `src/types.ts` gains `'CARD_PAYMENT'` and `'REFUND'`. Add a `DeclineReason` type with the four codes, and a `CardPayment` type that matches `CardPaymentResponse` from lesson 32.2.
+2. **The request.** `payWithCard(cardId, amountCents, merchant, idempotencyKey)` in `src/api/paydeck.ts`.
+3. **The hook.** `usePayWithCard(cardId)` in `src/api/hooks.ts`. After a payment, the balance and history are out of date, possibly for an account that is not even yours (a card someone gave you spends their money), so refetch everything.
+4. **The route.** A `pay` route with a `cardId`, shown by a new `PayScreen`.
+5. **The button.** **Pay a shop** on the card screen, for your own cards and for cards given to you. Show it even for a frozen card: trying, and being declined, is part of the lesson.
+6. **The screen.** Fields for the shop's name (starting as "Corner Café") and the amount, in the card's currency. **Pay** sends one request with one idempotency key; a new amount gets a new key. The answer replaces the form: the title is **Approved** or **Declined**, then the amount, "at *shop* with *card*", and for a decline the message from the API. **Pay again** goes back to an empty form.
+7. Try every rule from the app, and commit.
+
+<Exercise title="Build it">
+Do the seven tasks.
+
+<Fragment slot="hint">`TopUpScreen` from Module 26 already has an amount field, `parseMoneyInput`, and an idempotency key that changes with the amount. Start by copying it. The currency of a card given to you is in `me.data.heldCards`, next to the card.</Fragment>
+<Fragment slot="hint2">A mutation from TanStack Query keeps its last answer in `pay.data`. When it is set, show the result instead of the form; `pay.reset()` clears it again. `queryClient.invalidateQueries()` with no arguments marks every cached query as stale.</Fragment>
+<Fragment slot="solution">
+
+### Types and request
+
+In `src/types.ts`:
+
+```ts
+export type TransactionType = 'TOP_UP' | 'TRANSFER' | 'CARD_PAYMENT' | 'REFUND';
+
+export type DeclineReason = 'CARD_FROZEN' | 'CARD_CANCELLED' | 'OVER_LIMIT' | 'INSUFFICIENT_FUNDS';
+
+/** The answer to "may this card pay this much?", as POST /api/cards/{id}/payments sends it. */
+export type CardPayment = {
+  id: string;
+  cardId: string;
+  merchant: string;
+  amountCents: number;
+  status: 'APPROVED' | 'DECLINED' | 'REFUNDED';
+  declineReason: DeclineReason | null;
+  /** Why it was declined, in words for people. */
+  declineMessage: string | null;
+  createdAt: string;
+};
+```
+
+At the end of `src/api/paydeck.ts` (and add `CardPayment` to its `import type` line):
+
+```ts
+/** Plays the shop's card machine: the answer is approved or declined, and says why. */
+export const payWithCard = (cardId: string, amountCents: number, merchant: string, idempotencyKey: string) =>
+  request<CardPayment>(`/api/cards/${cardId}/payments`, {
+    method: 'POST',
+    body: { amountCents, merchant },
+    idempotencyKey,
+  });
+```
+
+At the end of `src/api/hooks.ts`:
+
+```ts
+export function usePayWithCard(cardId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ amountCents, merchant, idempotencyKey }: { amountCents: number; merchant: string; idempotencyKey: string }) =>
+      api.payWithCard(cardId, amountCents, merchant, idempotencyKey),
+    // A payment changes a balance and a history, perhaps of someone else's
+    // account (a card given to you spends the giver's money): refetch everything.
+    onSuccess: () => queryClient.invalidateQueries(),
+  });
+}
+```
+
+### Route and button
+
+In `src/navigation/routes.ts`, after the `card` route:
+
+```ts
+  | { name: 'pay'; cardId: string }
+```
+
+In `AppNavigator.tsx`, import `PayScreen` and add a case after `'card'`:
+
+```tsx
+    case 'pay':
+      return <PayScreen cardId={route.cardId} />;
+```
+
+TypeScript checks that the `switch` covers every route, just as Java checked the `CardAction` switch in lesson 32.2.
+
+In `CardDetailScreen.tsx`, `CardSettings` takes `navigate` as well: `const { goBack, navigate } = useNavigation();`. Add the button under the `PaymentCard`:
+
+```tsx
+      <Button title="Pay a shop" onPress={() => navigate({ name: 'pay', cardId: card.id })} />
+```
+
+`GivenCard` gets `const { navigate } = useNavigation();` and the same button under its explanation.
+
+### The screen
+
+`src/screens/PayScreen.tsx`:
+
+```tsx
+import { useState } from 'react';
+import { StyleSheet, Text, View } from 'react-native';
+import { newIdempotencyKey } from '../api/client';
+import { useAccount, useCards, useMe, usePayWithCard } from '../api/hooks';
+import { Button } from '../components/Button';
+import { Field } from '../components/Field';
+import { Screen } from '../components/Screen';
+import { formatMoney, parseMoneyInput } from '../money';
+
+/**
+ * A pretend shop's card machine. In real life the shop asks the card
+ * network, and the network asks PayDeck; here the app asks PayDeck directly.
+ */
+export function PayScreen({ cardId }: { cardId: string }) {
+  const account = useAccount();
+  const cards = useCards();
+  const me = useMe();
+  const pay = usePayWithCard(cardId);
+  const [merchant, setMerchant] = useState('Corner Café');
+  const [amount, setAmount] = useState('');
+  const [submitted, setSubmitted] = useState(false);
+  // One key per payment: tapping Pay twice must not charge twice.
+  const [idempotencyKey, setIdempotencyKey] = useState(newIdempotencyKey);
+
+  // The card is either one of yours or one someone gave you.
+  const own = cards.data?.find((c) => c.id === cardId);
+  const held = me.data?.heldCards.find((h) => h.card.id === cardId);
+  const card = own ?? held?.card;
+  const currency = held?.currency ?? account.data?.currency ?? 'USD';
+
+  const cents = parseMoneyInput(amount);
+  const errors = {
+    merchant: merchant.trim() === '' ? 'Name the shop' : null,
+    amount: cents === null ? 'Enter an amount like 25 or 25.50' : null,
+  };
+
+  function submit() {
+    setSubmitted(true);
+    if (errors.merchant === null && cents !== null && !pay.isPending) {
+      pay.mutate({ amountCents: cents, merchant: merchant.trim(), idempotencyKey });
+    }
+  }
+
+  function payAgain() {
+    pay.reset();
+    setIdempotencyKey(newIdempotencyKey());
+    setAmount('');
+    setSubmitted(false);
+  }
+
+  const result = pay.data;
+  if (result !== undefined) {
+    const approved = result.status === 'APPROVED';
+    return (
+      <Screen title={approved ? 'Approved' : 'Declined'}>
+        <View style={[styles.result, approved ? styles.approved : styles.declined]}>
+          <Text style={styles.amount}>{formatMoney(result.amountCents, currency)}</Text>
+          <Text style={styles.muted}>
+            at {result.merchant}
+            {card ? ` with ${card.nickname}` : ''}
+          </Text>
+          {!approved && <Text style={styles.error}>{result.declineMessage}</Text>}
+        </View>
+        <Button title="Pay again" variant="secondary" onPress={payAgain} />
+      </Screen>
+    );
+  }
+
+  return (
+    <Screen title="Pay a shop">
+      {card && (
+        <Text style={styles.muted}>
+          Paying with {card.nickname}, the card ending {card.last4}.
+        </Text>
+      )}
+      <Field
+        label="Shop"
+        value={merchant}
+        onChangeText={setMerchant}
+        maxLength={100}
+        error={submitted ? errors.merchant : null}
+      />
+      <Field
+        label={`Amount (${currency})`}
+        value={amount}
+        onChangeText={(text) => {
+          setAmount(text);
+          setIdempotencyKey(newIdempotencyKey());
+        }}
+        keyboardType="decimal-pad"
+        placeholder="0.00"
+        error={submitted ? errors.amount : null}
+        onSubmitEditing={submit}
+      />
+      {pay.error && <Text style={styles.error}>{pay.error.message}</Text>}
+      <Button title={pay.isPending ? 'Asking PayDeck…' : 'Pay'} onPress={submit} disabled={pay.isPending} />
+    </Screen>
+  );
+}
+
+const styles = StyleSheet.create({
+  result: { borderWidth: 2, borderRadius: 16, padding: 20, gap: 4 },
+  approved: { borderColor: '#1d7a46' },
+  declined: { borderColor: '#b3261e' },
+  amount: { fontSize: 32, fontWeight: '800', color: '#14162b' },
+  muted: { color: '#5d6177' },
+  error: { color: '#b3261e' },
+});
+```
+
+- The amount's `onChangeText` makes a **new idempotency key**, exactly like the top-up screen: a different amount is a different payment. Tapping **Pay** twice for the same amount sends the same key twice, and the API answers with the first payment, not a second one (lesson 32.2).
+- `pay.data` is the API's answer. The screen does not decide anything; it shows what PayDeck decided, including the message.
+- A `403` or a lost connection is an **error**, shown in red under the form, and the form stays. A decline is an **answer**, shown on its own screen. The same split as in the API.
+
+### Try it
+
+Restart the API and the app. As Asha (her Groceries card still has the $50.00 limit from lesson 32.2):
+
+1. Open **Cards → Groceries → Pay a shop**. The screen says "Paying with Groceries, the card ending 1669."
+2. Pay **12.50** at Corner Café. **Approved**: "$12.50 at Corner Café with Groceries". Open **Activity**: the payment is there, as −$12.50.
+3. **Pay again**, at Gadget Shop, **89.99**. **Declined**: "The payment is over the card's spending limit."
+
+Sign in as Eve. Under **Given to you**, open the frozen "For Eve" card (ending 2799), and pay **5** at Bakery: **Declined**, "The card is frozen." Eve cannot unfreeze it (Module 30), so she would have to ask Asha.
+
+The app's test runner can play the same story against your running API. These lines were printed by a test that typed into the real screens and read what they showed:
+
+```
+INTRO Paying with Groceries, the card ending 1669.
+RESULT Approved | … | $12.50 | at Corner Café with Groceries | Pay again
+RESULT Declined | … | $89.99 | at Gadget Shop with Groceries | The payment is over the card's spending limit. | Pay again
+RESULT Declined | … | $5.00 | at Bakery with For Eve | The card is frozen. | Pay again
+```
+
+Commit.
+</Fragment>
+</Exercise>
+
+<Exercise title="Help them fix it">
+A decline is more useful with a way forward. When a payment on one of **your own** cards is declined with `OVER_LIMIT`, show a **Change the limit** button that opens the card's settings. Do not show it for a card someone gave you: they cannot change it.
+
+<Fragment slot="hint">You have the reason code in `result.declineReason`, and `own` is only set for your own cards. Reason codes are for exactly this: programs reacting to a decline.</Fragment>
+<Fragment slot="solution">
+
+In `PayScreen`, take `navigate` from `useNavigation()` (import it from `'../navigation/NavigationContext'`), and above **Pay again** add:
+
+```tsx
+        {result.declineReason === 'OVER_LIMIT' && own && (
+          <Button title="Change the limit" onPress={() => navigate({ name: 'card', cardId })} />
+        )}
+```
+
+Try $89.99 on Groceries again: the decline now offers **Change the limit**, which opens the card with its limit field showing 50. The code compares `declineReason`, never the message: the message could be reworded tomorrow, and the button would quietly disappear.
+</Fragment>
+</Exercise>
+
+## What to notice
+
+- **The app shows decisions; it does not make them.** All four rules live in one Java method. The app could be replaced tomorrow and the rules would not move.
+- **Answers and errors look different.** Declined gets its own screen; a network error or `403` stays on the form, in red.
+- **Reason codes earn their keep.** The second exercise reacts to `OVER_LIMIT` without reading any English.
+- **Idempotency follows the money.** The same key for the same tap, a new key for a new amount: a nervous double tap at a till charges once.
+
+<MarkComplete />

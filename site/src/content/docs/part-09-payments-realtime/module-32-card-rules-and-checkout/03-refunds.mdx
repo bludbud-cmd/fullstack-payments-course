@@ -1,0 +1,257 @@
+---
+title: "32.3 Refunds"
+description: "Give a card payment's money back with a new ledger transaction instead of deleting the old one, make sure it can only happen once, and let only support and admin staff do it, with an audit trail."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson PayDeck staff can refund an approved card payment. The money comes back to the wallet through a new ledger transaction, the payment is marked `REFUNDED`, a second refund is refused, and the audit log records who did it.
+
+## Why it matters
+
+Things go wrong after a payment: the shoes do not fit, the order never arrives, the café charged twice. Every payment system needs a way to give money back, and it is one of the riskiest buttons in the building, because it creates money in someone's wallet. It must be impossible to press twice, impossible for the wrong person to press, and impossible to hide.
+
+## The idea
+
+### Refund, not undo
+
+The obvious way to give money back is to delete the payment's ledger lines. Never do that. The ledger is a record of what happened (lesson 24.2), and the payment *did* happen: the money left on Monday. The refund is a second event: the money came back on Thursday. Both belong in the history, so a refund is a **new ledger transaction** that moves the same amount in the opposite direction, from the "outside world" account back to the wallet.
+
+After a refund, the wallet's balance is as if the payment never happened, and its history tells the true story:
+
+| | Wallet | Outside world |
+|---|---:|---:|
+| Corner Café | −12.50 | +12.50 |
+| Refund: Corner Café | +12.50 | −12.50 |
+| **Total** | **0.00** | **0.00** |
+
+### Refund versus void
+
+In real card systems there are two ways back. A payment that has only been **authorized** and not yet captured (lesson 32.1) can be **voided**: the reserved money is released and it never really left. A payment that has been captured is **refunded**: new money flows back. PayDeck moves money at once, so every PayDeck payment is "captured", and the way back is always a refund.
+
+### Who refunds?
+
+Usually the **shop** starts a refund, through its own payment provider, and the money comes back through the card network to the issuer. PayDeck has no real shops, and refunds are also how an issuer settles a **dispute** in the cardholder's favour (lesson 32.4). So in PayDeck a refund is a staff action:
+
+- `SUPPORT` and `ADMIN` may refund.
+- The customer may **not** refund their own payment. If they could, every purchase would be free.
+
+That is a role rule, not an ownership rule, so it uses method security on an `/api/admin/...` path (lessons 30.1 and 30.3), and it goes in the audit log (lesson 30.5), like every staff action on a customer's money.
+
+### Only once
+
+A refund changes a payment's status from `APPROVED` to `REFUNDED`, and only an `APPROVED` payment may be refunded. Two support agents clicking "Refund" at the same moment must not both succeed, so the service locks the payment's row first, the same way it locks an account (lesson 24.4). The second agent waits, then sees `REFUNDED` and is told no. The ledger transaction also has a fixed idempotency key, `refund:<payment id>`, as a second safety net.
+
+## Worked example
+
+### The service
+
+Add to `CardPaymentService` (and import `dev.paydeck.api.common.BusinessRuleException`):
+
+```java
+    /** Gives the money back, for example after a dispute. Staff only; see the controller. */
+    @Transactional
+    public CardPayment refund(UUID paymentId) {
+        CardPayment payment = payments.findByIdForUpdate(paymentId)
+                .orElseThrow(() -> new NotFoundException("Card payment", paymentId));
+        if (payment.getStatus() != CardPaymentStatus.APPROVED) {
+            throw new BusinessRuleException("NOT_REFUNDABLE", "Only an approved payment can be refunded");
+        }
+        Account account = accounts.findByIdForUpdate(payment.getAccountId()).orElseThrow();
+        LedgerTransaction refund = ledger.record(TransactionType.REFUND, "Refund: " + payment.getMerchant(),
+                "refund:" + paymentId, MoneyMovementService.fingerprint("REFUND", paymentId),
+                List.of(new Posting(outsideWorld(account), -payment.getAmountCents()),
+                        new Posting(account.getId(), payment.getAmountCents())));
+        payment.refunded(refund.getId());
+        return payment;
+    }
+```
+
+1. Lock the **payment** row with `findByIdForUpdate`, from lesson 32.2's repository. A second refund of the same payment now waits here.
+2. Check the status. A declined payment moved no money, so there is nothing to give back; a refunded one has already been given back. Both are refused with `422` and the code `NOT_REFUNDABLE` (the `BusinessRuleException` from lesson 22.4).
+3. Lock the account too, because its balance is about to change.
+4. Record the opposite postings. The two amounts still add up to zero, as every ledger transaction must.
+5. `payment.refunded(...)` sets the status and remembers the refund's transaction. There is no `save` call: the payment was loaded inside this transaction, so JPA writes the change when the transaction commits (lesson 23.2).
+
+### The endpoint
+
+In `CardPaymentController`, add the `AuditLog` to the constructor and a new method:
+
+```java
+    private final CardPaymentService service;
+    private final CardPaymentRepository payments;
+    private final AccessPolicy access;
+    private final AuditLog audit;
+
+    public CardPaymentController(CardPaymentService service, CardPaymentRepository payments, AccessPolicy access,
+                                 AuditLog audit) {
+        this.service = service;
+        this.payments = payments;
+        this.access = access;
+        this.audit = audit;
+    }
+
+    // ... pay and list as before ...
+
+    /** Disputes are handled by PayDeck staff, never by the person who paid. */
+    @PostMapping("/api/admin/card-payments/{id}/refund")
+    @PreAuthorize("hasAnyRole('SUPPORT', 'ADMIN')")
+    public CardPaymentResponse refund(CurrentUser staff, @PathVariable UUID id) {
+        CardPayment refunded = service.refund(id);
+        audit.recordNow(staff.id(), "CARD_PAYMENT_REFUNDED", "CARD_PAYMENT", id, "by " + staff.role());
+        return CardPaymentResponse.of(refunded);
+    }
+```
+
+with these imports:
+
+```java
+import dev.paydeck.api.audit.AuditLog;
+import org.springframework.security.access.prepost.PreAuthorize;
+```
+
+`@PreAuthorize` turns customers away before the method runs (lesson 30.3), with the same `403` as every other admin endpoint. `recordNow` writes the audit line in its own transaction (lesson 30.5).
+
+### The test
+
+Add to `CardPaymentApiTest` (and import `dev.paydeck.api.auth.Role`):
+
+```java
+    @Test
+    void onlyStaffCanRefund() throws Exception {
+        UUID account = openAccount("Asha", "USD");
+        topUp(account, 5_000);
+        UUID card = issueCard(account, "Everyday", null, null);
+        String paid = pay(asOwnerOf(account), card, 2_000, "Gadget Shop", UUID.randomUUID().toString())
+                .andReturn().getResponse().getContentAsString();
+        String payment = JsonPath.read(paid, "$.id");
+
+        mvc.perform(post("/api/admin/card-payments/{id}/refund", payment).with(asOwnerOf(account)))
+                .andExpect(status().isForbidden());
+
+        TestUser support = registerAs("Sam", Role.SUPPORT);
+        mvc.perform(post("/api/admin/card-payments/{id}/refund", payment).with(as(support)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("REFUNDED"));
+        mvc.perform(post("/api/admin/card-payments/{id}/refund", payment).with(as(support)))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.code").value("NOT_REFUNDABLE"));
+        balanceIs(account, 5_000);
+    }
+```
+
+The story in one test: the customer cannot refund, support can, a second refund is refused, and the balance is back where it started, not higher. `./mvnw test`: 102 tests, all green.
+
+### Try it
+
+Restart the API. Lesson 32.2's café payment was `512a802c-…`. Asha tries to refund it herself, then Sam does it, twice:
+
+```sh
+P=512a802c-0ec2-4951-b19d-85ccfcf6ebaa
+curl -s -X POST localhost:8080/api/admin/card-payments/$P/refund -H "Authorization: Bearer $ASHA"
+```
+
+```json
+{"type":"about:blank","title":"Not allowed","status":403,"detail":"Your account is not allowed to do this.","code":"FORBIDDEN"}
+```
+
+```sh
+curl -s -X POST localhost:8080/api/admin/card-payments/$P/refund -H "Authorization: Bearer $SAM"
+```
+
+```json
+{"id":"512a802c-0ec2-4951-b19d-85ccfcf6ebaa","cardId":"e81a892e-be41-428e-a6c6-7b625b0c1c5b","merchant":"Corner Café","amountCents":1250,"status":"REFUNDED","declineReason":null,"declineMessage":null,"createdAt":"2026-11-04T09:26:15.049069Z"}
+```
+
+```json
+{"detail":"Only an approved payment can be refunded","instance":"/api/admin/card-payments/512a802c-0ec2-4951-b19d-85ccfcf6ebaa/refund","status":422,"title":"Request not allowed","code":"NOT_REFUNDABLE"}
+```
+
+Asha's balance is back to 12000, and her history shows both events, newest first:
+
+```sh
+curl -s localhost:8080/api/accounts/$A/transactions -H "Authorization: Bearer $ASHA" | jq -c '.[0:2][]'
+```
+
+```
+{"transactionId":"e6c4e1ea-9ff0-4b8d-93f7-d4d163b098b8","type":"REFUND","description":"Refund: Corner Café","amountCents":1250,"createdAt":"2026-11-04T09:26:25.439636Z"}
+{"transactionId":"dd674cbd-b542-4d66-9528-febf1b0d73c4","type":"CARD_PAYMENT","description":"Corner Café","amountCents":-1250,"createdAt":"2026-11-04T09:26:15.039629Z"}
+```
+
+And Ada (admin) can see who did it:
+
+```sh
+curl -s localhost:8080/api/admin/audit -H "Authorization: Bearer $ADA" \
+  | jq -c '.[] | select(.action == "CARD_PAYMENT_REFUNDED")'
+```
+
+```
+{"id":"6e4a1aa8-8fbc-4d79-984f-08fddbe6446f","actorUserId":"99c63d2b-d4b0-48f4-a402-05f0aa1d24fb","action":"CARD_PAYMENT_REFUNDED","targetType":"CARD_PAYMENT","targetId":"512a802c-0ec2-4951-b19d-85ccfcf6ebaa","detail":"by SUPPORT","createdAt":"2026-11-04T09:26:25.447720Z"}
+```
+
+<Exercise title="A partial refund">
+The shop sold Asha two items for $40.00 together, and she returns one, worth $15.00. PayDeck can only refund the whole payment. Describe what would have to change to support a refund of part of a payment. You do not need to write the code; think about the table, the rule and the status.
+
+<Fragment slot="hint">How would you stop three partial refunds of $15.00 on a $40.00 payment? What should the status be after the first one?</Fragment>
+<Fragment slot="solution">
+
+- **Request:** the endpoint takes an `amountCents`, at least 1.
+- **Table:** one payment can now have several refunds, so they need their own table, for example `card_payment_refunds (id, payment_id, amount_cents, transaction_id, created_at)`, instead of one `refund_transaction_id` column.
+- **Rule:** the total of all refunds, including this one, may not be more than the payment. Lock the payment row, add up its refunds, compare, then record. The lock is what stops two agents from refunding $30.00 each at the same moment.
+- **Status:** a new `PARTLY_REFUNDED` between `APPROVED` and `REFUNDED`, which becomes `REFUNDED` when the total reaches the payment's amount.
+- **Idempotency:** `refund:<payment id>` no longer works as a key, because there can be several refunds; each refund request needs its own `Idempotency-Key`.
+
+Real payment providers, Stripe included, support partial refunds this way: several refunds per payment, up to the amount paid.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Deleting or editing the original payment">
+That rewrites history: the customer's statement, the audit trail and any report built on the ledger would all disagree. Always add an opposite transaction.
+</Aside>
+
+<Aside type="caution" title="Checking the status without a lock">
+Two requests can both read `APPROVED` and both pay the money back. Load the payment with `findByIdForUpdate` before checking it.
+</Aside>
+
+<Aside type="caution" title="Letting customers refund themselves">
+It sounds friendly, and it makes every purchase free. Refunds come from the shop, or from staff after a dispute.
+</Aside>
+
+## Recap
+
+- A refund is a **new ledger transaction** in the opposite direction; the original payment stays in the history, marked `REFUNDED`.
+- A **void** cancels an authorization before capture; a **refund** returns captured money. PayDeck payments are captured at once, so it refunds.
+- Only `SUPPORT` and `ADMIN` may refund, through an `/api/admin` endpoint with `@PreAuthorize`, and every refund is audited.
+- Locking the payment row and allowing only `APPROVED → REFUNDED` means a payment can be refunded once.
+
+<Quiz
+	questions={[
+		{
+			question: 'How does PayDeck give back a card payment\'s money?',
+			options: ['It deletes the payment\'s ledger lines', 'It records a new ledger transaction in the opposite direction', 'It edits the payment\'s amount to zero'],
+			answer: 1,
+			explanation: 'The ledger is history. The payment happened, and so did the refund.',
+		},
+		{
+			question: 'Two support agents refund the same payment at the same moment. What happens?',
+			options: ['Both succeed and the customer gets the money twice', 'One succeeds; the other waits for the lock, then gets NOT_REFUNDABLE', 'Both fail'],
+			answer: 1,
+			explanation: 'findByIdForUpdate makes the second wait, and by then the status is REFUNDED.',
+		},
+		{
+			question: 'Can a declined payment be refunded?',
+			options: ['Yes', 'No, no money moved, so there is nothing to give back'],
+			answer: 1,
+			explanation: 'Only APPROVED payments can be refunded.',
+		},
+	]}
+/>
+
+<MarkComplete />
