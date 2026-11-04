@@ -1,0 +1,129 @@
+---
+title: "31.1 How card payments work: authorization, capture, refunds"
+description: "Follow one card payment from the moment someone types their card number to the money landing in a business's bank account: who takes part, what authorization, capture, settlement and refunds mean, and where Stripe fits for PayDeck."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can describe what happens during a card payment, name everyone involved, and explain authorization, capture, settlement and refunds, so the Stripe code in the next lessons makes sense.
+
+## Why it matters
+
+Since Module 24, PayDeck's "Top up" button has added pretend money: the API simply wrote it into the ledger. A real wallet must be filled with real money, and the usual way is a card payment. Card payments look instant (tap, beep, done), but behind that beep several companies talk to each other over a few seconds, and the money itself moves days later. Knowing those steps tells you which part PayDeck is responsible for, and which part it must leave to someone else.
+
+## The idea
+
+### Who takes part
+
+Asha wants to put $25.00 into her PayDeck wallet using her bank card. Five parties are involved:
+
+- **The cardholder:** Asha.
+- **The merchant:** the business being paid. Here, that is **PayDeck**.
+- **The payment provider** (or **acquirer**): the company that accepts card payments on the merchant's behalf. PayDeck uses **Stripe**.
+- **The card network:** Visa, Mastercard and so on, which connect providers to banks.
+- **The issuer:** the bank that gave Asha her card.
+
+Notice that PayDeck plays two different roles in this course. In Module 32, PayDeck is the **issuer** of its own cards: shops ask PayDeck whether a PayDeck card may pay. In this module, PayDeck is the **merchant**: it asks Asha's bank, through Stripe, whether Asha's card may pay PayDeck.
+
+### Authorization
+
+When Asha confirms the payment, Stripe sends an **authorization request** through the card network to her bank: "may this card pay PayDeck $25.00?" The bank checks the card, the balance or credit limit, and its fraud rules, and answers yes or no. A yes also **holds** the money: Asha's available balance drops by $25.00, but the money has not moved yet.
+
+Sometimes the bank wants proof that it really is Asha, especially for online payments. It then shows her a check of its own, for example a code in her banking app. This is called **3D Secure**, and in Europe and the UK it is required for most online payments under rules called **Strong Customer Authentication**. Stripe's payment page handles it for you.
+
+### Capture
+
+**Capture** turns the hold into a real charge. For most online purchases, authorization and capture happen together. Some businesses separate them: a hotel authorizes at check-in and captures the final bill at check-out; a shop that ships goods may capture when the parcel leaves. An authorization that is never captured expires after some days and the hold disappears.
+
+PayDeck captures straight away: the money is for the wallet, and there is nothing to wait for.
+
+### Settlement and payout
+
+Capture says "this money is owed". **Settlement** is the networks and banks actually moving it, usually in daily batches. The payment provider then pays the merchant, minus its **fee** (typically a small percentage plus a fixed amount per payment), in a **payout** to the merchant's bank account, a few days later.
+
+So for PayDeck, a successful payment means "the money is on its way", and that is the moment to credit Asha's wallet. Lesson 31.4 shows exactly how PayDeck learns about that moment.
+
+### Refunds
+
+A **refund** sends captured money back to the card. The merchant asks the provider, the provider tells the network, and the cardholder sees it on their statement, often only after several days. Before capture there is nothing to refund: the merchant simply cancels the authorization, which is called a **void**. And if the cardholder goes to their bank instead of the merchant, that is a **dispute**, which Module 32 covers from the issuer's side.
+
+### Where Stripe fits
+
+Stripe does three jobs for PayDeck:
+
+1. It shows Asha a **payment page** where she types her card number. That page is Stripe's, on Stripe's website, so the card number never touches PayDeck (lesson 30.8: PCI DSS).
+2. It talks to the card networks and banks: authorization, 3D Secure, capture, settlement.
+3. It tells PayDeck the outcome, in a signed message called a **webhook** (lesson 31.4).
+
+PayDeck's own job is small and important: ask Stripe for a payment page for the right amount, and credit the wallet **once** when Stripe confirms that the payment succeeded, never because the app says so.
+
+<Exercise title="Who knows what?">
+For each piece of information, say which parties see it during Asha's $25.00 top-up: Asha, PayDeck, Stripe, the card network, Asha's bank.
+
+1. Asha's full card number.
+2. The amount, $25.00.
+3. That this payment is a PayDeck top-up for Asha's USD wallet.
+4. Asha's available balance at her bank.
+
+<Fragment slot="hint">Remember that PayDeck never sees the card number, and that banks do not share balances with merchants.</Fragment>
+<Fragment slot="solution">
+
+1. **Card number:** Asha, Stripe, the network and her bank. Not PayDeck.
+2. **Amount:** everyone.
+3. **Which wallet:** Asha and PayDeck, and Stripe because PayDeck labels the payment so it can match Stripe's answer to the right wallet. The network and the bank only see "PayDeck" as the merchant.
+4. **Available balance:** only Asha and her bank. The bank answers yes or no; it does not tell anyone how much is left.
+
+Each party knows only what it needs, which is the same "need to know" idea as PayDeck's own access rules (lesson 30.2).
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Crediting the wallet when the app says &quot;paid&quot;">
+The app runs on the customer's phone, and anything it sends can be faked. Only a message from Stripe that PayDeck can verify should add money.
+</Aside>
+
+<Aside type="caution" title="Treating authorization as payment">
+An authorization can expire or be voided. Money that is only authorized is not yet yours to give away.
+</Aside>
+
+<Aside type="caution" title="Forgetting the fee">
+Asha pays $25.00 and her wallet gets $25.00, but PayDeck receives a little less from Stripe. A real business decides who pays that fee and how it shows in the books.
+</Aside>
+
+## Recap
+
+- A card payment involves the **cardholder**, the **merchant**, the **payment provider**, the **card network** and the **issuer**. Here PayDeck is the merchant and Stripe is the provider.
+- **Authorization** asks the bank and holds the money; **capture** makes it a charge; **settlement** and **payout** move the money days later.
+- A **refund** returns captured money; a **void** cancels an authorization before capture.
+- Stripe hosts the card form, talks to the banks, and tells PayDeck the result in a **webhook**. PayDeck credits the wallet only then.
+
+<Quiz
+	questions={[
+		{
+			question: 'In this module, which role does PayDeck play?',
+			options: ['Issuer', 'Merchant', 'Card network'],
+			answer: 1,
+			explanation: 'PayDeck is being paid, so it is the merchant. In Module 32 it is the issuer of its own cards.',
+		},
+		{
+			question: 'What does a successful authorization do?',
+			options: ['Moves the money to the merchant immediately', 'Approves the payment and holds the money on the card', 'Refunds the cardholder'],
+			answer: 1,
+			explanation: 'The money moves later, after capture and settlement.',
+		},
+		{
+			question: 'When should PayDeck add the $25.00 to Asha\'s wallet?',
+			options: ['When the app says the payment page closed', 'When Stripe\'s verified webhook says the payment succeeded', 'When Asha taps "Top up"'],
+			answer: 1,
+			explanation: 'Only Stripe knows the payment succeeded, and only its signed message can be trusted.',
+		},
+	]}
+/>
+
+<MarkComplete />

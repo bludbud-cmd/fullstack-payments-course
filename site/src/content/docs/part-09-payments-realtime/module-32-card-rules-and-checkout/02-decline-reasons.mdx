@@ -1,0 +1,733 @@
+---
+title: "32.2 Decline reasons"
+description: "Turn the decision from lesson 32.1 into an endpoint: save every payment, approved or declined, move the money for approved ones in the ledger, and answer with a reason code for programs and a message for people."
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson `POST /api/cards/{id}/payments` pays a shop with a PayDeck card. An approved payment moves money in the ledger; a declined one moves nothing, says why, and is still saved, so the cardholder and support can see it later.
+
+## Why it matters
+
+"Declined" on its own is one of the most frustrating words in payments. Was the card blocked? Is the money gone? Should I try again? A good decline says what happened in words a person can act on, and a good system remembers declines as carefully as payments: the first thing a support agent asks is "show me what happened to that card yesterday".
+
+## The idea
+
+### A decline is an answer, not an error
+
+Until now, when the API refused something it answered with a `4xx` status and a problem response (lesson 22.4). A decline is different. The question "may this card pay $89.99?" was understood, checked and answered: the answer happens to be no. So PayDeck answers `201 Created` for both, with a `status` field of `APPROVED` or `DECLINED`. A new **card payment** record was created either way.
+
+Errors stay errors: a missing `Idempotency-Key`, a negative amount, or someone using a card that is not theirs still get `400`, `404` and so on. The program calling PayDeck can then tell "something is wrong with my request" from "the card said no", which need very different handling.
+
+### Two ways to say why
+
+Each decline carries:
+
+- a **reason code**, such as `OVER_LIMIT`: fixed, short, for programs. The app can show a "Change limit" button when it sees `OVER_LIMIT`. Codes never change, so programs can rely on them.
+- a **message**, such as "The payment is over the card's spending limit.": for people. Messages can be reworded or translated without breaking any program.
+
+Real card networks work the same way, with two-digit response codes (for example `51` for insufficient funds and `05`, "do not honor", for a plain refusal) that banks then turn into words.
+
+### Save the declines too
+
+Every attempt becomes a row in a new `card_payments` table. An approved payment points at the ledger transaction that moved its money; a declined one has none, because no money moved. The ledger stays the single truth about money (lesson 24.2); `card_payments` is the truth about what the card was asked to do.
+
+### Who may pay
+
+A new card action, `PAY`. The owner may pay with their card, and so may the cardholder they gave it to (the Module 30 project promised this). Support and admin may **not**: staff never move customers' money (lesson 30.2).
+
+### Locks and retries, as before
+
+Two payments on the same wallet at the same moment must not both spend the same money, so the service locks the account row first (lesson 24.4) and only then reads the balance. And a shop's card machine that loses its connection will ask again, so payments take an `Idempotency-Key` (lesson 24.5): the same key gets the same answer, even a decline, and the money moves at most once.
+
+## Worked example
+
+### The table
+
+`src/main/resources/db/migration/V12__create_card_payments.sql`:
+
+```sql
+-- Every time someone tries to pay with a PayDeck card: approved or declined.
+-- A declined payment moves no money, so transaction_id is empty for it.
+CREATE TABLE card_payments (
+    id                      UUID PRIMARY KEY,
+    card_id                 UUID         NOT NULL REFERENCES cards (id),
+    account_id              UUID         NOT NULL REFERENCES accounts (id),
+    merchant                VARCHAR(100) NOT NULL,
+    amount_cents            BIGINT       NOT NULL CHECK (amount_cents > 0),
+    status                  VARCHAR(10)  NOT NULL CHECK (status IN ('APPROVED', 'DECLINED', 'REFUNDED')),
+    decline_reason          VARCHAR(30),
+    transaction_id          UUID         REFERENCES ledger_transactions (id),
+    refund_transaction_id   UUID         REFERENCES ledger_transactions (id),
+    idempotency_key         VARCHAR(100) NOT NULL UNIQUE,
+    request_fingerprint     VARCHAR(64)  NOT NULL,
+    created_at              TIMESTAMPTZ  NOT NULL
+);
+CREATE INDEX card_payments_card_id ON card_payments (card_id, created_at DESC);
+
+-- Two new kinds of ledger transaction.
+ALTER TABLE ledger_transactions DROP CONSTRAINT ledger_transactions_type_check;
+ALTER TABLE ledger_transactions ADD CONSTRAINT ledger_transactions_type_check
+    CHECK (type IN ('TOP_UP', 'TRANSFER', 'CARD_PAYMENT', 'REFUND'));
+```
+
+- `REFUNDED` and `refund_transaction_id` are for lesson 32.3; adding them now saves a migration.
+- The index matches the question "this card's latest payments", newest first.
+- The ledger's `type` column only allowed `TOP_UP` and `TRANSFER` (lesson 24.2). PostgreSQL named that check `ledger_transactions_type_check` for you (`\d ledger_transactions` in `psql` shows it). A check cannot be edited, so it is dropped and added again with the new types.
+
+Add the same two types to `TransactionType.java` in the ledger package:
+
+```java
+public enum TransactionType {
+    /** Money comes in from outside PayDeck, for example from a card. */
+    TOP_UP,
+    /** Money moves from one PayDeck account to another. */
+    TRANSFER,
+    /** Someone paid a shop with a PayDeck card. */
+    CARD_PAYMENT,
+    /** A card payment was given back. */
+    REFUND
+}
+```
+
+And `CardPaymentStatus.java` in the payments package:
+
+```java
+package dev.paydeck.api.payments;
+
+public enum CardPaymentStatus {
+    APPROVED,
+    DECLINED,
+    /** Approved, then given back. */
+    REFUNDED
+}
+```
+
+### The entity
+
+`CardPayment.java`. The two factory methods make sure an approved payment always has a transaction and a declined one always has a reason:
+
+```java
+package dev.paydeck.api.payments;
+
+import java.time.Instant;
+import java.util.UUID;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+
+/** One attempt to pay a shop with a PayDeck card. */
+@Entity
+@Table(name = "card_payments")
+public class CardPayment {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private UUID id;
+
+    @Column(nullable = false)
+    private UUID cardId;
+
+    @Column(nullable = false)
+    private UUID accountId;
+
+    @Column(nullable = false)
+    private String merchant;
+
+    @Column(nullable = false)
+    private long amountCents;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private CardPaymentStatus status;
+
+    @Enumerated(EnumType.STRING)
+    private DeclineReason declineReason;
+
+    /** The ledger transaction that moved the money; empty for a decline. */
+    private UUID transactionId;
+
+    private UUID refundTransactionId;
+
+    @Column(nullable = false)
+    private String idempotencyKey;
+
+    @Column(nullable = false)
+    private String requestFingerprint;
+
+    @Column(nullable = false)
+    private Instant createdAt;
+
+    protected CardPayment() {
+        // For JPA
+    }
+
+    private CardPayment(UUID cardId, UUID accountId, String merchant, long amountCents, String idempotencyKey,
+                        String requestFingerprint) {
+        this.cardId = cardId;
+        this.accountId = accountId;
+        this.merchant = merchant;
+        this.amountCents = amountCents;
+        this.idempotencyKey = idempotencyKey;
+        this.requestFingerprint = requestFingerprint;
+        this.createdAt = Instant.now();
+    }
+
+    static CardPayment approved(UUID cardId, UUID accountId, String merchant, long amountCents, UUID transactionId,
+                                String idempotencyKey, String fingerprint) {
+        CardPayment payment = new CardPayment(cardId, accountId, merchant, amountCents, idempotencyKey, fingerprint);
+        payment.status = CardPaymentStatus.APPROVED;
+        payment.transactionId = transactionId;
+        return payment;
+    }
+
+    static CardPayment declined(UUID cardId, UUID accountId, String merchant, long amountCents, DeclineReason reason,
+                                String idempotencyKey, String fingerprint) {
+        CardPayment payment = new CardPayment(cardId, accountId, merchant, amountCents, idempotencyKey, fingerprint);
+        payment.status = CardPaymentStatus.DECLINED;
+        payment.declineReason = reason;
+        return payment;
+    }
+
+    void refunded(UUID refundTransactionId) {
+        this.status = CardPaymentStatus.REFUNDED;
+        this.refundTransactionId = refundTransactionId;
+    }
+
+    // Getters: getId(), getCardId(), getAccountId(), getMerchant(), getAmountCents(), getStatus(),
+    // getDeclineReason(), getTransactionId(), getRequestFingerprint() and getCreatedAt(), each one line
+    // like "public UUID getId() { return id; }". Write them out (or let your editor generate them).
+}
+```
+
+`@Enumerated(EnumType.STRING)` stores the enum's name (`OVER_LIMIT`), not its position, so reordering the enum later cannot change old rows (lesson 23.1).
+
+### The repository
+
+`CardPaymentRepository.java`:
+
+```java
+package dev.paydeck.api.payments;
+
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+import jakarta.persistence.LockModeType;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Query;
+
+public interface CardPaymentRepository extends JpaRepository<CardPayment, UUID> {
+
+    Optional<CardPayment> findByIdempotencyKey(String idempotencyKey);
+
+    List<CardPayment> findTop50ByCardIdOrderByCreatedAtDesc(UUID cardId);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select p from CardPayment p where p.id = :id")
+    Optional<CardPayment> findByIdForUpdate(UUID id);
+}
+```
+
+`findTop50ByCardIdOrderByCreatedAtDesc` is a derived query (lesson 23.2): Spring reads the name and writes the SQL, newest 50 first. The locking finder is for refunds in lesson 32.3.
+
+### The service
+
+Fill in the rest of `CardPaymentService`, around the `declineReason` method from lesson 32.1:
+
+```java
+package dev.paydeck.api.payments;
+
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+import dev.paydeck.api.account.Account;
+import dev.paydeck.api.account.AccountKind;
+import dev.paydeck.api.account.AccountRepository;
+import dev.paydeck.api.card.Card;
+import dev.paydeck.api.card.CardRepository;
+import dev.paydeck.api.card.CardStatus;
+import dev.paydeck.api.common.IdempotencyConflictException;
+import dev.paydeck.api.common.NotFoundException;
+import dev.paydeck.api.ledger.LedgerService;
+import dev.paydeck.api.ledger.LedgerTransaction;
+import dev.paydeck.api.ledger.Posting;
+import dev.paydeck.api.ledger.TransactionType;
+import dev.paydeck.api.money.MoneyMovementService;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+/**
+ * What a card network asks PayDeck every time a card is used: "may this card
+ * pay this much?" The answer is approved (and the money moves) or declined
+ * (with a reason, and no money moves).
+ */
+@Service
+public class CardPaymentService {
+
+    private final CardRepository cards;
+    private final AccountRepository accounts;
+    private final CardPaymentRepository payments;
+    private final LedgerService ledger;
+
+    public CardPaymentService(CardRepository cards, AccountRepository accounts, CardPaymentRepository payments,
+                              LedgerService ledger) {
+        this.cards = cards;
+        this.accounts = accounts;
+        this.payments = payments;
+        this.ledger = ledger;
+    }
+
+    @Transactional
+    public CardPayment pay(UUID cardId, long amountCents, String merchant, String idempotencyKey) {
+        Card card = cards.findById(cardId).orElseThrow(() -> new NotFoundException("Card", cardId));
+        // Lock the account first: two payments at once must not both spend the same money.
+        Account account = accounts.findByIdForUpdate(card.getAccountId()).orElseThrow();
+        String fingerprint = MoneyMovementService.fingerprint("CARD_PAYMENT", cardId, amountCents, merchant);
+
+        Optional<CardPayment> earlier = payments.findByIdempotencyKey(idempotencyKey);
+        if (earlier.isPresent()) {
+            if (!earlier.get().getRequestFingerprint().equals(fingerprint)) {
+                throw new IdempotencyConflictException(idempotencyKey);
+            }
+            return earlier.get();
+        }
+
+        DeclineReason reason = declineReason(card, account, amountCents);
+        if (reason != null) {
+            // A decline is saved too: it is history the cardholder and support need to see.
+            return payments.save(CardPayment.declined(cardId, account.getId(), merchant, amountCents, reason,
+                    idempotencyKey, fingerprint));
+        }
+
+        LedgerTransaction transaction = ledger.record(TransactionType.CARD_PAYMENT, merchant,
+                "card-payment:" + idempotencyKey, fingerprint,
+                List.of(new Posting(account.getId(), -amountCents), new Posting(outsideWorld(account), amountCents)));
+        return payments.save(CardPayment.approved(cardId, account.getId(), merchant, amountCents,
+                transaction.getId(), idempotencyKey, fingerprint));
+    }
+
+    /** The checks, in the order a person would want to hear about them. */
+    static DeclineReason declineReason(Card card, long balanceCents, long amountCents) {
+        // ... unchanged from lesson 32.1 ...
+    }
+
+    private DeclineReason declineReason(Card card, Account account, long amountCents) {
+        return declineReason(card, ledger.balanceOf(account.getId()), amountCents);
+    }
+
+    /** Shops are outside PayDeck, so card money goes to the "outside world" account. */
+    private UUID outsideWorld(Account account) {
+        return accounts.findByKindAndCurrency(AccountKind.SYSTEM, account.getCurrency()).orElseThrow().getId();
+    }
+}
+```
+
+Read `pay` from top to bottom; every step is one you have met before:
+
+1. Find the card, then **lock its account** with `findByIdForUpdate` (lesson 24.4). Any other payment or transfer on this wallet now waits until this transaction ends.
+2. **Idempotency** (lesson 24.5): the same key with the same request returns the earlier payment, even a decline; the same key with a different request is a conflict. The fingerprint describes the request; it gets a type name, `CARD_PAYMENT`, so it can never match a transfer's.
+3. **Decide**, reading the balance now that the account is locked. The private `declineReason` overload fetches the balance and calls the static one.
+4. Declined: save it and stop. No ledger lines.
+5. Approved: a **ledger transaction** moves the money from the wallet to the "outside world" system account for that currency (lesson 24.2), exactly like a top-up in reverse. Then the payment is saved, pointing at that transaction.
+
+The fingerprint helper in `MoneyMovementService` was package-private, because only `money` used it. The compiler says so the first time you build:
+
+```
+[ERROR] .../payments/CardPaymentService.java:[50,50] fingerprint(java.lang.Object...) is not public in dev.paydeck.api.money.MoneyMovementService; cannot be accessed from outside package
+```
+
+Make it `public static String fingerprint(Object... parts)` in `MoneyMovementService`.
+
+### Who may pay
+
+In `CardAction.java`, add the action:
+
+```java
+    VIEW,
+    /** Pay a shop with it. */
+    PAY,
+```
+
+Build now and Java points at the rule you have not written yet:
+
+```
+[ERROR] .../access/AccessPolicy.java:[63,16] the switch expression does not cover all possible input values
+```
+
+That is the reason lesson 30.2 wrote the rules as a `switch` over an enum: a new action cannot slip through without a decision. In `AccessPolicy`'s card rules add one line, and one line to the table in the comment above the class:
+
+```java
+            case PAY -> relationship != Relationship.NONE;
+```
+
+```
+ * card: pay with it        yes      yes         -       -
+```
+
+Owner or cardholder: yes. Staff: no, whatever their role.
+
+### The controller
+
+`CardPaymentController.java`:
+
+```java
+package dev.paydeck.api.payments;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
+
+import dev.paydeck.api.access.AccessPolicy;
+import dev.paydeck.api.access.CardAction;
+import dev.paydeck.api.auth.CurrentUser;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.Size;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RestController;
+
+/**
+ * Paying with a card. In real life a shop's card machine would ask; here the
+ * app's "pay a shop" screen plays the shop, signed in as the cardholder.
+ */
+@RestController
+public class CardPaymentController {
+
+    public record PayRequest(
+            @Positive @Max(10_000_000) long amountCents,
+            @NotBlank @Size(max = 100) String merchant) {
+    }
+
+    public record CardPaymentResponse(UUID id, UUID cardId, String merchant, long amountCents,
+                                      CardPaymentStatus status, DeclineReason declineReason, String declineMessage,
+                                      Instant createdAt) {
+
+        static CardPaymentResponse of(CardPayment payment) {
+            DeclineReason reason = payment.getDeclineReason();
+            return new CardPaymentResponse(payment.getId(), payment.getCardId(), payment.getMerchant(),
+                    payment.getAmountCents(), payment.getStatus(), reason, reason == null ? null : reason.message(),
+                    payment.getCreatedAt());
+        }
+    }
+
+    private final CardPaymentService service;
+    private final CardPaymentRepository payments;
+    private final AccessPolicy access;
+
+    public CardPaymentController(CardPaymentService service, CardPaymentRepository payments, AccessPolicy access) {
+        this.service = service;
+        this.payments = payments;
+        this.access = access;
+    }
+
+    /**
+     * A decline is still a successful answer to "may I pay?", so both come back
+     * as 201 Created; look at {@code status}.
+     */
+    @PostMapping("/api/cards/{cardId}/payments")
+    public ResponseEntity<CardPaymentResponse> pay(
+            CurrentUser user,
+            @PathVariable UUID cardId,
+            @RequestHeader("Idempotency-Key") @Size(min = 1, max = 100) String idempotencyKey,
+            @Valid @RequestBody PayRequest request) {
+        access.card(user, cardId, CardAction.PAY);
+        CardPayment payment = service.pay(cardId, request.amountCents(), request.merchant().strip(), idempotencyKey);
+        return ResponseEntity.status(HttpStatus.CREATED).body(CardPaymentResponse.of(payment));
+    }
+
+    @GetMapping("/api/cards/{cardId}/payments")
+    @Transactional(readOnly = true)
+    public List<CardPaymentResponse> list(CurrentUser user, @PathVariable UUID cardId) {
+        access.card(user, cardId, CardAction.VIEW);
+        return payments.findTop50ByCardIdOrderByCreatedAtDesc(cardId).stream().map(CardPaymentResponse::of).toList();
+    }
+}
+```
+
+The response has `declineReason` (the code) and `declineMessage` (the words) side by side. Both are `null` for an approved payment.
+
+### Tests
+
+Add an `issueCard` helper to `ApiTestSupport`, next to `topUp`:
+
+```java
+    protected UUID issueCard(UUID accountId, String nickname, Long limitCents, String cardholderEmail)
+            throws Exception {
+        String holder = cardholderEmail == null ? "null" : "\"" + cardholderEmail + "\"";
+        String body = mvc.perform(post("/api/accounts/{id}/cards", accountId)
+                        .with(asOwnerOf(accountId))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"nickname": "%s", "spendingLimitCents": %s, "cardholderEmail": %s}
+                                """.formatted(nickname, limitCents, holder)))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        return UUID.fromString(JsonPath.read(body, "$.id"));
+    }
+```
+
+Then `src/test/java/dev/paydeck/api/payments/CardPaymentApiTest.java`:
+
+```java
+package dev.paydeck.api.payments;
+
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import java.util.UUID;
+
+import com.jayway.jsonpath.JsonPath;
+import dev.paydeck.api.ApiTestSupport;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.test.web.servlet.request.RequestPostProcessor;
+
+class CardPaymentApiTest extends ApiTestSupport {
+
+    @Test
+    void anApprovedPaymentTakesMoneyFromTheWallet() throws Exception {
+        UUID account = openAccount("Asha", "USD");
+        topUp(account, 5_000);
+        UUID card = issueCard(account, "Everyday", null, null);
+
+        pay(asOwnerOf(account), card, 1_250, "Corner Café", UUID.randomUUID().toString())
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("APPROVED"))
+                .andExpect(jsonPath("$.declineReason").doesNotExist());
+
+        balanceIs(account, 3_750);
+        mvc.perform(get("/api/accounts/{id}/transactions", account).with(asOwnerOf(account)))
+                .andExpect(jsonPath("$[0].type").value("CARD_PAYMENT"))
+                .andExpect(jsonPath("$[0].description").value("Corner Café"))
+                .andExpect(jsonPath("$[0].amountCents").value(-1_250));
+    }
+
+    @Test
+    void paymentsOverTheLimitAreDeclined() throws Exception {
+        UUID account = openAccount("Asha", "USD");
+        topUp(account, 50_000);
+        UUID card = issueCard(account, "Groceries", 10_000L, null);
+
+        pay(asOwnerOf(account), card, 10_001, "Big Shop", UUID.randomUUID().toString())
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("DECLINED"))
+                .andExpect(jsonPath("$.declineReason").value("OVER_LIMIT"))
+                .andExpect(jsonPath("$.declineMessage").value("The payment is over the card's spending limit."));
+        balanceIs(account, 50_000);
+    }
+
+    @Test
+    void frozenCardsAndEmptyWalletsAreDeclined() throws Exception {
+        UUID account = openAccount("Asha", "USD");
+        topUp(account, 1_000);
+        UUID card = issueCard(account, "Everyday", null, null);
+
+        pay(asOwnerOf(account), card, 1_001, "Shop", UUID.randomUUID().toString())
+                .andExpect(jsonPath("$.declineReason").value("INSUFFICIENT_FUNDS"));
+
+        mvc.perform(post("/api/cards/{id}/freeze", card).with(asOwnerOf(account))).andExpect(status().isOk());
+        pay(asOwnerOf(account), card, 100, "Shop", UUID.randomUUID().toString())
+                .andExpect(jsonPath("$.declineReason").value("CARD_FROZEN"));
+
+        mvc.perform(get("/api/cards/{id}/payments", card).with(asOwnerOf(account)))
+                .andExpect(jsonPath("$.length()").value(2))
+                .andExpect(jsonPath("$[0].declineReason").value("CARD_FROZEN"));
+    }
+
+    @Test
+    void retryingAPaymentWithTheSameKeyChargesOnce() throws Exception {
+        UUID account = openAccount("Asha", "USD");
+        topUp(account, 5_000);
+        UUID card = issueCard(account, "Everyday", null, null);
+        String key = UUID.randomUUID().toString();
+
+        String first = pay(asOwnerOf(account), card, 2_000, "Taxi", key)
+                .andReturn().getResponse().getContentAsString();
+        pay(asOwnerOf(account), card, 2_000, "Taxi", key)
+                .andExpect(jsonPath("$.id").value(JsonPath.<String>read(first, "$.id")));
+        pay(asOwnerOf(account), card, 9_000, "Taxi", key).andExpect(status().isConflict());
+
+        balanceIs(account, 3_000);
+    }
+
+    @Test
+    void aCardholderCanPayButAStrangerCannot() throws Exception {
+        UUID account = openAccount("Asha", "USD");
+        topUp(account, 5_000);
+        TestUser ben = register("Ben");
+        UUID card = issueCard(account, "For Ben", null, ben.email());
+
+        pay(as(ben), card, 500, "Bakery", UUID.randomUUID().toString())
+                .andExpect(jsonPath("$.status").value("APPROVED"));
+        pay(as(register("Mallory")), card, 500, "Bakery", UUID.randomUUID().toString())
+                .andExpect(status().isNotFound());
+        balanceIs(account, 4_500);
+    }
+
+    private ResultActions pay(RequestPostProcessor who, UUID card, long amountCents, String merchant, String key)
+            throws Exception {
+        return mvc.perform(post("/api/cards/{id}/payments", card).with(who)
+                .header("Idempotency-Key", key)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"amountCents": %d, "merchant": "%s"}
+                        """.formatted(amountCents, merchant)));
+    }
+
+    private void balanceIs(UUID account, long cents) throws Exception {
+        mvc.perform(get("/api/accounts/{id}", account).with(asOwnerOf(account)))
+                .andExpect(jsonPath("$.balanceCents").value(cents));
+    }
+}
+```
+
+Every test checks the **balance** as well as the answer: a decline that still took the money would be the worst bug in this module. `./mvnw test` now runs 101 tests, all green.
+
+### Try it
+
+Restart the API and sign in as Asha (`$ASHA`, as in the Module 27 mini-project). Give her Groceries card a $50.00 limit, then use it twice:
+
+```sh
+G=e81a892e-be41-428e-a6c6-7b625b0c1c5b   # Asha's Groceries card; yours will differ
+curl -s -X PATCH localhost:8080/api/cards/$G -H "Authorization: Bearer $ASHA" \
+  -H 'Content-Type: application/json' -d '{"spendingLimitCents": 5000}'
+
+curl -s -X POST localhost:8080/api/cards/$G/payments -H "Authorization: Bearer $ASHA" \
+  -H "Idempotency-Key: k-cafe-1" -H 'Content-Type: application/json' \
+  -d '{"amountCents": 1250, "merchant": "Corner Café"}'
+```
+
+```json
+{"id":"512a802c-0ec2-4951-b19d-85ccfcf6ebaa","cardId":"e81a892e-be41-428e-a6c6-7b625b0c1c5b","merchant":"Corner Café","amountCents":1250,"status":"APPROVED","declineReason":null,"declineMessage":null,"createdAt":"2026-11-04T09:26:15.049069205Z"}
+```
+
+```sh
+curl -s -X POST localhost:8080/api/cards/$G/payments -H "Authorization: Bearer $ASHA" \
+  -H "Idempotency-Key: k-tv-1" -H 'Content-Type: application/json' \
+  -d '{"amountCents": 8999, "merchant": "Gadget Shop"}'
+```
+
+```json
+{"id":"4a3daacd-d2f3-4543-b096-2f86b0fcb45f","cardId":"e81a892e-be41-428e-a6c6-7b625b0c1c5b","merchant":"Gadget Shop","amountCents":8999,"status":"DECLINED","declineReason":"OVER_LIMIT","declineMessage":"The payment is over the card's spending limit.","createdAt":"2026-11-04T09:26:15.098109200Z"}
+```
+
+The balance went from 12000 to 10750: only the café payment moved money. Sending `k-cafe-1` again returns the same payment (same `id`); sending it with a different amount gets `409` "Idempotency key reused".
+
+Now Eve uses the cards Asha gave her: the frozen one, then the active one for more than Asha's wallet holds. Then Sam from support tries to pay:
+
+```json
+{"id":"3c8763ee-…","cardId":"eb9aace8-…","merchant":"Bakery","amountCents":500,"status":"DECLINED","declineReason":"CARD_FROZEN","declineMessage":"The card is frozen.","createdAt":"2026-11-04T09:26:25.346860067Z"}
+{"id":"647cbe30-…","cardId":"d62e8a7a-…","merchant":"Shoe Shop","amountCents":20000,"status":"DECLINED","declineReason":"INSUFFICIENT_FUNDS","declineMessage":"There is not enough money in the wallet.","createdAt":"2026-11-04T09:26:25.376349695Z"}
+{"detail":"You are not allowed to do this to this card.","instance":"/api/cards/d62e8a7a-dadf-416f-9ea1-8b4c70c6539f/payments","status":403,"title":"Not allowed","code":"FORBIDDEN"}
+```
+
+(IDs shortened.) Two declines, which are answers, and one refusal, which is an error. In the database:
+
+```sh
+docker compose exec postgres psql -U paydeck -c "select merchant, amount_cents, status, decline_reason, transaction_id is not null as moved_money from card_payments order by created_at"
+```
+
+```
+  merchant   | amount_cents |  status  |   decline_reason   | moved_money 
+-------------+--------------+----------+--------------------+-------------
+ Corner Café |         1250 | APPROVED |                    | t
+ Gadget Shop |         8999 | DECLINED | OVER_LIMIT         | f
+ Bakery      |          500 | DECLINED | CARD_FROZEN        | f
+ Shoe Shop   |        20000 | DECLINED | INSUFFICIENT_FUNDS | f
+(4 rows)
+```
+
+Sam's attempt is not there: it was refused before any payment was attempted.
+
+<Exercise title="Show me what happened to my card">
+Call `GET /api/cards/{id}/payments` for the Groceries card as Asha and use `jq` to print one line per payment: merchant, amount, status and reason. Then try the same request as Eve (who does not hold that card) and as Sam (support). Predict each answer first.
+
+<Fragment slot="hint">`jq -c '.[] | {merchant, amountCents, status, declineReason}'`. Viewing a card follows the `VIEW` rule from lesson 30.2, not the new `PAY` rule.</Fragment>
+<Fragment slot="solution">
+
+```sh
+curl -s localhost:8080/api/cards/$G/payments -H "Authorization: Bearer $ASHA" \
+  | jq -c '.[] | {merchant, amountCents, status, declineReason}'
+```
+
+```
+{"merchant":"Gadget Shop","amountCents":8999,"status":"DECLINED","declineReason":"OVER_LIMIT"}
+{"merchant":"Corner Café","amountCents":1250,"status":"APPROVED","declineReason":null}
+```
+
+Newest first. Eve gets `404`: she has no relationship to the Groceries card, so she may not even learn it exists. Sam gets the list: support may view any card, which is exactly what he needs to answer "why was my card declined?", but he still may not pay with it.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Answering a decline with 402 or 422">
+It is tempting, but then every program has to treat a normal "no" as an error, and retry logic may try again and again. Keep errors for broken requests; a decline is a valid answer.
+</Aside>
+
+<Aside type="caution" title="Checking the balance before locking the account">
+`findById` followed by a balance check and only then a lock leaves a gap in which another payment can spend the same money. Lock first (`findByIdForUpdate`), then read, decide and write, all in one `@Transactional` method.
+</Aside>
+
+<Aside type="caution" title="Forgetting to widen the ledger's type check">
+Without the `ALTER TABLE` lines, every approved payment fails: PostgreSQL logs `new row for relation "ledger_transactions" violates check constraint "ledger_transactions_type_check"`, and the API answers `409` instead of `201`. Declines still work, because they write no ledger lines, so always test an approved payment too.
+</Aside>
+
+## Recap
+
+- `POST /api/cards/{id}/payments` answers `201` with `status` `APPROVED` or `DECLINED`. A decline is an answer, not an error.
+- A decline carries a **reason code** for programs and a **message** for people.
+- Every attempt is saved in `card_payments`; only approved ones point at a ledger transaction.
+- The account is locked before the balance is read, and the `Idempotency-Key` makes retries safe.
+- The new `PAY` action lets owners and cardholders pay, never staff; the compiler made sure the rule was written.
+
+<Quiz
+	questions={[
+		{
+			question: 'A payment is declined for insufficient funds. Which status code does PayDeck answer with?',
+			options: ['201, with status DECLINED', '402 Payment Required', '500'],
+			answer: 0,
+			explanation: 'The question was valid and was answered; the answer is no. Errors are for broken requests.',
+		},
+		{
+			question: 'Why does each decline have both a reason code and a message?',
+			options: ['The code is for programs and never changes; the message is for people and can be reworded', 'To make the response bigger', 'The message is for logs only'],
+			answer: 0,
+			explanation: 'The app can react to OVER_LIMIT while showing the human message.',
+		},
+		{
+			question: 'Sam from support tries to pay with a customer\'s card. What happens?',
+			options: ['Approved', 'Declined with a reason', '403 Not allowed, and nothing is saved in card_payments'],
+			answer: 2,
+			explanation: 'Staff may view cards but never move customers\' money.',
+		},
+	]}
+/>
+
+<MarkComplete />

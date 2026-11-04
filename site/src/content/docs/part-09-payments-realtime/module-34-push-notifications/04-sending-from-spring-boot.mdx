@@ -1,0 +1,495 @@
+---
+title: "34.4 Sending from Spring Boot"
+description: "Make PayDeck's API send a push notification to every registered phone of the people involved when money moves: a PushSender interface, a log-only version for development, a Firebase version that signs in with a service account, and clean-up of phones that are gone."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson, when money moves, PayDeck's API sends a notification to the phones of the account's owner and the cardholder, through Firebase when it has a key, and to its log when it does not.
+
+## Why it matters
+
+The phones are registered (lesson 34.3). The events are already there: lesson 33.2's `LiveUpdates` hears about every top-up, payment, decline and refund, after it is saved. This lesson adds the last link, from the API to Firebase, so that Asha's phone buzzes when Eve pays at the bakery.
+
+## The idea
+
+### An interface with two versions
+
+Sending is one small job: "this title and body, to this token". PayDeck puts it behind an interface, `PushSender`, with two versions:
+
+- **`FcmPushSender`** talks to Firebase. It needs a key, which every developer would otherwise need to set up before the API even starts.
+- **A log-only version**, used when no key is set. It writes the notification to the log, which is all you need while building, and in tests a mock replaces both (lesson 25.1).
+
+A `@Configuration` class picks one when the API starts. Like Stripe in lesson 31.2, an API without a key still starts and works; it just does not reach Google.
+
+### The answer matters
+
+Firebase's answer is not just "OK" or "error". For PayDeck, three outcomes are different:
+
+- **Sent.**
+- **Token gone:** Firebase answers `404` with `UNREGISTERED` when the app was uninstalled or the token expired. The phone will never get anything again, so PayDeck deletes the device.
+- **Failed:** anything else (Firebase is down, the key is wrong). Log it and move on: a payment must never fail because a notification did.
+
+### The server signs in to Google
+
+The API calls FCM's **HTTP v1** endpoint:
+
+```
+POST https://fcm.googleapis.com/v1/projects/{project-id}/messages:send
+```
+
+with a short-lived Google access token. To get one, the server signs in to Google as a **service account**, a Google account for programs, using a **private key** file you download from the Firebase console. Google's `google-auth-library` does the signing in and renews the token before it expires.
+
+That key file **is** a secret: with it, anyone can send notifications to all of PayDeck's users. It stays out of Git, and the API only learns where it is from an environment variable (lesson 30.7).
+
+### Who gets notified
+
+For each event: the account's owner, and, for a card event, the card's holder, if that is someone else. Each person's every registered phone gets the notification. A card freeze or unfreeze (`CARD_UPDATED`) is shown in open apps but does not buzz phones: the person who did it already knows.
+
+### Still after the commit, still on another thread
+
+`LiveUpdates.deliver` is `@TransactionalEventListener` and `@Async` (lesson 33.2). Both matter even more now: a notification about a rolled-back payment would be wrong, and a call to Google can take a second, which must not hold up the payment.
+
+## Worked example
+
+### Dependency and setting
+
+In `pom.xml`, a version property and the dependency:
+
+```xml
+        <google-auth.version>1.54.0</google-auth.version>
+```
+
+```xml
+        <dependency>
+            <!-- Signs in to Google as the server, to send push notifications with Firebase -->
+            <groupId>com.google.auth</groupId>
+            <artifactId>google-auth-library-oauth2-http</artifactId>
+            <version>${google-auth.version}</version>
+        </dependency>
+```
+
+In `application.yml`, under `paydeck:`, after `stripe:`:
+
+```yaml
+  push:
+    # A Firebase service account key file. Leave empty to only log notifications.
+    firebase-service-account-file: ${FIREBASE_SERVICE_ACCOUNT_FILE:}
+```
+
+### The interface
+
+`src/main/java/dev/paydeck/api/push/PushSender.java`:
+
+```java
+package dev.paydeck.api.push;
+
+/** Sends one notification to one phone. */
+public interface PushSender {
+
+    enum Result {
+        SENT,
+        /** The app was uninstalled or the token expired: forget this device. */
+        TOKEN_GONE,
+        FAILED
+    }
+
+    Result send(String deviceToken, String title, String body);
+}
+```
+
+### Choosing a version
+
+`PushConfig.java`:
+
+```java
+package dev.paydeck.api.push;
+
+import java.io.IOException;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.client.RestClient;
+
+@Configuration
+public class PushConfig {
+
+    private static final Logger log = LoggerFactory.getLogger(PushConfig.class);
+
+    /**
+     * Real push notifications when FIREBASE_SERVICE_ACCOUNT_FILE points to a
+     * Firebase key. Without one, notifications are only written to the log,
+     * which is all you need while building.
+     */
+    @Bean
+    PushSender pushSender(@Value("${paydeck.push.firebase-service-account-file:}") String serviceAccountFile,
+                          RestClient.Builder http) throws IOException {
+        if (serviceAccountFile.isBlank()) {
+            return (token, title, body) -> {
+                log.info("Push (not sent, Firebase is not set up): {}: {}", title, body);
+                return PushSender.Result.SENT;
+            };
+        }
+        return new FcmPushSender(serviceAccountFile, http);
+    }
+}
+```
+
+The log-only version is a **lambda**: `PushSender` has one method, so a lambda can be one (lesson 17.4).
+
+### The Firebase version
+
+`FcmPushSender.java`:
+
+```java
+package dev.paydeck.api.push;
+
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.List;
+import java.util.Map;
+
+import com.google.auth.oauth2.GoogleCredentials;
+import com.google.auth.oauth2.ServiceAccountCredentials;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientException;
+
+/**
+ * Sends notifications to Android phones through Firebase Cloud Messaging's
+ * HTTP v1 API. The server signs in to Google with a service account key
+ * (downloaded from the Firebase console), and Google gives it a short-lived
+ * access token to send with each message.
+ */
+public class FcmPushSender implements PushSender {
+
+    private static final Logger log = LoggerFactory.getLogger(FcmPushSender.class);
+    private static final String SCOPE = "https://www.googleapis.com/auth/firebase.messaging";
+
+    private final GoogleCredentials credentials;
+    private final String projectId;
+    private final RestClient http;
+
+    public FcmPushSender(String serviceAccountFile, RestClient.Builder http) throws IOException {
+        try (InputStream in = new FileInputStream(serviceAccountFile)) {
+            ServiceAccountCredentials account = ServiceAccountCredentials.fromStream(in);
+            this.credentials = account.createScoped(List.of(SCOPE));
+            this.projectId = account.getProjectId();
+        }
+        this.http = http.baseUrl("https://fcm.googleapis.com").build();
+    }
+
+    @Override
+    public Result send(String deviceToken, String title, String body) {
+        try {
+            credentials.refreshIfExpired();
+            http.post()
+                    .uri("/v1/projects/{project}/messages:send", projectId)
+                    .header("Authorization", "Bearer " + credentials.getAccessToken().getTokenValue())
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(Map.of("message", Map.of(
+                            "token", deviceToken,
+                            "notification", Map.of("title", title, "body", body))))
+                    .retrieve()
+                    .toBodilessEntity();
+            return Result.SENT;
+        } catch (HttpClientErrorException e) {
+            // 404 UNREGISTERED: the token no longer belongs to an installed app.
+            if (e.getStatusCode() == HttpStatus.NOT_FOUND) {
+                return Result.TOKEN_GONE;
+            }
+            log.warn("Firebase refused a notification: {}", e.getResponseBodyAsString());
+            return Result.FAILED;
+        } catch (IOException | RestClientException e) {
+            log.warn("Could not send a notification: {}", e.getMessage());
+            return Result.FAILED;
+        }
+    }
+}
+```
+
+- `ServiceAccountCredentials.fromStream` reads the key file; `createScoped` asks only for permission to send messages, nothing else in the Google project.
+- `refreshIfExpired()` fetches a new Google access token when the old one has run out (they last an hour). Most calls reuse the one it has.
+- The body is FCM's message format: the token, and a `notification` with a title and body that Android shows by itself.
+- `HttpClientErrorException` is a `4xx` answer; `404` is the "token gone" case.
+
+### Sending on every event
+
+In `LiveUpdates`, add `DeviceRepository devices` and `PushSender push` to the fields and the constructor. Then replace the cardholder block at the end of `deliver` with a loop over everyone involved, and add `notifyPhones`:
+
+```java
+    /**
+     * Runs after the transaction that published the event has committed, on
+     * another thread, so a slow connection never slows down a payment.
+     */
+    @Async
+    @TransactionalEventListener
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void deliver(AccountEvent event) {
+        Account account = accounts.findById(event.accountId()).orElseThrow();
+        LiveMessage message = new LiveMessage(event.accountId(), event.kind(), event.title(), event.body(),
+                event.cardId(), ledger.balanceOf(event.accountId()), Instant.now());
+
+        stomp.convertAndSend("/topic/accounts/" + event.accountId(), message);
+
+        Set<UUID> people = new LinkedHashSet<>();
+        if (account.getOwnerUserId() != null) {
+            people.add(account.getOwnerUserId()); // Accounts from before Module 27 have no owner.
+        }
+        if (event.cardId() != null) {
+            cards.findById(event.cardId()).map(card -> card.getCardholderUserId()).ifPresent(people::add);
+        }
+        for (UUID personId : people) {
+            if (!personId.equals(account.getOwnerUserId())) {
+                // Cardholders may not watch the account, so they hear about their card on their own topic.
+                stomp.convertAndSend("/topic/users/" + personId, message.withoutBalance());
+            }
+            if (event.kind() != AccountEvent.Kind.CARD_UPDATED) {
+                // A frozen card shows in the app, but is not worth buzzing a phone for.
+                notifyPhones(personId, event);
+            }
+        }
+    }
+
+    private void notifyPhones(UUID personId, AccountEvent event) {
+        for (Device device : devices.findByUserId(personId)) {
+            if (push.send(device.getToken(), event.title(), event.body()) == PushSender.Result.TOKEN_GONE) {
+                devices.deleteByToken(device.getToken());
+            }
+        }
+    }
+```
+
+A `LinkedHashSet` holds each person once, in order: if Asha holds a card on her own account, she is not notified twice.
+
+### Tests
+
+`src/test/java/dev/paydeck/api/push/PushNotificationTest.java` replaces the sender with a Mockito mock (`@MockitoBean`, lesson 25.1), so no test talks to Google:
+
+```java
+package dev.paydeck.api.push;
+
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import java.util.UUID;
+
+import dev.paydeck.api.ApiTestSupport;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+import org.springframework.http.MediaType;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+
+/** When money moves, the phones of the people involved get a notification. */
+class PushNotificationTest extends ApiTestSupport {
+
+    @MockitoBean
+    PushSender push;
+
+    @Test
+    void theOwnersPhonesHearAboutATopUp() throws Exception {
+        when(push.send(anyString(), anyString(), anyString())).thenReturn(PushSender.Result.SENT);
+        UUID account = openAccount("Asha", "GBP");
+        String phone = "phone-" + UUID.randomUUID();
+        String tablet = "tablet-" + UUID.randomUUID();
+        registerPhone(ownerOf(account), phone);
+        registerPhone(ownerOf(account), tablet);
+
+        topUp(account, 1_050);
+
+        verify(push, timeout(5_000)).send(eq(phone), eq("Money added"), contains("£10.50"));
+        verify(push, timeout(5_000)).send(eq(tablet), eq("Money added"), contains("£10.50"));
+    }
+
+    @Test
+    void theCardholdersPhoneHearsAboutTheirPayment() throws Exception {
+        when(push.send(anyString(), anyString(), anyString())).thenReturn(PushSender.Result.SENT);
+        UUID account = openAccount("Asha", "USD");
+        topUp(account, 5_000);
+        TestUser eve = register("Eve");
+        UUID card = issueCard(account, "For Eve", 1_000L, eve.email());
+        String evesPhone = "eve-" + UUID.randomUUID();
+        registerPhone(eve, evesPhone);
+
+        mvc.perform(post("/api/cards/{id}/payments", card).with(as(eve))
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"amountCents": 450, "merchant": "Bakery"}
+                                """))
+                .andExpect(status().isCreated());
+
+        verify(push, timeout(5_000)).send(eq(evesPhone), eq("You paid Bakery"), eq("$4.50 with For Eve"));
+    }
+
+    @Test
+    void phonesThatWereUninstalledAreForgotten() throws Exception {
+        String phone = "gone-" + UUID.randomUUID();
+        when(push.send(eq(phone), anyString(), anyString())).thenReturn(PushSender.Result.TOKEN_GONE);
+        UUID account = openAccount("Asha", "USD");
+        registerPhone(ownerOf(account), phone);
+
+        topUp(account, 100);
+        verify(push, timeout(5_000)).send(eq(phone), anyString(), anyString());
+        Mockito.clearInvocations(push);
+
+        topUp(account, 100);
+        Thread.sleep(1_000);
+        verify(push, never()).send(eq(phone), anyString(), anyString());
+    }
+
+    private void registerPhone(TestUser user, String token) throws Exception {
+        mvc.perform(post("/api/devices").with(as(user))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"platform": "ANDROID", "token": "%s"}
+                                """.formatted(token)))
+                .andExpect(status().isNoContent());
+    }
+}
+```
+
+`verify(push, timeout(5_000))` waits up to five seconds, because `deliver` runs on another thread after the request has answered. In the third test, the mock plays Firebase saying "token gone"; the second top-up must then not try that phone again.
+
+```
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0
+```
+
+Is the third test really testing something? Comment out the `devices.deleteByToken(...)` line and run it again:
+
+```
+[ERROR] PushNotificationTest.phonesThatWereUninstalledAreForgotten:76
+But invoked here:
+[ERROR] Tests run: 3, Failures: 1, Errors: 0, Skipped: 0
+```
+
+Put the line back.
+
+### Try it without Firebase
+
+Restart the API without `FIREBASE_SERVICE_ACCOUNT_FILE`. With Asha's and Eve's phones registered (lesson 34.3), top up Asha's account, let Eve pay $4.50 at the bakery with her "For Eve" card, try the Groceries card for $75.00, and freeze and unfreeze Groceries. The API's log says:
+
+```
+dev.paydeck.api.push.PushConfig          : Push (not sent, Firebase is not set up): Money added: $10.00 added: Birthday money
+dev.paydeck.api.push.PushConfig          : Push (not sent, Firebase is not set up): You paid Bakery: $4.50 with For Eve
+dev.paydeck.api.push.PushConfig          : Push (not sent, Firebase is not set up): You paid Bakery: $4.50 with For Eve
+dev.paydeck.api.push.PushConfig          : Push (not sent, Firebase is not set up): Payment declined: $75.00 at Gadget Shop with Groceries. The payment is over the card's spending limit.
+```
+
+The bakery line appears twice: once for Asha's phone (she owns the account) and once for Eve's (she holds the card). The freeze and unfreeze send nothing.
+
+### Try it with Firebase
+
+In the Firebase console, open **Project settings → Service accounts** and click **Generate new private key**. Save the file outside your project folder, for example in `~/secrets/paydeck-firebase.json`, and start the API with:
+
+```sh
+FIREBASE_SERVICE_ACCOUNT_FILE=~/secrets/paydeck-firebase.json ./mvnw spring-boot:run
+```
+
+Run the app on the emulator (lesson 34.2), sign in as Asha and allow notifications, then press the emulator's Home button so PayDeck is in the background. Top up with `curl`: a notification slides down from the top of the emulator's screen. (While PayDeck is open, Android leaves FCM notifications to the app, and the live banner from Module 33 shows instead.)
+
+The course's machines cannot sign in to a real Firebase project, but they can show what each kind of failure looks like. Firebase without a Google access token:
+
+```sh
+curl -s -X POST https://fcm.googleapis.com/v1/projects/paydeck-demo/messages:send \
+  -H 'Content-Type: application/json' \
+  -d '{"message":{"token":"abc","notification":{"title":"Money added","body":"$10.00 added"}}}'
+```
+
+```json
+{
+  "error": {
+    "code": 401,
+    "message": "Request is missing required authentication credential. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.",
+    "status": "UNAUTHENTICATED",
+    …
+  }
+}
+```
+
+And the API started with a key file that looks right but belongs to no real project (the course made one up). A top-up still answers `201`, and the log says:
+
+```
+dev.paydeck.api.push.FcmPushSender       : Could not send a notification: Error getting access token for service account: 400 Bad Request
+{"error":"invalid_grant","error_description":"Invalid grant: account not found"}, iss: paydeck-push@paydeck-course-demo.iam.gserviceaccount.com
+```
+
+The payment worked; only the notification failed, and the log says why.
+
+<Exercise title="Data with the notification">
+When Asha taps the "Payment declined" notification, PayDeck opens on the Wallet. It would be better on the card that was declined. FCM messages can carry a `data` object of string keys and values next to `notification`, which the app receives when opened from the notification. Change `PushSender` and `FcmPushSender` so that `LiveUpdates` can send `cardId` along. What would the app then need?
+
+<Fragment slot="hint">Add a `Map<String, String> data` parameter to `send`. Remember that the log-only lambda and the mocks in the tests must change too.</Fragment>
+<Fragment slot="solution">
+
+`Result send(String deviceToken, String title, String body, Map<String, String> data);`. In `FcmPushSender`, the message map becomes `Map.of("token", deviceToken, "notification", Map.of(...), "data", data)`. In `LiveUpdates.notifyPhones`, pass `event.cardId() == null ? Map.of() : Map.of("cardId", event.cardId().toString())`. The lambda in `PushConfig` takes four parameters, and the tests use `anyMap()` or `eq(Map.of(...))` for the new argument.
+
+The app would read it with React Native Firebase's `getInitialNotification` (the app was closed) and `onNotificationOpenedApp` (it was in the background), and navigate to `{ name: 'card', cardId }`. Values in `data` must be strings, which is why the UUID is turned into one.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="danger" title="Committing the service account key">
+With it, anyone can send notifications to every PayDeck user. Keep it outside the project, pass its path in an environment variable, and if it ever leaks, delete the key in the Firebase console and generate a new one.
+</Aside>
+
+<Aside type="caution" title="Letting a notification failure fail the payment">
+`FcmPushSender` catches its own errors and returns `FAILED`. The money has already moved and been committed; a slow or broken Google must not turn that into an error for the person paying.
+</Aside>
+
+<Aside type="caution" title="Keeping dead tokens forever">
+Every uninstall leaves a token behind. Without the `TOKEN_GONE` clean-up, each payment sends more and more requests that can never arrive.
+</Aside>
+
+## Recap
+
+- `PushSender` sends one notification; `PushConfig` picks `FcmPushSender` when `FIREBASE_SERVICE_ACCOUNT_FILE` is set, and a log-only lambda otherwise.
+- `FcmPushSender` signs in as a **service account** with `google-auth-library`, and posts to FCM's HTTP v1 `messages:send`.
+- `404` means the token is gone: PayDeck deletes the device. Other failures are logged, never thrown.
+- `LiveUpdates` notifies the owner and the cardholder, on all their phones, after the commit and on another thread. Card freezes are not pushed.
+
+<Quiz
+	questions={[
+		{
+			question: 'What happens when no FIREBASE_SERVICE_ACCOUNT_FILE is set?',
+			options: ['The API refuses to start', 'Notifications are written to the log instead of being sent', 'Notifications are sent without signing in'],
+			answer: 1,
+			explanation: 'Everything else works, and you can see exactly what would have been sent.',
+		},
+		{
+			question: 'Firebase answers 404 UNREGISTERED for one of Asha\'s phones. What does PayDeck do?',
+			options: ['Retries every minute', 'Deletes that device, because the app is gone from it', 'Fails the payment'],
+			answer: 1,
+			explanation: 'The token will never work again.',
+		},
+		{
+			question: 'Eve pays with the card Asha gave her. Whose phones are notified?',
+			options: ['Only Eve\'s', 'Only Asha\'s', 'Asha\'s (the owner) and Eve\'s (the cardholder)'],
+			answer: 2,
+			explanation: 'Both have a reason to know: it is Asha\'s money and Eve\'s card.',
+		},
+	]}
+/>
+
+<MarkComplete />

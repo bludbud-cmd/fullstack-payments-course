@@ -1,0 +1,122 @@
+---
+title: "34.7 Bonus: Apple Push Notification service for macOS"
+description: "For readers with a paid Apple Developer membership: what it takes to send PayDeck's notifications to the Mac through Apple's push service, on the Mac app's side and on the API's side, and how the code from this module would grow to hold a second platform."
+sidebar:
+  order: 7
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you know the pieces needed to push PayDeck's notifications to a Mac through APNs, and where each would fit in the code you already have.
+
+<Aside type="caution" title="A map, not a recipe">
+This lesson is optional, and it is different from the others: it needs an **Apple Developer Program membership** (a yearly fee), which this course does not require, so the course has not run these steps itself. It explains the parts and points to Apple's own documentation for the exact screens, which change from one Xcode version to the next. Everything else in PayDeck works without it.
+</Aside>
+
+## Why it matters
+
+Lesson 34.6 made the Mac's banner as good as it can be while PayDeck is open. A real product would also want the Mac to show "Payment declined" in the corner of the screen when PayDeck is closed. If you have a membership, or your employer does, this is the way.
+
+## The idea
+
+APNs works like FCM (lesson 34.1): permission, device token, server, push service, device. What differs is who checks what.
+
+### On the Mac
+
+- **Signing.** The app must be signed with your team's certificate and have the **Push Notifications** capability. In Xcode, on the macOS target's **Signing & Capabilities** tab, you choose your team and add the capability. This adds an entitlement called `aps-environment` to the app. Without it, macOS refuses to give the app a token.
+- **Permission.** The app asks with Apple's `UNUserNotificationCenter` ("PayDeck would like to send you notifications").
+- **Token.** The app calls `registerForRemoteNotifications`, and macOS hands its delegate a device token: 32 bytes, usually written as 64 hexadecimal characters.
+
+These are native macOS calls. React Native for macOS does not include a push module, so you would either use a library that supports `react-native-macos`, or write a small native module (Objective-C or Swift) that does these three steps and passes the token to JavaScript. Then the JavaScript side looks like `push.ts`: get the token, `registerDevice`, unregister on sign-out.
+
+### On the API
+
+- **An APNs key.** In your Apple Developer account, under **Certificates, Identifiers & Profiles → Keys**, you create a key with APNs enabled and download it once, as a `.p8` file. It is a secret, exactly like the Firebase service account key (lesson 34.4). You also note its **Key ID** and your **Team ID**.
+- **A token for each request.** The server signs a short JWT (lesson 27.5, but signed with the `.p8` key using `ES256` instead of a shared secret), with your Team ID as issuer and the Key ID in its header. Apple accepts the same JWT for up to an hour.
+- **The request.** An HTTP/2 `POST` to `https://api.push.apple.com/3/device/{device token}` (or `api.sandbox.push.apple.com` for apps run from Xcode), with the JWT as `authorization: bearer …`, an `apns-topic` header set to the app's bundle ID, `apns-push-type: alert`, and a body like:
+
+```json
+{"aps": {"alert": {"title": "Payment declined", "body": "$89.99 at Gadget Shop with Groceries."}}}
+```
+
+- **The answers.** `200` is sent. `410 Gone` (reason `Unregistered`) is Apple's "token gone", the same case as FCM's `404`: delete the device.
+
+Firebase can also deliver to Apple devices if you upload the `.p8` key to the Firebase project, which would let the API keep a single sender. Either way, the Mac app's side is the same.
+
+## Worked example: where it fits in PayDeck
+
+Nothing here needs to be built to finish the course. It is how this module's code would grow.
+
+1. **A second platform.** A migration widens the check: `CHECK (platform IN ('ANDROID', 'MACOS'))`, and `RegisterDeviceRequest` allows it: `@Pattern(regexp = "ANDROID|MACOS")`. The Mac app registers with `platform: 'MACOS'`.
+2. **A second sender.** `ApnsPushSender implements PushSender`, built like `FcmPushSender`: it reads the `.p8` key, Key ID, Team ID and bundle ID from settings (`APNS_KEY_FILE` and friends), makes and reuses the JWT, and maps `410` to `TOKEN_GONE`. Java's built-in `java.net.http.HttpClient` speaks HTTP/2.
+3. **Choosing per device.** `LiveUpdates.notifyPhones` already loops over `Device` rows, and each row knows its platform. A small `PushSenders` component holds both senders and picks one with `device.getPlatform()`, with the log-only lambda standing in for whichever one has no key.
+4. **Settings stay as they are.** The two switches from lesson 34.5 are about the person, not the device, so the Mac respects them with no change.
+
+<Exercise title="Design the change on paper">
+Without writing the APNs code, write down the new signatures for steps 2 and 3: the `PushSenders` component's constructor and method, and the one line in `notifyPhones` that changes. How does the test in `PushNotificationTest` change, and how do you keep it from needing an Apple account?
+
+<Fragment slot="hint">`Device` would need a `getPlatform()` getter. Tests already replace `PushSender` with a mock; what would they replace now?</Fragment>
+<Fragment slot="solution">
+
+```java
+@Component
+public class PushSenders {
+    public PushSenders(@Qualifier("android") PushSender android, @Qualifier("macos") PushSender macos) { … }
+
+    public PushSender.Result send(Device device, String title, String body) {
+        PushSender sender = "MACOS".equals(device.getPlatform()) ? macos : android;
+        return sender.send(device.getToken(), title, body);
+    }
+}
+```
+
+In `PushConfig`, two `@Bean` methods named `android` and `macos`, each returning the log-only lambda when its key is missing. In `notifyPhones`, `push.send(device.getToken(), …)` becomes `senders.send(device, …)`.
+
+Tests replace `PushSenders` with `@MockitoBean` instead of `PushSender`, and verify calls with the device's token, or keep mocking the two `PushSender` beans by name, and add one test that registers a `MACOS` device and checks the `macos` mock was used. No test talks to Apple, just as none talks to Google.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Testing a development build against production APNs">
+An app run from Xcode gets **sandbox** tokens, which only `api.sandbox.push.apple.com` accepts. Production APNs answers them with an error, and the other way round. Keep the environment in a setting.
+</Aside>
+
+<Aside type="caution" title="A new JWT for every notification">
+Apple limits how often a new provider token may be made. Make one, reuse it, and replace it before it is an hour old, the way `GoogleCredentials.refreshIfExpired` does for FCM.
+</Aside>
+
+## Recap
+
+- APNs needs a signed app with the Push Notifications capability, which needs a paid Apple Developer membership.
+- The Mac app asks permission, registers for remote notifications, and sends its token to the API, just like Android.
+- The API signs a JWT with an APNs `.p8` key and posts to Apple over HTTP/2; `410` means the token is gone.
+- In PayDeck, a second platform value, a second `PushSender`, and a choice per device are all it would take.
+
+<Quiz
+	questions={[
+		{
+			question: 'What does the Mac app need before macOS gives it a device token?',
+			options: ['A Firebase project', 'To be signed by a team with the Push Notifications capability', 'An internet connection only'],
+			answer: 1,
+			explanation: 'The aps-environment entitlement comes with the capability, which needs a membership.',
+		},
+		{
+			question: 'What is Apple\'s equivalent of FCM\'s 404 UNREGISTERED?',
+			options: ['410 Gone', '401 Unauthorized', '500 Internal Server Error'],
+			answer: 0,
+			explanation: 'Either way, the device row should be deleted.',
+		},
+		{
+			question: 'Which part of PayDeck would not need to change to add Mac push?',
+			options: ['The devices table', 'The PushSender used for each device', 'The notification settings'],
+			answer: 2,
+			explanation: 'Settings belong to the person, so they already apply to every device.',
+		},
+	]}
+/>
+
+<MarkComplete />

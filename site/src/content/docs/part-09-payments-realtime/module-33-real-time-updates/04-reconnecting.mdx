@@ -1,0 +1,205 @@
+---
+title: "33.4 Reconnecting after a dropped connection"
+description: "Connections drop: phones change networks, laptops sleep, servers restart. Make PayDeck's live feed come back on its own, with growing waits between tries, a fresh token each time, and a fix for a real bug where one kind of failure stopped it for good."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can explain how PayDeck's app reconnects after the connection drops, why it waits longer after each failure, how it gets past an expired token, and why it listens for both `close` and `error`.
+
+## Why it matters
+
+A request either succeeds or fails, and the app shows which. A WebSocket can fail quietly an hour after it opened: Asha's train goes into a tunnel, her Mac sleeps, PayDeck deploys a new version of the API. If the app does not notice and reconnect, the live feed simply stops, and nothing on the screen says so. That is worse than no live feed at all, because Asha trusts what she sees.
+
+## The idea
+
+### Every way it can end
+
+A WebSocket in the app tells you about trouble through two events:
+
+- **`close`**: the connection has ended. The server closed it, or the network did, or the app did.
+- **`error`**: something went wrong. Often a `close` follows, but not always (you will see that below).
+
+After either, the old `WebSocket` object is finished for good. You cannot "reopen" it: you make a new one.
+
+### Wait, then try again, and wait longer each time
+
+If the API is down for a deploy, reconnecting at once fails at once. Trying again in a tight loop would burn the phone's battery and, multiplied by thousands of phones, hit the API with a flood of connections the moment it comes back. So PayDeck waits:
+
+| Attempt | Wait before it |
+|---|---|
+| 1 | 1 second |
+| 2 | 2 seconds |
+| 3 | 4 seconds |
+| 4 | 8 seconds |
+| … | doubling, up to 60 seconds |
+
+This is called **exponential backoff**. When a connection succeeds (the server says `CONNECTED`), the wait goes back to one second, so the *next* drop is retried quickly again.
+
+Big apps also add a little randomness to each wait (**jitter**), so that ten thousand phones that lost the API at the same moment do not all come back in the same second. PayDeck's numbers are small enough to leave it out; the exercise adds it.
+
+### A fresh token each time
+
+The access token expires after 15 minutes (lesson 27.5). An app that has been reconnecting since the morning must not send the morning's token. That is why `connectStomp` takes `accessToken` as a function and calls it in every `CONNECT` (lesson 33.3).
+
+And if the token has already expired, the server answers `CONNECT` with an `ERROR` frame and closes the connection (you saw `ERROR message:Sign in to continue.` in lesson 33.2). Two things then happen together:
+
+1. `onRefused` calls `refreshTokens()`, which uses the refresh token to get a new access token (lesson 28.4).
+2. The `close` that follows schedules a reconnect, one second later. By then the new token is there, and `currentAccessToken()` returns it.
+
+If the refresh token has expired too, `refreshTokens()` signs the person out, `LiveUpdates` disappears, and its clean-up stops the reconnecting.
+
+### Heartbeats
+
+A connection can also die without any event at all: the phone's network vanishes, and no `close` arrives for minutes. STOMP's answer is **heartbeats**: each side promises to send something (an empty line) every few seconds, and if the other side hears nothing for a while, it treats the connection as dead.
+
+PayDeck's `CONNECT` asks for `heart-beat: 0,0`, meaning none, for two reasons: Spring's simple broker sends no heartbeats unless it is given a scheduler to send them with, and the app refetches everything whenever it reconnects anyway. If you want them, the API sets `setHeartbeatValue(new long[] {10000, 10000})` and a `TaskScheduler` on the broker, the app asks for `heart-beat: 10000,10000`, and `decodeFrame` already treats an empty line as a heartbeat (lesson 33.3's fourth test).
+
+## Worked example
+
+### The first version, and its bug
+
+Lesson 33.3's `stomp.ts` reconnects in `onclose`:
+
+```ts
+    ws.onclose = () => {
+      if (!stopped) {
+        // Wait a little longer after each failure, up to a minute.
+        retry = setTimeout(open, delay);
+        delay = Math.min(delay * 2, 60_000);
+      }
+    };
+```
+
+To test it, the course signed in as Asha in the real app, restarted the API, waited, and topped up from the terminal. No banner came. Logging every event, with its time, showed why:
+
+```
+DBG frame 2026-11-04T09:54:14.353Z string CONNECTED
+DBG close 2026-11-04T09:54:15.889Z 1000
+DBG error 2026-11-04T09:54:16.894Z Received network error or non-101 status code.
+```
+
+1. The API stops, so the connection **closes**, and the app schedules a new try in 1 second (the `1000` is `delay`).
+2. One second later the API is still starting up, so the new connection fails. That WebSocket reported an **error**, and never a `close`.
+3. The code only reconnects on `close`, so nothing schedules another try. The feed is dead, with no sign of it on screen.
+
+Whether a failed handshake gives you `error` and then `close`, or just `error`, depends on the WebSocket implementation (the browser, React Native on Android, React Native on macOS, Node.js). Code that relies on one of them will break on another.
+
+### The fix
+
+Make both events lead to the same function, and let only the first one count, so a connection that reports both does not schedule two reconnects. In `src/live/stomp.ts`, replace `ws.onclose = …` with:
+
+```ts
+    // A dropped connection fires "close". A connection that never opened may
+    // fire only "error", so both lead here, and only the first one counts.
+    let gone = false;
+    const reconnect = () => {
+      if (gone || stopped) {
+        return;
+      }
+      gone = true;
+      // Wait a little longer after each failure, up to a minute.
+      retry = setTimeout(open, delay);
+      delay = Math.min(delay * 2, 60_000);
+    };
+    ws.onclose = reconnect;
+    ws.onerror = reconnect;
+```
+
+`gone` belongs to *this* `ws` (it is declared inside `open`), so the next connection starts with its own `gone = false`.
+
+### Checking it
+
+The same test, run again: sign in, restart the API (stopped at 10:03:28, back at 10:03:43), wait, top up from the terminal, and print the banner:
+
+```
+RESTART stopped at 10:03:28 / started at 10:03:43
+CURL 201 2026-11-04T10:04:18.581Z
+BANNER Money added | $10.00 added: From my laptop
+  ✓ the feed comes back after the API restarts (54621 ms)
+```
+
+While the API was down, the app kept trying, waiting 1, 2, 4, 8 … seconds between tries, and the first try after the API was back succeeded.
+
+You can watch the same thing yourself: run the app, stop the API with Ctrl+C, count to twenty, start it again, and top up with `curl`. The banner appears.
+
+<Exercise title="Add jitter">
+Change `reconnect` so that each wait is the current `delay` plus up to 50% extra, chosen at random. With `delay` at 4 seconds, the wait should be somewhere between 4 and 6 seconds. Why does this help the API more than it helps Asha?
+
+<Fragment slot="hint">`Math.random()` returns a number from 0 up to (not including) 1.</Fragment>
+<Fragment slot="solution">
+
+```ts
+      retry = setTimeout(open, delay * (1 + Math.random() / 2));
+      delay = Math.min(delay * 2, 60_000);
+```
+
+Asha's single app gains nothing: it reconnects a little later, on average. The API gains a lot: when it restarts with 10,000 apps connected, the reconnections spread over several seconds instead of arriving in the same few milliseconds after each step of the backoff.
+</Fragment>
+</Exercise>
+
+<Exercise title="Back from the background">
+On a phone, the system may close the WebSocket while PayDeck is in the background. When Asha comes back after an hour, the backoff may be at 60 seconds, so the feed takes up to a minute to return. How could the app reconnect at once when it comes to the foreground?
+
+<Fragment slot="hint">React Native's `AppState` tells you when the app becomes `active`. What would you need `connectStomp` to offer?</Fragment>
+<Fragment slot="solution">
+
+Give `connectStomp` a way to "try now": for example, return an object with `stop()` and `retryNow()`, where `retryNow` clears the pending `retry` timer, resets `delay` to 1000 and calls `open()` if there is no live connection. In `LiveUpdates`, listen with `AppState.addEventListener('change', ...)` and call `retryNow()` when the state becomes `'active'`, and also `queryClient.invalidateQueries()`, because messages sent while the app was away are gone. Remove the listener in the clean-up.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="danger" title="Reconnecting only on close">
+As the log above shows, some failures only report `error`. Handle both, once.
+</Aside>
+
+<Aside type="caution" title="Reconnecting at once, forever">
+A loop with no wait turns a short outage into a flood of connections from every app at once, which can keep the API down. Back off.
+</Aside>
+
+<Aside type="caution" title="Reconnecting after sign-out">
+The `stopped` flag is what keeps a signed-out app from reconnecting with nobody's token. Check it before every new try, and clear the pending timer when stopping.
+</Aside>
+
+<Aside type="caution" title="Forgetting what was missed">
+While disconnected, messages are not kept for you: Spring's simple broker sends each message to whoever is subscribed at that moment. That is fine for PayDeck because a message only says "go and look" and the screens refetch, but an app that applied changes straight from messages would now be wrong.
+</Aside>
+
+## Recap
+
+- After `close` or `error`, a WebSocket is finished; the app makes a new one.
+- **Exponential backoff**: 1, 2, 4, 8 … up to 60 seconds, back to 1 after a success. **Jitter** spreads many apps out.
+- Each `CONNECT` reads the current access token; an `ERROR` frame triggers a refresh, and the reconnect a second later uses the new token.
+- Listen for both `close` and `error`, and let only the first one schedule a reconnect.
+- **Heartbeats** detect a connection that died silently; PayDeck does without them and refetches on reconnect.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why does PayDeck wait longer after each failed reconnect?',
+			options: ['To save the server from a flood of connections, and the phone\'s battery, while the API is down', 'Because WebSockets only allow one connection a minute', 'So the person notices the problem'],
+			answer: 0,
+			explanation: 'Retrying in a tight loop helps nobody while the API is down, and hurts it when it comes back.',
+		},
+		{
+			question: 'After the API restarted, the first version of the app never reconnected. Why?',
+			options: ['The token had expired', 'The failed retry reported only an error event, and the code reconnected only on close', 'The API refused all WebSockets after a restart'],
+			answer: 1,
+			explanation: 'The fix listens for both events and lets the first one schedule the next try.',
+		},
+		{
+			question: 'A connection fails because the access token expired. What makes the next try succeed?',
+			options: ['Nothing; the person must sign in again', 'onRefused refreshes the token, and the next CONNECT reads the new one', 'The server extends the old token'],
+			answer: 1,
+			explanation: 'accessToken is a function, read again on every CONNECT.',
+		},
+	]}
+/>
+
+<MarkComplete />

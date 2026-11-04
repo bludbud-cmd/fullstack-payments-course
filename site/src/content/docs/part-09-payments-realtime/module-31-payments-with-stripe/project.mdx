@@ -1,0 +1,320 @@
+---
+title: "Mini-project: top up the PayDeck wallet"
+description: "Put card top-ups in the app: the Top up screen opens Stripe's payment page, waits for the person to come back, and refreshes the wallet, while the API learns to switch off the pretend top-up for good."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+Since Module 26, the app's **Top up** screen has said "For now it is pretend money; Part 9 charges a real card." This project keeps that promise. The API can already open Stripe's payment page (lesson 31.3) and credit the wallet when Stripe confirms (lesson 31.4); now the app uses them, and the pretend top-up gets a switch so a real server can turn it off.
+
+## The tasks
+
+1. **A switch for pretend money.** A setting `paydeck.simulated-top-ups`, read from `PAYDECK_SIMULATED_TOP_UPS`, `true` by default. When it is `false`, `POST /api/accounts/{id}/top-ups` answers `422` with the code `SIMULATED_TOP_UPS_OFF` and the message "Top up with a card instead." Card top-ups do not use that endpoint (they call `money.topUp` from the webhook), so they keep working.
+2. **A test.** In `StripeTopUpTest`, set the switch to `false` for the class and add a test that the pretend top-up is refused. `./mvnw test` should report 92 tests.
+3. **The request and hooks.** `startCardTopUp(accountId, amountCents, idempotencyKey)` in `src/api/paydeck.ts`; a `useStartCardTopUp()` mutation; and `useRefreshWallet()`, which marks the balance and history as stale.
+4. **The screen.** The main button becomes **Pay $25.00 by card**. It asks the API for a page and opens it with `Linking.openURL`, then says "Finish paying in your browser…" with the test card number. When the app is opened by `paydeck://top-up?result=success`, it shows **Thank you** and refreshes the wallet; for `result=cancelled` it says nothing was charged. **Add pretend money** stays as a smaller button, and shows the API's message if the server has switched it off.
+5. Try it with the Stripe CLI forwarding webhooks, and commit.
+
+<Exercise title="Build it">
+Do the five tasks.
+
+<Fragment slot="hint">For the switch, `MoneyController` can take `@Value("${paydeck.simulated-top-ups:true}") boolean simulatedTopUps` in its constructor (lesson 21.4), and throw the `BusinessRuleException` from lesson 22.4.</Fragment>
+<Fragment slot="hint2">The app link arrives the same way as Google sign-in's in Module 29: `Linking.addEventListener('url', ...)`, and `queryParams` from `src/auth/links.ts` reads `result`. The `paydeck` scheme is already registered, so nothing changes in the Android or macOS project.</Fragment>
+<Fragment slot="solution">
+
+### The switch
+
+In `application.yml`, under `paydeck:`:
+
+```yaml
+  # The pretend "add money" top-up from Part 6. Turn it off once card top-ups work.
+  simulated-top-ups: ${PAYDECK_SIMULATED_TOP_UPS:true}
+```
+
+In `MoneyController`, add the setting to the constructor (with `import org.springframework.beans.factory.annotation.Value;` and `import dev.paydeck.api.common.BusinessRuleException;`):
+
+```java
+    private final MoneyMovementService money;
+    private final AccessPolicy access;
+    private final LedgerService ledger;
+    private final boolean simulatedTopUps;
+
+    public MoneyController(MoneyMovementService money, AccessPolicy access, LedgerService ledger,
+                           @Value("${paydeck.simulated-top-ups:true}") boolean simulatedTopUps) {
+        this.money = money;
+        this.access = access;
+        this.ledger = ledger;
+        this.simulatedTopUps = simulatedTopUps;
+    }
+```
+
+and check it in `topUp`, after the access check:
+
+```java
+        access.account(user, accountId, AccountAction.MOVE_MONEY);
+        if (!simulatedTopUps) {
+            throw new BusinessRuleException("SIMULATED_TOP_UPS_OFF", "Top up with a card instead.");
+        }
+```
+
+The access check stays first: someone else's account should still be "not found", not "use a card".
+
+### The test
+
+In `StripeTopUpTest`, add the setting to `@TestPropertySource`:
+
+```java
+@TestPropertySource(properties = {
+        "paydeck.stripe.secret-key=sk_test_fake",
+        "paydeck.stripe.webhook-secret=" + StripeTopUpTest.WEBHOOK_SECRET,
+        "paydeck.simulated-top-ups=false"
+})
+```
+
+and the test:
+
+```java
+    @Test
+    void pretendTopUpsAreOffOnceStripeIsLive() throws Exception {
+        UUID account = openAccount("Asha", "USD");
+        mvc.perform(post("/api/accounts/{id}/top-ups", account).with(asOwnerOf(account))
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"amountCents": 100, "description": "Free money"}
+                                """))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.code").value("SIMULATED_TOP_UPS_OFF"));
+    }
+```
+
+This class's other tests still pass with the switch off, which is the point: card top-ups never needed the pretend endpoint. Every other test class keeps the default, `true`, so their `topUp(...)` helper still works. `./mvnw test`: 92 tests.
+
+### Requests and hooks
+
+At the end of `src/api/paydeck.ts`:
+
+```ts
+/** Asks the API for a Stripe payment page. The app opens `url` in the browser. */
+export const startCardTopUp = (accountId: string, amountCents: number, idempotencyKey: string) =>
+  request<{ checkoutId: string; url: string }>(`/api/accounts/${accountId}/top-ups/checkout`, {
+    method: 'POST',
+    body: { amountCents },
+    idempotencyKey,
+  });
+```
+
+At the end of `src/api/hooks.ts` (and add `import { useCallback } from 'react';` at the top):
+
+```ts
+/** Opens a Stripe payment page for a top-up. The money arrives later, from Stripe's webhook. */
+export function useStartCardTopUp() {
+  const accountId = useAccountId();
+  return useMutation({
+    mutationFn: ({ amountCents, idempotencyKey }: { amountCents: number; idempotencyKey: string }) =>
+      api.startCardTopUp(accountId, amountCents, idempotencyKey),
+  });
+}
+
+/** Fetches the balance and history again, for example after paying on Stripe's page. */
+export function useRefreshWallet() {
+  const accountId = useAccountId();
+  const queryClient = useQueryClient();
+  return useCallback(
+    () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: keys.account(accountId) }),
+        queryClient.invalidateQueries({ queryKey: keys.activity(accountId) }),
+      ]),
+    [accountId, queryClient],
+  );
+}
+```
+
+`useCallback` is new. A component's function runs again on every render, so normally `() => ...` makes a new function each time. `useCallback(fn, [accountId, queryClient])` hands back the same function until one of those values changes. That matters because the screen's `useEffect` lists it as a dependency (lesson 10.5's rule: the effect runs again when a dependency changes), and a new function every render would make the screen unsubscribe and subscribe to links again and again.
+
+### The screen
+
+`src/screens/TopUpScreen.tsx`:
+
+```tsx
+import { useEffect, useState } from 'react';
+import { Linking, StyleSheet, Text } from 'react-native';
+import { newIdempotencyKey } from '../api/client';
+import { useAccount, useRefreshWallet, useStartCardTopUp, useTopUp } from '../api/hooks';
+import { queryParams } from '../auth/links';
+import { Button } from '../components/Button';
+import { Field } from '../components/Field';
+import { Screen } from '../components/Screen';
+import { formatMoney, parseMoneyInput } from '../money';
+import { useNavigation } from '../navigation/NavigationContext';
+
+/** Where Stripe's page sends people back to, through the API's /payments/return. */
+const RETURN_LINK = 'paydeck://top-up';
+
+export function TopUpScreen() {
+  const { goBack } = useNavigation();
+  const account = useAccount();
+  const topUp = useTopUp();
+  const startCard = useStartCardTopUp();
+  const refreshWallet = useRefreshWallet();
+  const [amount, setAmount] = useState('');
+  const [submitted, setSubmitted] = useState(false);
+  // One key per amount. If the network fails and the person taps again,
+  // the same key is sent, and the API makes sure the money arrives only once.
+  const [idempotencyKey, setIdempotencyKey] = useState(newIdempotencyKey);
+  const [stripe, setStripe] = useState<'idle' | 'waiting' | 'paid' | 'cancelled'>('idle');
+
+  const currency = account.data?.currency ?? 'USD';
+  const cents = parseMoneyInput(amount);
+  const error = cents === null ? 'Enter an amount like 25 or 25.50' : null;
+
+  // After paying, Stripe's page sends the browser to paydeck://top-up?result=…, which opens the app again.
+  useEffect(() => {
+    const subscription = Linking.addEventListener('url', ({ url }) => {
+      if (url.startsWith(RETURN_LINK)) {
+        const paid = queryParams(url).result === 'success';
+        setStripe(paid ? 'paid' : 'cancelled');
+        if (paid) {
+          refreshWallet();
+        }
+      }
+    });
+    return () => subscription.remove();
+  }, [refreshWallet]);
+
+  function changeAmount(text: string) {
+    setAmount(text);
+    setIdempotencyKey(newIdempotencyKey());
+  }
+
+  function payByCard() {
+    setSubmitted(true);
+    if (cents !== null && !startCard.isPending) {
+      startCard.mutate(
+        { amountCents: cents, idempotencyKey },
+        {
+          onSuccess: async ({ url }) => {
+            await Linking.openURL(url);
+            setStripe('waiting');
+          },
+        },
+      );
+    }
+  }
+
+  function addPretendMoney() {
+    setSubmitted(true);
+    if (cents !== null && !topUp.isPending) {
+      topUp.mutate({ amountCents: cents, idempotencyKey }, { onSuccess: goBack });
+    }
+  }
+
+  if (stripe === 'paid') {
+    return (
+      <Screen title="Thank you">
+        <Text style={styles.muted}>
+          Stripe has your payment. The money appears in your wallet as soon as Stripe confirms it, usually within a
+          few seconds.
+        </Text>
+        <Button title="Back to wallet" onPress={goBack} />
+      </Screen>
+    );
+  }
+
+  return (
+    <Screen title="Top up">
+      <Field
+        label={`Amount (${currency})`}
+        value={amount}
+        onChangeText={changeAmount}
+        keyboardType="decimal-pad"
+        placeholder="0.00"
+        error={submitted ? error : null}
+        onSubmitEditing={payByCard}
+      />
+      <Button
+        title={startCard.isPending ? 'Opening Stripe…' : cents !== null ? `Pay ${formatMoney(cents, currency)} by card` : 'Pay by card'}
+        onPress={payByCard}
+        disabled={startCard.isPending}
+      />
+      {stripe === 'waiting' && (
+        <Text style={styles.muted}>
+          Finish paying in your browser. In test mode, use the card 4242 4242 4242 4242 with any future date.
+        </Text>
+      )}
+      {stripe === 'cancelled' && <Text style={styles.muted}>The payment was cancelled. Nothing was charged.</Text>}
+      {startCard.error && <Text style={styles.error}>{startCard.error.message}</Text>}
+
+      <Text style={styles.muted}>Building and testing? Add pretend money instead, until the server switches it off.</Text>
+      {topUp.error && <Text style={styles.error}>{topUp.error.message}</Text>}
+      <Button
+        title={topUp.isPending ? 'Adding…' : 'Add pretend money'}
+        variant="secondary"
+        onPress={addPretendMoney}
+        disabled={topUp.isPending}
+      />
+    </Screen>
+  );
+}
+
+const styles = StyleSheet.create({
+  muted: { color: '#5d6177' },
+  error: { color: '#b3261e' },
+});
+```
+
+- The screen never decides the money has arrived. "Thank you" means "Stripe has the payment"; the balance comes from the API, refreshed when the person returns, and the webhook usually got there first.
+- The idempotency key is passed all the way to Stripe (lesson 31.3), so a double tap on **Pay by card** opens one page, not two.
+- If the person closes the browser without paying, Stripe sends them to the cancel URL, and the app says nothing was charged.
+
+### Try it
+
+Three terminals: `stripe listen --forward-to localhost:8080/api/stripe/webhook --events checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.expired`; the API with `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` (from `stripe listen`) and `PAYDECK_SIMULATED_TOP_UPS=false`; and the app. On Android, run `adb reverse tcp:8080 tcp:8080` first.
+
+1. As Asha, open **Top up**, type **10** and tap **Add pretend money**. Red text: "Top up with a card instead."
+2. Type **25** and tap **Pay $25.00 by card**. The browser opens Stripe's page; the app shows "Finish paying in your browser. In test mode, use the card 4242 4242 4242 4242 with any future date."
+3. Pay with the test card. `stripe listen` shows the event forwarded with `[200]`, Stripe sends the browser to `/payments/return?result=success`, and that sends it on to `paydeck://top-up?result=success`, which opens the app.
+4. The app says "Stripe has your payment. The money appears in your wallet as soon as Stripe confirms it, usually within a few seconds." Tap **Back to wallet**: the balance is $25.00 higher, and "Card top-up" is at the top of the activity.
+
+These lines were printed by a test that drove the real screens against the API, with stripe-mock as Stripe and the signed webhook from lesson 31.4 sent where Stripe's would arrive (so the payment page itself was never opened):
+
+```
+BEFORE $157.50
+PRETEND Top up with a card instead.
+WAITING Finish paying in your browser. In test mode, use the card 4242 4242 4242 4242 with any future date.
+OPENED https://checkout.stripe.com/pay/c/cs_test_a1YS1URlnyQCN5fUUduORoQ7Pw41PJqDWkIVQCpJPqkfIhd6tVY8XB1OLY
+WEBHOOK 200
+BACK paydeck://top-up?result=success
+THANKS Stripe has your payment. The money appears in your wallet as soon as Stripe confirms it, usually within a few seconds.
+AFTER $182.50
+```
+
+Try the cancel path too: on Stripe's page, use the back arrow instead of paying. The app says "The payment was cancelled. Nothing was charged." Commit.
+</Fragment>
+</Exercise>
+
+<Exercise title="What if the webhook is late?">
+Stop `stripe listen` (so no webhooks reach PayDeck), pay for a top-up, and come back to the app. What does the wallet show? Start `stripe listen` again. What happens, and what does that tell you about where the truth about money lives?
+
+<Fragment slot="hint">Stripe keeps trying to deliver events that were not acknowledged. In test mode, `stripe events resend <event id>` sends one again on demand.</Fragment>
+<Fragment slot="solution">
+
+With no webhook, the app still shows **Thank you**, but the balance does not change: PayDeck has not been told, and the checkout row is still `OPEN`. Once events flow again (Stripe retries, or you resend the event), PayDeck credits the wallet, and the next refresh shows it.
+
+So the truth about money lives in PayDeck's ledger, and only Stripe's verified message changes it. The app's "Thank you" is a polite guess. A real app would show "Payment received, adding it to your wallet…" until the balance changes, which Module 33's live updates make easy.
+</Fragment>
+</Exercise>
+
+## What to notice
+
+- **Three parties, three jobs.** The app asks and shows, Stripe takes the card, the API decides what the ledger says.
+- **The browser is a messenger, not a witness.** The return link only tells the app which screen to show.
+- **Pretend money now has an off switch.** A real server runs with `PAYDECK_SIMULATED_TOP_UPS=false`; Module 36 makes that part of the production settings.
+
+<MarkComplete />

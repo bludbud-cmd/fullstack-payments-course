@@ -1,0 +1,369 @@
+---
+title: "34.5 Notification settings"
+description: "Let people choose which notifications they get: two settings saved on the API (money in and out, declined payments), checked before every notification, and two switches on the app's You screen that save the moment they are flipped."
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson people can turn payment notifications and decline notifications on and off separately, the API respects the choice on every phone, and the app's **You** screen has a switch for each.
+
+## Why it matters
+
+Asha buys coffee every morning. After a week of "You paid Corner Café" she will turn PayDeck's notifications off in Android's settings, all of them, including the one that would have told her about a stolen card. Letting her switch off the everyday ones, and keep the important ones, keeps the important ones alive.
+
+## The idea
+
+### Two switches, on the server
+
+PayDeck offers two:
+
+- **Money in and out**: top-ups, payments, refunds.
+- **Declined card payments**: every decline.
+
+Where should the choice live? Not on the phone: Asha has two phones, and she expects one choice for both. So it is saved on her user in the API, and checked by the API before it sends. Phones never even receive what she turned off.
+
+Both start **on**. A new customer should hear about their money until they decide otherwise.
+
+### Which events are which
+
+`AccountEvent.Kind` already knows (lesson 33.2): `isDecline()` is `true` only for `CARD_DECLINED`. Everything else that moves money is a payment notification, and `CARD_UPDATED` is never pushed (lesson 34.4).
+
+### Save on flip
+
+A switch that needs a **Save** button feels broken: people flip it and leave. PayDeck saves each flip straight away with a `PUT`, and shows what the API answers, so the switch never shows a choice the server did not keep. While a save is on its way, both switches are disabled, so two quick flips cannot overtake each other.
+
+## Worked example
+
+### The columns
+
+`V14__notification_settings.sql`:
+
+```sql
+-- Which notifications each person wants.
+ALTER TABLE users ADD COLUMN notify_payments BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE users ADD COLUMN notify_declines BOOLEAN NOT NULL DEFAULT TRUE;
+```
+
+`DEFAULT TRUE` gives every existing person both notifications, and `NOT NULL` means "not decided" cannot exist.
+
+In `User.java`, after `createdAt`:
+
+```java
+    /** Send a notification when money comes in or goes out. */
+    @Column(nullable = false)
+    private boolean notifyPayments = true;
+
+    /** Send a notification when a payment is declined. */
+    @Column(nullable = false)
+    private boolean notifyDeclines = true;
+```
+
+and, with the other methods:
+
+```java
+    public void setNotifications(boolean payments, boolean declines) {
+        this.notifyPayments = payments;
+        this.notifyDeclines = declines;
+    }
+
+    public boolean isNotifyPayments() {
+        return notifyPayments;
+    }
+
+    public boolean isNotifyDeclines() {
+        return notifyDeclines;
+    }
+```
+
+### The endpoints
+
+They belong with the devices, in `DeviceController`. Add `UserRepository users` to its fields and constructor, a record for the request and answer:
+
+```java
+    public record NotificationSettings(boolean payments, boolean declines) {
+    }
+```
+
+and two endpoints:
+
+```java
+    @GetMapping("/api/me/notifications")
+    @Transactional(readOnly = true)
+    public NotificationSettings settings(CurrentUser user) {
+        User stored = users.findById(user.id()).orElseThrow();
+        return new NotificationSettings(stored.isNotifyPayments(), stored.isNotifyDeclines());
+    }
+
+    @PutMapping("/api/me/notifications")
+    @Transactional
+    public NotificationSettings changeSettings(CurrentUser user, @RequestBody NotificationSettings settings) {
+        users.findById(user.id()).orElseThrow().setNotifications(settings.payments(), settings.declines());
+        return settings;
+    }
+```
+
+`PUT` replaces both values at once, so the app always sends both. No `save` call is needed: the user was loaded in this transaction, and Hibernate writes the change at the commit (dirty checking, lesson 23.2).
+
+### Checking before sending
+
+In `LiveUpdates`, add `UserRepository users` to the fields and constructor, and decide per person:
+
+```java
+        for (UUID personId : people) {
+            if (!personId.equals(account.getOwnerUserId())) {
+                // Cardholders may not watch the account, so they hear about their card on their own topic.
+                stomp.convertAndSend("/topic/users/" + personId, message.withoutBalance());
+            }
+            if (users.findById(personId).filter(user -> wants(user, event)).isPresent()) {
+                notifyPhones(personId, event);
+            }
+        }
+    }
+
+    private static boolean wants(User user, AccountEvent event) {
+        if (event.kind() == AccountEvent.Kind.CARD_UPDATED) {
+            return false; // A frozen card shows in the app, but is not worth buzzing a phone for.
+        }
+        return event.kind().isDecline() ? user.isNotifyDeclines() : user.isNotifyPayments();
+    }
+```
+
+`wants` is `static`: it only looks at its two arguments, which makes it easy to read and to test. `CARD_UPDATED` moved into it from lesson 34.4's `if`.
+
+### Tests
+
+Two more in `PushNotificationTest`:
+
+```java
+    @Test
+    void everythingIsOnUntilYouSayOtherwise() throws Exception {
+        TestUser asha = register("Asha");
+        mvc.perform(get("/api/me/notifications").with(as(asha)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.payments").value(true))
+                .andExpect(jsonPath("$.declines").value(true));
+    }
+
+    @Test
+    void declinesOnlyMeansNoPaymentNotifications() throws Exception {
+        when(push.send(anyString(), anyString(), anyString())).thenReturn(PushSender.Result.SENT);
+        UUID account = openAccount("Asha", "USD");
+        topUp(account, 5_000);
+        UUID card = issueCard(account, "Groceries", 1_000L, null);
+        String phone = "quiet-" + UUID.randomUUID();
+        registerPhone(ownerOf(account), phone);
+        mvc.perform(put("/api/me/notifications").with(asOwnerOf(account))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"payments": false, "declines": true}
+                                """))
+                .andExpect(status().isOk());
+
+        pay(account, card, 500, "Corner Café");   // allowed: no notification
+        pay(account, card, 2_000, "Gadget Shop"); // over the limit: declined
+
+        verify(push, timeout(5_000)).send(eq(phone), eq("Payment declined"), contains("Gadget Shop"));
+        verify(push, never()).send(eq(phone), eq("You paid Corner Café"), anyString());
+    }
+
+    private void pay(UUID account, UUID card, long amountCents, String merchant) throws Exception {
+        mvc.perform(post("/api/cards/{id}/payments", card).with(asOwnerOf(account))
+                .header("Idempotency-Key", UUID.randomUUID().toString())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"amountCents": %d, "merchant": "%s"}
+                        """.formatted(amountCents, merchant)));
+    }
+```
+
+The second test turns payments off and makes two payments on a $10.00 card: $5.00, approved, and $20.00, declined. Only the decline may reach the phone.
+
+```
+[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0
+```
+
+### Try it
+
+```sh
+curl -s localhost:8080/api/me/notifications -H "Authorization: Bearer $ASHA"
+```
+
+```json
+{"payments":true,"declines":true}
+```
+
+Turn payments off, then pay $12.50 at Corner Café (approved) and $89.99 at Gadget Shop (over the limit) with Groceries:
+
+```sh
+curl -s -X PUT localhost:8080/api/me/notifications -H "Authorization: Bearer $ASHA" \
+  -H 'Content-Type: application/json' -d '{"payments": false, "declines": true}'
+```
+
+```json
+{"payments":false,"declines":true}
+```
+
+The API's log shows one notification, the decline:
+
+```
+dev.paydeck.api.push.PushConfig          : Push (not sent, Firebase is not set up): Payment declined: $89.99 at Gadget Shop with Groceries. The payment is over the card's spending limit.
+```
+
+Turn payments back on with `{"payments": true, "declines": true}`.
+
+### The switches in the app
+
+`src/types.ts`:
+
+```ts
+/** Which push notifications someone wants. The API remembers the answer. */
+export type NotificationSettings = { payments: boolean; declines: boolean };
+```
+
+`src/api/paydeck.ts`:
+
+```ts
+export const getNotificationSettings = () => request<NotificationSettings>('/api/me/notifications');
+
+export const setNotificationSettings = (settings: NotificationSettings) =>
+  request<NotificationSettings>('/api/me/notifications', { method: 'PUT', body: settings });
+```
+
+`src/api/hooks.ts`: a new key, `notifications: ['notifications'] as const`, in `keys`, and two hooks:
+
+```ts
+/** Which push notifications the signed-in person wants. */
+export function useNotificationSettings() {
+  return useQuery({ queryKey: keys.notifications, queryFn: api.getNotificationSettings });
+}
+
+export function useSetNotificationSettings() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: api.setNotificationSettings,
+    // The API answers with what it saved: show exactly that.
+    onSuccess: (saved) => queryClient.setQueryData(keys.notifications, saved),
+  });
+}
+```
+
+`setQueryData` puts the API's answer straight into TanStack Query's cache under that key, so the switches show it without fetching again.
+
+On `ProfileScreen`, import `Switch` from `react-native` and the two hooks, put `<NotificationSwitches />` just above the sign-out buttons, and add the component:
+
+```tsx
+/** Two switches. Each change is saved straight away; there is no Save button. */
+function NotificationSwitches() {
+  const settings = useNotificationSettings();
+  const save = useSetNotificationSettings();
+  if (settings.data === undefined) {
+    return null;
+  }
+  const current = settings.data;
+  const rows = [
+    { key: 'payments', label: 'Money in and out' },
+    { key: 'declines', label: 'Declined card payments' },
+  ] as const;
+  return (
+    <View>
+      <Text style={styles.heading}>Notifications</Text>
+      {rows.map((row) => (
+        <View key={row.key} style={styles.row}>
+          <Text style={styles.rowLabel}>{row.label}</Text>
+          <Switch
+            accessibilityLabel={row.label}
+            value={current[row.key]}
+            disabled={save.isPending}
+            onValueChange={(on) => save.mutate({ ...current, [row.key]: on })}
+          />
+        </View>
+      ))}
+      {save.error && <Text style={styles.error}>{save.error.message}</Text>}
+    </View>
+  );
+}
+```
+
+and two styles:
+
+```ts
+  row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 4 },
+  rowLabel: { flex: 1 },
+```
+
+- `rows` with `as const` makes `row.key` the type `'payments' | 'declines'`, so `current[row.key]` type-checks.
+- `{ ...current, [row.key]: on }` copies both settings and changes one: `PUT` always sends both.
+- `accessibilityLabel` lets a screen reader say what each switch is for, and lets a test find it.
+
+A test that signs in as Asha, opens **You** and flips **Money in and out** off, then asks the API:
+
+```
+SWITCHES true true
+API SAYS {"payments":false,"declines":true}
+```
+
+<Exercise title="A switch for refunds">
+Some people want to hear about refunds even with payment notifications off ("money coming back is always good news"). Add a third setting, `refunds`, to the API and the app. Which files change, and what must the migration do for existing people?
+
+<Fragment slot="hint">Follow `declines` through every layer: column, entity, record, `wants`, type, switch row.</Fragment>
+<Fragment slot="solution">
+
+- `V15__notify_refunds.sql`: `ALTER TABLE users ADD COLUMN notify_refunds BOOLEAN NOT NULL DEFAULT TRUE;` so everyone, old and new, starts with it on.
+- `User`: a `notifyRefunds` field, `isNotifyRefunds()`, and a third parameter in `setNotifications`.
+- `DeviceController`: `NotificationSettings(boolean payments, boolean declines, boolean refunds)`, and both endpoints pass it through.
+- `LiveUpdates.wants`: `if (event.kind() == AccountEvent.Kind.REFUND) return user.isNotifyRefunds();` before the decline check.
+- The app: `refunds: boolean` in the type, and `{ key: 'refunds', label: 'Refunds' }` in `rows`.
+- The tests: every `{"payments": …, "declines": …}` body gets `"refunds"` too. A body without it is refused: Jackson will not invent a value for a missing `boolean`, and the API answers `400`. (Try it now with `{"payments": true}`.) So the app and the API must change together: an older app that does not send `refunds` would get `400` until it is updated.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Keeping the choice on the phone">
+Then a second phone, or a reinstall, starts with everything on again. Settings about a person live with the person, on the server.
+</Aside>
+
+<Aside type="caution" title="Filtering in the app">
+Sending everything and letting the app hide what is unwanted does not work for push: Android shows a notification before the app gets a say. Decide on the server.
+</Aside>
+
+<Aside type="caution" title="Showing the switch before the server agrees">
+If the `PUT` fails, a switch that already moved is lying. Show the saved answer, disable the switches while saving, and show the error.
+</Aside>
+
+## Recap
+
+- Two settings on the user, both on by default: `notify_payments` and `notify_declines`.
+- `GET` and `PUT /api/me/notifications`; `PUT` always sends both.
+- `LiveUpdates.wants` checks them for each person before sending to their phones; card changes are never pushed.
+- The **You** screen has a switch for each, saved on every flip, showing what the API kept.
+
+<Quiz
+	questions={[
+		{
+			question: 'Asha turns off "Money in and out". Her card is declined. Does her phone buzz?',
+			options: ['Yes, declines have their own switch, which is still on', 'No, all notifications are off', 'Only if the app is open'],
+			answer: 0,
+			explanation: 'That is the point of two switches: the everyday ones off, the important ones on.',
+		},
+		{
+			question: 'Why are the settings saved in the API and not on the phone?',
+			options: ['Phones cannot store settings', 'One choice must apply to all of the person\'s phones, and the server decides what to send', 'It is faster'],
+			answer: 1,
+			explanation: 'A notification the person does not want is never sent at all.',
+		},
+		{
+			question: 'What does the migration\'s DEFAULT TRUE do?',
+			options: ['Turns notifications on for everyone who already has an account, and for new people', 'Forces notifications to stay on', 'Nothing; Java sets it'],
+			answer: 0,
+			explanation: 'Existing rows need a value too, and NOT NULL needs one.',
+		},
+	]}
+/>
+
+<MarkComplete />

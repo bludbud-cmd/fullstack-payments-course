@@ -1,0 +1,168 @@
+---
+title: "32.4 Disputes"
+description: "What happens when a cardholder says \"I didn't make this payment\" or \"I never got what I paid for\": chargebacks, evidence and deadlines in the real card world, and how PayDeck's support tools from this module and Module 30 handle the same story."
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can explain what a dispute and a chargeback are, who takes part and what each one has to prove, and you can walk a PayDeck dispute from the customer's message to the refund, using only tools you have already built.
+
+## Why it matters
+
+Card payments come with a promise to the cardholder: if something goes wrong that is not your fault, you can get your money back. That promise is a big part of why people trust cards, and it is an issuer's job to keep it. It is also where fraud, mistakes and angry customers meet, so it needs a calm, written process, not improvisation.
+
+## The idea
+
+### Refund or dispute?
+
+A **refund** (lesson 32.3) is the easy way back: the shop agrees and returns the money. A **dispute** is what happens when the shop will not or cannot: the cardholder goes to their **issuer** instead and says the payment was wrong. If the issuer agrees, it takes the money back from the shop's side through the card network. That forced return is called a **chargeback**.
+
+### Why people dispute
+
+Card networks sort disputes into groups. Visa, for example, uses four:
+
+- **Fraud**: "I didn't make this payment." The card was stolen or its details were copied.
+- **Authorization**: the payment should never have been approved, for example the card was already reported lost.
+- **Processing errors**: charged twice, charged the wrong amount, charged in the wrong currency.
+- **Consumer disputes**: "I paid and never got it", "it was not as described", "I cancelled and they kept charging me".
+
+Each group has its own rules about what evidence counts.
+
+### How a chargeback travels
+
+1. The cardholder tells the issuer what went wrong.
+2. The issuer checks the claim. For clear fraud it usually freezes the card straight away, and often gives the cardholder a **provisional credit**: the money back for now, while the case is open.
+3. The issuer files the chargeback through the card network to the shop's acquirer, which takes the money from the shop and tells it.
+4. The shop can accept, or **fight it** by sending evidence: a delivery receipt, a signature, proof the customer used the service. This is called **representment**.
+5. If the two sides still disagree, the network decides (**arbitration**), and the losing side usually pays a fee.
+
+Deadlines run through all of it. A cardholder usually has a limited time to dispute, often around 120 days after the payment, depending on the network and the reason, and the shop has a limited time to answer. A missed deadline loses the case.
+
+### Where PayDeck fits
+
+PayDeck is the issuer, and in this course there is no real network or shop to send a chargeback to. What PayDeck can do, and what real issuers must do well, is the **issuer's side**: listen, look at the facts, protect the card, decide, put the money back, and keep a record. You already have every tool for that:
+
+| Step | PayDeck tool | From |
+|---|---|---|
+| Find the payment | `GET /api/cards/{id}/payments`, as support | 32.2 |
+| Stop more damage | Freeze the card, as support | 30.2 |
+| Give the money back | `POST /api/admin/card-payments/{id}/refund` | 32.3 |
+| Prove what was done, and by whom | The audit log | 30.5 |
+
+What PayDeck does not have yet is a **case**: a record of the dispute itself, its reason, its deadline and its outcome. The exercise below asks you to design one.
+
+### Fraud versus "friendly fraud"
+
+Some disputes are honest mistakes by the cardholder: they did not recognise the shop's name on their statement, or a family member used the card. Some are dishonest: the person got the goods and claims they did not. The industry calls that **friendly fraud**, and it is why shops keep evidence and why issuers look at a card's history before deciding. PayDeck's saved declines and payments (lesson 32.2) are exactly that history.
+
+## Worked example: a dispute in PayDeck
+
+Asha writes to support: "I see a payment of $12.50 at Corner Café, but I was at home all day." Sam, from support, works the case.
+
+**1. Find the payment.** Sam opens Asha's Groceries card in the staff screens (lesson 30.4), or asks the API:
+
+```sh
+curl -s localhost:8080/api/cards/$G/payments -H "Authorization: Bearer $SAM" \
+  | jq -c '.[] | {id, merchant, amountCents, status, createdAt}'
+```
+
+He finds the café payment, `512a802c-…`, approved.
+
+**2. Protect the card.** If Asha did not make it, someone else has the card's details. Sam freezes the card first, before anything else, so nothing more can be spent: support may freeze but not unfreeze (lesson 30.2), so only Asha can turn it back on, once she has a new card.
+
+```sh
+curl -s -X POST localhost:8080/api/cards/$G/freeze -H "Authorization: Bearer $SAM"
+```
+
+From now on any payment attempt on that card is declined with `CARD_FROZEN`, and saved, which also shows whether the thief keeps trying.
+
+**3. Decide and give the money back.** A clear fraud claim from a customer with a clean history is refunded. Sam refunds the payment exactly as in lesson 32.3, and Asha's balance is back to where it was.
+
+**4. The record.** The audit log now says that Sam froze the card and refunded the payment, and when. If anyone later asks "why did PayDeck give Asha $12.50?", the answer is in the log, not in someone's memory.
+
+<Aside type="note" title="Real issuers go one step further">
+After step 3, a real issuer would file a chargeback so that the shop's side pays for the fraud, not the issuer. PayDeck's refund comes out of the "outside world" account, which here stands for that whole process.
+</Aside>
+
+<Exercise title="Design a dispute case">
+Sketch a `disputes` table for PayDeck: the columns, the possible statuses and how a dispute moves between them, and which PayDeck rules should apply (who may open one, who may decide). Write it as a `CREATE TABLE` statement and a list of status changes. You do not need to build it.
+
+<Fragment slot="hint">Think about what a support agent needs to see when they pick up someone else's case on a Monday: what was disputed, why, by whom, by when it must be decided, and what happened.</Fragment>
+<Fragment slot="solution">
+
+```sql
+CREATE TABLE disputes (
+    id               UUID PRIMARY KEY,
+    card_payment_id  UUID         NOT NULL REFERENCES card_payments (id),
+    opened_by        UUID         NOT NULL REFERENCES users (id),
+    reason           VARCHAR(20)  NOT NULL CHECK (reason IN ('FRAUD', 'NOT_RECEIVED', 'DUPLICATE', 'WRONG_AMOUNT', 'OTHER')),
+    description      VARCHAR(1000) NOT NULL,
+    status           VARCHAR(20)  NOT NULL CHECK (status IN ('OPEN', 'WON', 'LOST', 'WITHDRAWN')),
+    respond_by       TIMESTAMPTZ  NOT NULL,
+    decided_by       UUID         REFERENCES users (id),
+    created_at       TIMESTAMPTZ  NOT NULL,
+    decided_at       TIMESTAMPTZ
+);
+```
+
+Status changes:
+
+- `OPEN` → `WON`: staff decide for the cardholder; the payment is refunded in the same transaction.
+- `OPEN` → `LOST`: staff decide for the shop; no money moves, and the cardholder is told why.
+- `OPEN` → `WITHDRAWN`: the cardholder recognises the payment after all.
+- Nothing ever leaves `WON`, `LOST` or `WITHDRAWN`.
+
+Rules: the owner or cardholder may open a dispute on an `APPROVED` payment of their card (a new `CardAction`), and only one open dispute per payment (a partial unique index). Only `SUPPORT` and `ADMIN` may decide, with `@PreAuthorize`, and every change is audited. `respond_by` lets a staff screen sort cases by deadline.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Refunding before protecting the card">
+If the card details were stolen, every minute it stays active is another chance to use them. Freeze first, then investigate.
+</Aside>
+
+<Aside type="caution" title="Deciding from memory">
+"I think we refunded that last week" is how money gets paid back twice. Look at the payment's status and the audit log; that is what they are for.
+</Aside>
+
+<Aside type="caution" title="Treating every dispute as fraud">
+Many disputes are a shop name the person did not recognise. Showing a clear merchant name and the card's nickname in the app (as PayDeck does) prevents a surprising number of them.
+</Aside>
+
+## Recap
+
+- A **dispute** is a cardholder asking their issuer to reverse a payment; a **chargeback** is the issuer taking the money back from the shop's side through the network.
+- Disputes fall into groups such as fraud, authorization, processing errors and consumer disputes, each with its own evidence and **deadlines**.
+- The shop can answer with evidence (**representment**); the network decides if they still disagree.
+- In PayDeck the issuer's side is: find the payment, **freeze** the card, **refund**, and let the **audit log** record it.
+
+<Quiz
+	questions={[
+		{
+			question: 'What is a chargeback?',
+			options: ['A refund the shop chooses to give', 'The issuer taking a disputed payment back from the shop\'s side through the card network', 'A fee for using a card abroad'],
+			answer: 1,
+			explanation: 'A refund is voluntary; a chargeback is forced through the network after a dispute.',
+		},
+		{
+			question: 'Asha says a payment on her card was not hers. What should support do first?',
+			options: ['Refund it', 'Freeze the card', 'Delete the payment'],
+			answer: 1,
+			explanation: 'Stop more damage first. The refund comes after the facts are checked.',
+		},
+		{
+			question: 'What is "friendly fraud"?',
+			options: ['Fraud by a stranger', 'A cardholder disputing a payment they really made', 'A shop charging twice by mistake'],
+			answer: 1,
+			explanation: 'It is why shops keep evidence and issuers look at a card\'s history.',
+		},
+	]}
+/>
+
+<MarkComplete />
