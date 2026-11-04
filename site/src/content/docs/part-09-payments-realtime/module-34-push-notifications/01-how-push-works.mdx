@@ -1,0 +1,127 @@
+---
+title: "34.1 How push works"
+description: "How a server reaches a phone whose app is closed: the platform's push service, device tokens, the permission prompt, and what a payments app should and should not put in a notification."
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can explain who takes part in a push notification, what a device token is, why the person must agree first, and what PayDeck's notifications say.
+
+## Why it matters
+
+Module 33's live feed works while PayDeck is open. Most of the time it is not. If someone uses Asha's stolen card at 3 a.m., she should know before breakfast, and a decline at the till ("over the card's spending limit") is most useful the moment it happens, wherever her phone is. A **push notification** is how a server reaches a phone whose app is closed.
+
+## The idea
+
+### The app cannot keep a connection open
+
+A closed app has no WebSocket. Even an app in the background is soon frozen by the phone to save battery. Thousands of apps each keeping their own connection open would empty a battery by lunchtime.
+
+So each phone keeps **one** connection, to its platform's **push service**, and every app's notifications travel down it:
+
+- **Firebase Cloud Messaging (FCM)**, run by Google, for Android.
+- **Apple Push Notification service (APNs)**, run by Apple, for iPhones and Macs.
+
+The phone's operating system receives the notification and shows it, without starting the app.
+
+### Who does what
+
+1. **The app** asks the person for permission to show notifications.
+2. If they agree, the app asks the push service for a **device token**: a long string that means "this app on this phone".
+3. The app sends the token to **PayDeck's API**, which remembers it for the signed-in person.
+4. When Eve pays at the bakery, **the API** sends "You paid Bakery, $4.50 with For Eve" to the push service, addressed to that token. It signs in to the push service as PayDeck, so nobody else can send notifications to PayDeck's users.
+5. **The push service** delivers it to the phone, now or as soon as the phone is back online.
+
+The API never talks to the phone directly. It does not even know where the phone is.
+
+### Device tokens change
+
+A token is not the phone's identity forever. It changes when the app is reinstalled, when its data is cleared, and sometimes for no visible reason. And when the app is uninstalled, the token stops working, and the push service says so. So the app sends the token again on every start and whenever it changes, and the API forgets tokens the push service rejects.
+
+### Permission first
+
+Since Android 13, an app must ask before it shows notifications, and Apple has always required it. The person can say no, and can change their mind in the system settings at any time. An app must work perfectly well without notifications. For PayDeck it does: the live feed and the Activity screen show everything.
+
+### Push is not guaranteed
+
+A push service makes a strong effort, but promises nothing: a phone switched off for a week may only get the latest notifications, and delivery can take seconds or occasionally minutes. So a notification, like a live message, only says "something happened". The truth is always in the app, fetched from the API.
+
+### What to say
+
+A notification can appear on a locked screen, where anyone nearby can read it. PayDeck's say what happened and how much, as a bank's do ("You paid Bakery: $4.50 with For Eve"), but never a balance, a full card number or a link to sign in. And they come in two kinds that people can switch on and off separately (lesson 34.5): money in and out, and declined payments.
+
+### PayDeck on the Mac
+
+This course uses FCM for Android. Apple's push service needs an app signed with a paid Apple Developer membership, which this course does not require, so on the Mac PayDeck relies on the live banner while the app is open (lesson 34.6). Lesson 34.7 explains what changes if you have a membership.
+
+<Exercise title="Good notification, bad notification">
+Which of these should PayDeck send as push notifications, and how would you word the ones you keep?
+
+1. Asha's card was declined at a petrol station because it is frozen.
+2. Asha's balance after each payment.
+3. "Your statement is ready."
+4. A new sign-in to Asha's account from a device PayDeck has not seen before.
+5. Asha changed her own card's spending limit, in the app, a second ago.
+
+<Fragment slot="hint">Ask, for each one: would Asha want to know this even with the app closed, and is it safe on a locked screen?</Fragment>
+<Fragment slot="solution">
+
+1. **Yes.** "Payment declined: $62.00 at Fuel Stop with Groceries. The card is frozen." If Asha did not try to pay, someone has her card details.
+2. **No.** A balance on a locked screen tells anyone nearby how much money she has. The app shows it after she unlocks.
+3. **Maybe, without details:** "Your October statement is ready", and the statement itself only in the app.
+4. **Yes**, and it is about security, not money: "New sign-in to PayDeck on a Pixel 9. Not you? Sign out everywhere in the app." No link: a link in a message is how phishing works, and people should learn that PayDeck never sends one.
+5. **No.** She just did it, and she is looking at the result. PayDeck's API does not push card changes at all (lesson 34.4).
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Treating the token as permanent">
+Store it, but expect it to change. Send it on every app start, listen for changes, and delete tokens the push service rejects. Otherwise notifications quietly stop, or go to a phone that now belongs to someone else.
+</Aside>
+
+<Aside type="caution" title="Asking for permission at the first launch">
+A prompt before the person knows what the app does is easy to refuse. PayDeck asks after sign-in, when there is money to be told about.
+</Aside>
+
+<Aside type="danger" title="Putting secrets in notifications">
+Lock screens, smartwatches and notification history all show them. Say what happened; keep balances and card numbers in the app.
+</Aside>
+
+## Recap
+
+- A closed app has no connection, so notifications go through the platform's **push service**: **FCM** for Android, **APNs** for Apple.
+- The app asks for **permission**, gets a **device token**, and sends it to the API. The API sends to that token; the push service delivers.
+- Tokens change and expire: re-send them, and forget the ones that are rejected.
+- Push is best effort. The notification says what happened; the app shows the truth.
+- Keep notifications free of secrets: they are shown on locked screens.
+
+<Quiz
+	questions={[
+		{
+			question: 'What is a device token?',
+			options: ['The phone\'s serial number', 'A string from the push service that means "this app on this phone", which the API sends notifications to', 'The access token from lesson 27.5'],
+			answer: 1,
+			explanation: 'It comes from FCM or APNs, and only they know which phone it belongs to.',
+		},
+		{
+			question: 'Why does every Android app not keep its own connection to its server?',
+			options: ['Android forbids WebSockets', 'It would use far too much battery; the phone keeps one connection to the push service for all apps', 'Servers cannot accept that many connections'],
+			answer: 1,
+			explanation: 'One shared connection, managed by the operating system, is what makes push affordable.',
+		},
+		{
+			question: 'Which of these belongs in a PayDeck notification?',
+			options: ['The account balance', 'The full card number', 'What happened and the amount, for example "You paid Bakery: $4.50"'],
+			answer: 2,
+			explanation: 'Notifications appear on locked screens. Balances and card numbers stay inside the app.',
+		},
+	]}
+/>
+
+<MarkComplete />

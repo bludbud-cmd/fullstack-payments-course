@@ -1,0 +1,190 @@
+---
+title: "34.6 In-app alerts on macOS"
+description: "Why PayDeck's Mac app has no push notifications in this course, and how its live banner takes their place: it follows the same notification switches as the phone, and a declined payment stays on screen until it is dismissed."
+sidebar:
+  order: 6
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson you can explain why PayDeck on the Mac relies on in-app alerts, and the Mac's banner behaves like the phone's notifications: it respects the two switches, and a decline waits until Asha has seen it.
+
+## Why it matters
+
+Asha uses PayDeck on her Mac at work and on her phone the rest of the time. If she turns off "Money in and out" on her phone, but her Mac still flashes a banner for every coffee, the switch feels broken. And a decline that vanishes after five seconds, while she was looking at another window, might as well not have been shown.
+
+## The idea
+
+### Why no push on the Mac
+
+A Mac receives notifications through Apple's push service, APNs (lesson 34.1), not Firebase. APNs only delivers to apps that are **signed** with an Apple Developer certificate that has the **Push Notifications** capability turned on, and that needs a paid Apple Developer Program membership. This course promised that nobody has to pay to follow it (Part 3), so the Mac app has no push. Lesson 34.7 describes what changes if you have a membership.
+
+That is less of a loss than it sounds. On a desk, PayDeck is often open in a window, and while it is open, the live feed from Module 33 arrives just as fast as a push would.
+
+### One set of rules for every screen
+
+The switches from lesson 34.5 say what Asha wants to be told about. The banner is also a way of telling her, so it follows the same switches:
+
+| Message | Banner shows when |
+|---|---|
+| Money in, money out, card payment, refund | "Money in and out" is on |
+| Card declined | "Declined card payments" is on |
+| Card frozen or unfrozen | Always: it is not a notification, just what happened |
+
+The data still refreshes in every case (`invalidateQueries`). A switch decides whether Asha is *interrupted*, never whether the screen shows the truth.
+
+This also changes the phone's banner while PayDeck is open there, which is right: the person said what they want to hear about, whichever device they are holding.
+
+### Some alerts must wait
+
+A payment banner can disappear after five seconds: the new row in Activity is still there. A **decline** is different: it might mean a stolen card, or a till where Asha is standing confused. It stays until she taps it.
+
+### Reading settings inside a callback
+
+`onMessage` is created once, inside the effect that opens the connection. If the effect depended on the settings, flipping a switch would close and reopen the WebSocket. Instead, the settings go in a **ref**: an object whose `current` the component updates on every change, and which `onMessage` reads at the moment a message arrives. You used the same trick in the Module 33 mini-project to remember which rows were new.
+
+## Worked example
+
+In `src/live/LiveUpdates.tsx`, add `useRef` to the React import, `useNotificationSettings` to the hooks import, and `NotificationSettings` to the types import. Above `LiveUpdates`, the rule from the table:
+
+```tsx
+/** How long the banner stays up. A decline stays until it is dismissed. */
+const BANNER_MS = 5000;
+
+/**
+ * The banner follows the same switches as push notifications, so the Mac
+ * (which has no push) and the phone behave alike. Card changes always show.
+ */
+function wantsBanner(message: LiveMessage, settings: NotificationSettings | undefined): boolean {
+  if (message.kind === 'CARD_UPDATED' || settings === undefined) {
+    return true;
+  }
+  return message.kind === 'CARD_DECLINED' ? settings.declines : settings.payments;
+}
+```
+
+`settings === undefined` means the settings have not loaded yet. Showing the banner then is the safe side: a banner too many beats a missed decline.
+
+Inside `LiveUpdates`, after the `status` state:
+
+```tsx
+  // onMessage reads the switches from a ref, so that changing one does not reconnect.
+  const notificationSettings = useNotificationSettings().data;
+  const settings = useRef(notificationSettings);
+  useEffect(() => {
+    settings.current = notificationSettings;
+  }, [notificationSettings]);
+```
+
+`useNotificationSettings` is the same query as the **You** screen's switches, so flipping a switch updates this too, through the cache, with no extra request.
+
+In `onMessage`:
+
+```tsx
+      onMessage: (body) => {
+        queryClient.invalidateQueries(); // Always: the screens must show the truth.
+        const message = JSON.parse(body) as LiveMessage;
+        if (wantsBanner(message, settings.current)) {
+          setLatest(message);
+        }
+      },
+```
+
+And the timer skips declines:
+
+```tsx
+  useEffect(() => {
+    if (latest === null || latest.kind === 'CARD_DECLINED') {
+      return;
+    }
+    const timer = setTimeout(() => setLatest(null), BANNER_MS);
+    return () => clearTimeout(timer);
+  }, [latest]);
+```
+
+The banner already dismisses itself when tapped (lesson 33.3), and a newer message still replaces it.
+
+### Try it
+
+Run the Mac app (`npm run macos`) and sign in as Asha. On **You**, turn off **Money in and out**. From the terminal, pay $12.50 at Corner Café with Groceries, then $89.99 at Gadget Shop. The first one shows no banner, though the balance changes. The second one shows "Payment declined", and it is still there when you come back to the window. A test drove the same steps through the real screens, against the running API:
+
+```
+SWITCHES true true
+API SAYS {"payments":false,"declines":true}
+PAY APPROVED
+AFTER PAYMENT (no banner)
+PAY DECLINED
+7 SECONDS AFTER DECLINE Payment declined | $89.99 at Gadget Shop with Groceries. The payment is over the card's spending limit.
+AFTER TAP (no banner)
+```
+
+Turn **Money in and out** back on.
+
+<Exercise title="A badge on the Activity tab">
+When a banner is not shown (or has gone), Asha may not notice that something happened. Show the number of messages that arrived since she last opened **Activity** on its tab, as "Activity (2)". Opening the tab sets it back to zero.
+
+<Fragment slot="hint">`LiveUpdates` already provides one context, for the status. Add a count to it (or a second context), increase it in `onMessage`, and give screens a way to reset it. The tab bar is in `src/navigation/AppNavigator.tsx`.</Fragment>
+<Fragment slot="hint2">Count every message, whether or not its banner was shown. The badge is about "something changed", not about interrupting.</Fragment>
+<Fragment slot="solution">
+
+In `LiveUpdates.tsx`:
+
+```tsx
+const UnseenContext = createContext<{ unseen: number; markSeen: () => void }>({ unseen: 0, markSeen: () => {} });
+export const useUnseen = () => useContext(UnseenContext);
+```
+
+with `const [unseen, setUnseen] = useState(0);`, `setUnseen((n) => n + 1)` in `onMessage`, and the provider wrapped around `children` next to the status provider, with `markSeen: () => setUnseen(0)`.
+
+In `AppNavigator`, read `const { unseen, markSeen } = useUnseen();`, show `` `${tab.label} (${unseen})` `` for the Activity tab when `unseen > 0`, and call `markSeen()` when the Activity tab is pressed. The count lives in memory, so it starts again at zero when the app restarts, which is fine: the Activity list itself is always complete.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="caution" title="Two sets of rules">
+If the Mac's banner and the phone's notifications decide differently, people stop trusting both. One setting, read by the API for push and by the app for banners.
+</Aside>
+
+<Aside type="caution" title="Hiding the data along with the banner">
+A switch that is off must still let the balance and the Activity list update. Only the interruption is optional.
+</Aside>
+
+<Aside type="caution" title="Putting the settings in the effect's dependencies">
+Then every flip of a switch closes and reopens the WebSocket. Read changing values through a ref inside long-lived callbacks.
+</Aside>
+
+## Recap
+
+- Apple push needs a signed app and a paid membership, so in this course the Mac relies on the live banner while PayDeck is open.
+- The banner follows the same two switches as push; card changes always show; the data always refreshes.
+- A decline stays until it is tapped.
+- A ref lets a callback created once read the latest settings without reconnecting.
+
+<Quiz
+	questions={[
+		{
+			question: 'Why does PayDeck\'s Mac app in this course not get push notifications?',
+			options: ['Macs cannot show notifications', 'Apple push needs an app signed with a paid Apple Developer membership', 'Firebase does not work on Wi-Fi'],
+			answer: 1,
+			explanation: 'Lesson 34.7 is for those who have one.',
+		},
+		{
+			question: '"Money in and out" is off. A top-up arrives while the Mac app is open. What happens?',
+			options: ['Nothing at all', 'No banner, but the balance and Activity update', 'A banner, because the Mac ignores the switches'],
+			answer: 1,
+			explanation: 'The switch stops the interruption, never the truth.',
+		},
+		{
+			question: 'Why is the settings value read through a ref in onMessage?',
+			options: ['Refs are faster than state', 'So flipping a switch does not close and reopen the WebSocket', 'Because hooks cannot be used in LiveUpdates'],
+			answer: 1,
+			explanation: 'onMessage is created once, with the connection. The ref always holds the latest value.',
+		},
+	]}
+/>
+
+<MarkComplete />

@@ -1,0 +1,455 @@
+---
+title: "34.3 Device tokens"
+description: "Give the API a devices table and two endpoints: one where a phone registers its Firebase token for the signed-in person, and one where it takes it back on sign-out. Handle the same phone registering twice, and a phone that changes hands."
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+**Goal:** By the end of this lesson PayDeck's API stores each phone's device token against the person signed in on it, and forgets it when they sign out.
+
+## Why it matters
+
+The app from lesson 34.2 has a token and sends it to `POST /api/devices`. The API needs to keep it, safely: the token decides whose payments a phone hears about. A token saved against the wrong person sends Asha's spending to someone else's lock screen.
+
+## The idea
+
+### One row per phone
+
+A `devices` table, with one row per token: whose phone it is, which platform, and the token itself. One person can have several rows (a phone and a tablet). One token belongs to one person at a time, so `token` is `UNIQUE`.
+
+### Registering is safe to repeat
+
+The app registers on every start (lesson 34.1: tokens change). So `POST /api/devices` must not add a second row for a token it already has. It looks the token up first:
+
+- **New token:** save a new row for the signed-in person.
+- **Known token:** the same phone again. If someone *else* is signed in now (Asha lent Eve her phone, or sold it), the row moves to them: a phone shows the notifications of whoever signed in on it last.
+
+The API answers `204 No Content` either way.
+
+### Taking it back
+
+On sign-out the app calls `POST /api/devices/unregister` with its token, and the API deletes the row, but only if it belongs to the person asking. Otherwise anyone who learned Asha's token could switch off her notifications.
+
+Why `POST …/unregister` and not `DELETE /api/devices/{token}`? Tokens are long, can contain characters that need escaping in a URL, and URLs end up in server logs. A request body keeps them out.
+
+### Only Android, for now
+
+The `platform` column has one allowed value, `ANDROID`, checked by both the database and the request validation. When Apple push arrives (lesson 34.7), adding `MACOS` is a one-line migration, and until then a wrong value is rejected instead of being stored and never used.
+
+## Worked example
+
+### The table
+
+`src/main/resources/db/migration/V13__create_devices.sql`:
+
+```sql
+-- Phones that want push notifications. The token comes from Firebase.
+CREATE TABLE devices (
+    id          UUID PRIMARY KEY,
+    user_id     UUID          NOT NULL REFERENCES users (id),
+    platform    VARCHAR(10)   NOT NULL CHECK (platform IN ('ANDROID')),
+    token       VARCHAR(4096) NOT NULL UNIQUE,
+    created_at  TIMESTAMPTZ   NOT NULL
+);
+CREATE INDEX devices_user_id ON devices (user_id);
+```
+
+The index on `user_id` is for "all of Asha's phones", which lesson 34.4 asks for on every payment.
+
+### Entity and repository
+
+`src/main/java/dev/paydeck/api/push/Device.java`:
+
+```java
+package dev.paydeck.api.push;
+
+import java.time.Instant;
+import java.util.UUID;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+
+/** A phone that has asked for push notifications, and the token Firebase gave it. */
+@Entity
+@Table(name = "devices")
+public class Device {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private UUID id;
+
+    @Column(nullable = false)
+    private UUID userId;
+
+    @Column(nullable = false)
+    private String platform;
+
+    @Column(nullable = false)
+    private String token;
+
+    @Column(nullable = false)
+    private Instant createdAt;
+
+    protected Device() {
+        // For JPA
+    }
+
+    public Device(UUID userId, String platform, String token) {
+        this.userId = userId;
+        this.platform = platform;
+        this.token = token;
+        this.createdAt = Instant.now();
+    }
+
+    /** The same phone signed in as someone else: notifications now go to them. */
+    public void moveTo(UUID userId) {
+        this.userId = userId;
+    }
+
+    public UUID getUserId() {
+        return userId;
+    }
+
+    public String getToken() {
+        return token;
+    }
+}
+```
+
+`moveTo` is the only way a device changes after it is created, and its name says why it exists.
+
+`DeviceRepository.java`:
+
+```java
+package dev.paydeck.api.push;
+
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.transaction.annotation.Transactional;
+
+public interface DeviceRepository extends JpaRepository<Device, UUID> {
+
+    Optional<Device> findByToken(String token);
+
+    List<Device> findByUserId(UUID userId);
+
+    @Transactional
+    void deleteByToken(String token);
+}
+```
+
+Spring Data writes all three queries from the method names (lesson 23.2). `deleteByToken` is for lesson 34.4, when Firebase says a token is gone. Spring Data only runs a derived delete inside a transaction, so the method carries its own `@Transactional` and works wherever it is called from.
+
+### The controller
+
+`DeviceController.java`:
+
+```java
+package dev.paydeck.api.push;
+
+import dev.paydeck.api.auth.CurrentUser;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
+import org.springframework.http.ResponseEntity;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RestController;
+
+/** Phones register here to get push notifications. */
+@RestController
+public class DeviceController {
+
+    public record RegisterDeviceRequest(
+            @NotBlank @Pattern(regexp = "ANDROID", message = "must be ANDROID") String platform,
+            @NotBlank @Size(max = 4096) String token) {
+    }
+
+    public record UnregisterDeviceRequest(@NotBlank String token) {
+    }
+
+    private final DeviceRepository devices;
+
+    public DeviceController(DeviceRepository devices) {
+        this.devices = devices;
+    }
+
+    /** Safe to call on every launch: registering the same token again changes nothing. */
+    @PostMapping("/api/devices")
+    @Transactional
+    public ResponseEntity<Void> register(CurrentUser user, @Valid @RequestBody RegisterDeviceRequest request) {
+        devices.findByToken(request.token()).ifPresentOrElse(
+                device -> device.moveTo(user.id()),
+                () -> devices.save(new Device(user.id(), request.platform(), request.token())));
+        return ResponseEntity.noContent().build();
+    }
+
+    /** Called when signing out, so the next person on this phone does not get your notifications. */
+    @PostMapping("/api/devices/unregister")
+    @Transactional
+    public ResponseEntity<Void> unregister(CurrentUser user, @Valid @RequestBody UnregisterDeviceRequest request) {
+        devices.findByToken(request.token())
+                .filter(device -> device.getUserId().equals(user.id()))
+                .ifPresent(devices::delete);
+        return ResponseEntity.noContent().build();
+    }
+}
+```
+
+- `CurrentUser user` is the signed-in person (the Module 27 mini-project), so the token is always saved against whoever sent the access token, never against an ID in the body.
+- `@Pattern(regexp = "ANDROID")` rejects anything else with `400`, through the validation and error handling from lessons 22.3 and 22.4.
+- `@Size(max = 4096)` matches the column. FCM tokens are a few hundred characters, but nobody promises that.
+
+Both endpoints sit under `/api`, so Spring Security already requires an access token (lesson 27.3).
+
+### Tests
+
+`src/test/java/dev/paydeck/api/push/DeviceApiTest.java`:
+
+```java
+package dev.paydeck.api.push;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import java.util.UUID;
+
+import dev.paydeck.api.ApiTestSupport;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.ResultActions;
+
+/** Phones tell the API where to send notifications, and take it back on sign-out. */
+class DeviceApiTest extends ApiTestSupport {
+
+    @Autowired
+    DeviceRepository devices;
+
+    @Test
+    void registeringTheSamePhoneTwiceKeepsOneDevice() throws Exception {
+        TestUser asha = register("Asha");
+        String token = "phone-" + UUID.randomUUID();
+
+        registerPhone(asha, token).andExpect(status().isNoContent());
+        registerPhone(asha, token).andExpect(status().isNoContent());
+
+        assertThat(devices.findByUserId(asha.id())).extracting(Device::getToken).containsExactly(token);
+    }
+
+    @Test
+    void aPhoneBelongsToWhoeverSignedInLast() throws Exception {
+        TestUser asha = register("Asha");
+        TestUser eve = register("Eve");
+        String token = "shared-" + UUID.randomUUID();
+
+        registerPhone(asha, token);
+        registerPhone(eve, token);
+
+        assertThat(devices.findByUserId(asha.id())).isEmpty();
+        assertThat(devices.findByUserId(eve.id())).extracting(Device::getToken).containsExactly(token);
+    }
+
+    @Test
+    void youCanOnlyUnregisterYourOwnPhone() throws Exception {
+        TestUser asha = register("Asha");
+        TestUser eve = register("Eve");
+        String token = "ashas-" + UUID.randomUUID();
+        registerPhone(asha, token);
+
+        unregisterPhone(eve, token).andExpect(status().isNoContent());
+        assertThat(devices.findByToken(token)).isPresent();
+
+        unregisterPhone(asha, token).andExpect(status().isNoContent());
+        assertThat(devices.findByToken(token)).isEmpty();
+    }
+
+    @Test
+    void onlyAndroidPhonesForNow() throws Exception {
+        mvc.perform(post("/api/devices").with(as(register("Asha")))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"platform": "MACOS", "token": "abc"}
+                                """))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void signInFirst() throws Exception {
+        mvc.perform(post("/api/devices")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"platform": "ANDROID", "token": "abc"}
+                                """))
+                .andExpect(status().isUnauthorized());
+    }
+
+    private ResultActions registerPhone(TestUser user, String token) throws Exception {
+        return mvc.perform(post("/api/devices").with(as(user))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"platform": "ANDROID", "token": "%s"}
+                        """.formatted(token)));
+    }
+
+    private ResultActions unregisterPhone(TestUser user, String token) throws Exception {
+        return mvc.perform(post("/api/devices/unregister").with(as(user))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"token": "%s"}
+                        """.formatted(token)));
+    }
+}
+```
+
+```sh
+./mvnw test -Dtest=DeviceApiTest
+```
+
+```
+[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0
+```
+
+### Try it
+
+Restart the API (Flyway applies V13). Register a phone for Asha, then try a platform that is not allowed:
+
+```sh
+curl -i -X POST localhost:8080/api/devices -H "Authorization: Bearer $ASHA" \
+  -H 'Content-Type: application/json' -d '{"platform": "ANDROID", "token": "ashas-phone-token"}'
+```
+
+```
+HTTP/1.1 204
+```
+
+```sh
+curl -i -X POST localhost:8080/api/devices -H "Authorization: Bearer $ASHA" \
+  -H 'Content-Type: application/json' -d '{"platform": "IOS", "token": "x"}'
+```
+
+```
+HTTP/1.1 400
+Content-Type: application/problem+json
+
+{"detail":"Some fields are not valid","instance":"/api/devices","status":400,"title":"Invalid request","fields":{"platform":"must be ANDROID"}}
+```
+
+Do the same for Eve with `eves-phone-token`, and look at the table:
+
+```sh
+docker compose exec postgres psql -U paydeck -c "SELECT u.display_name, d.platform, d.token FROM devices d JOIN users u ON u.id = d.user_id ORDER BY 1"
+```
+
+```
+ display_name | platform |       token
+--------------+----------+-------------------
+ Asha Rao     | ANDROID  | ashas-phone-token
+ Eve Moreau   | ANDROID  | eves-phone-token
+(2 rows)
+```
+
+Now run the app test from lesson 34.2 (`npx jest __tests__/push.test.ts`): its `AFTER START` and `AFTER STOP` lines are this table, before and after the app signs out.
+
+<Exercise title="Sign out everywhere means everywhere">
+"Sign out on all devices" (lesson 28.5) revokes every refresh token, so a lost phone is signed out within 15 minutes. But its row in `devices` stays, and the lost phone keeps showing Asha's payments on its lock screen. Fix it in the API, and write the test.
+
+<Fragment slot="hint">The endpoint behind "Sign out on all devices" is `POST /api/me/sign-out-everywhere`, in `MeController`. `DeviceRepository` needs a way to delete all of one person's devices.</Fragment>
+<Fragment slot="solution">
+
+In `DeviceRepository`:
+
+```java
+    @Transactional
+    void deleteByUserId(UUID userId);
+```
+
+In `MeController`, add `DeviceRepository devices` to the fields and the constructor, and in `signOutEverywhere`, after the refresh tokens are revoked:
+
+```java
+        refreshTokens.revokeAllFor(current.id());
+        devices.deleteByUserId(current.id());
+```
+
+The test, in `DeviceApiTest`:
+
+```java
+    @Test
+    void signingOutEverywhereForgetsEveryPhone() throws Exception {
+        TestUser asha = register("Asha");
+        registerPhone(asha, "lost-" + UUID.randomUUID());
+
+        mvc.perform(post("/api/me/sign-out-everywhere").with(as(asha))).andExpect(status().isNoContent());
+
+        assertThat(devices.findByUserId(asha.id())).isEmpty();
+    }
+```
+
+```
+[INFO] Tests run: 6, Failures: 0, Errors: 0, Skipped: 0
+```
+
+The phone Asha is still holding registers again at its next start, once she signs in again.
+</Fragment>
+</Exercise>
+
+## Common mistakes
+
+<Aside type="danger" title="Taking the user ID from the request body">
+`{"userId": "...", "token": "..."}` would let anyone point their phone at Asha's notifications. The person is whoever the access token says.
+</Aside>
+
+<Aside type="caution" title="A new row on every app start">
+Without the lookup, a phone that starts the app 50 times gets 50 notifications per payment. Make registering idempotent, and let the `UNIQUE` constraint catch any mistake.
+</Aside>
+
+<Aside type="caution" title="Unregistering someone else's phone">
+Check that the device belongs to the person asking. The endpoint still answers `204`, so it does not reveal whether the token exists.
+</Aside>
+
+## Recap
+
+- `devices`: one row per token, `UNIQUE`, with the owner's `user_id` and the platform.
+- `POST /api/devices` saves the token for the signed-in person, or moves an existing one to them. It is safe to repeat.
+- `POST /api/devices/unregister` deletes it, only for its owner.
+- The person always comes from the access token, never from the body.
+
+<Quiz
+	questions={[
+		{
+			question: 'Asha signs out on her phone and Eve signs in on it. What happens to the phone\'s token?',
+			options: ['It is saved twice, once for each', 'Asha\'s sign-out deleted it, and Eve\'s sign-in registers it for Eve', 'Nothing; it stays Asha\'s'],
+			answer: 1,
+			explanation: 'And if Asha\'s sign-out never reached the API, registering for Eve moves the row to Eve anyway.',
+		},
+		{
+			question: 'Why does registering look the token up before saving?',
+			options: ['So repeating it on every app start does not create duplicate rows', 'To check the token with Firebase', 'Because JPA cannot insert rows'],
+			answer: 0,
+			explanation: 'The app registers often on purpose. The API must make that harmless.',
+		},
+		{
+			question: 'Mallory knows Asha\'s device token and calls unregister with it. What happens?',
+			options: ['Asha stops getting notifications', 'Nothing: the device is not Mallory\'s, and the API answers 204 without deleting it', 'The API answers 403'],
+			answer: 1,
+			explanation: 'Only the owner can remove a device, and the answer does not tell Mallory whether the token exists.',
+		},
+	]}
+/>
+
+<MarkComplete />
