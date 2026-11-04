@@ -1,0 +1,221 @@
+---
+title: "Mini-project: tests for the PayDeck screens"
+description: "Test the live Activity screen without a WebSocket, let a failing test lead to a better screen (a visible \"New\" label), and split the tests that need a running API from the ones that do not, so `npm test` runs anywhere in seconds."
+sidebar:
+  order: 99
+  label: "Mini-project"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Exercise from '../../../../components/Exercise.astro';
+import MarkComplete from '../../../../components/MarkComplete.astro';
+
+The Activity screen from the Module 33 mini-project is the hardest screen to check by hand: its status line depends on a WebSocket, and its highlight depends on what arrives while you watch. This project tests it in Jest, lets one of the tests point out a weakness in the screen, and prepares the app's tests for Module 36, where GitHub runs them on every push.
+
+## The tasks
+
+1. **Activity tests.** In `__tests__/ActivityScreen.test.tsx`, test that the screen says "No transactions yet." for an empty list, that it shows the live status ("Reconnecting…" when `useLiveStatus` says `reconnecting`), and that a transaction that arrives while the screen is open is marked as new.
+2. **A label, not just a colour.** New rows are only shown by a blue background. A screen reader cannot see colour, and some people cannot tell it apart. Write the test first: a new row has a visible **New** label above it. Watch it fail, then make it pass.
+3. **Live tests apart.** Move `push.test.ts` (lesson 34.2), which needs the API and Docker, into `__tests__/live/`. Make `npm test` skip that folder, and add `npm run test:live` to run it.
+4. Run `npm test`, and commit.
+
+<Exercise title="Build it">
+Do the four tasks.
+
+<Fragment slot="hint">`ActivityScreen` imports `useLiveStatus` from `LiveUpdates`, and the real `LiveUpdates` opens a WebSocket. Mock that module with a factory: `jest.mock('../src/live/LiveUpdates', () => ({ useLiveStatus: jest.fn() }))`.</Fragment>
+<Fragment slot="hint2">To play "something arrived", change what `getActivity` answers, then do what `LiveUpdates` does on a message: `queryClient.invalidateQueries()`, inside `act(...)` because it updates the screen. `renderScreen` returns the `queryClient`.</Fragment>
+<Fragment slot="solution">
+
+### The tests
+
+`__tests__/ActivityScreen.test.tsx`:
+
+```tsx
+import { act, screen } from '@testing-library/react-native';
+import * as authApi from '../src/api/auth';
+import * as api from '../src/api/paydeck';
+import { useLiveStatus } from '../src/live/LiveUpdates';
+import { ActivityScreen } from '../src/screens/ActivityScreen';
+import type { Activity } from '../src/types';
+import { asha, ashasAccount } from '../testing/data';
+import { renderScreen } from '../testing/renderScreen';
+
+jest.mock('../src/api/auth');
+jest.mock('../src/api/paydeck');
+// The real LiveUpdates opens a WebSocket. Here, each test says what the status is.
+jest.mock('../src/live/LiveUpdates', () => ({ useLiveStatus: jest.fn() }));
+const mocked = jest.mocked(api);
+
+const coffee: Activity = {
+  transactionId: 't-1',
+  type: 'CARD_PAYMENT',
+  description: 'Corner Café',
+  amountCents: -1_250,
+  createdAt: '2026-11-04T09:00:00Z',
+};
+const bread: Activity = { ...coffee, transactionId: 't-2', description: 'Bakery', amountCents: -450 };
+
+beforeEach(() => {
+  jest.mocked(authApi.getMe).mockResolvedValue(asha);
+  mocked.getAccount.mockResolvedValue(ashasAccount);
+  jest.mocked(useLiveStatus).mockReturnValue('live');
+});
+
+describe('ActivityScreen', () => {
+  it('says when there is nothing yet', async () => {
+    mocked.getActivity.mockResolvedValue([]);
+    await renderScreen(<ActivityScreen />);
+
+    expect(await screen.findByText('No transactions yet.')).toBeOnTheScreen();
+  });
+
+  it('says whether updates are live', async () => {
+    mocked.getActivity.mockResolvedValue([coffee]);
+    jest.mocked(useLiveStatus).mockReturnValue('reconnecting');
+    await renderScreen(<ActivityScreen />);
+
+    expect(await screen.findByText('Reconnecting…')).toBeOnTheScreen();
+  });
+
+  it('marks what arrived while watching as new', async () => {
+    mocked.getActivity.mockResolvedValue([coffee]);
+    const { queryClient } = await renderScreen(<ActivityScreen />);
+    await screen.findByText('Corner Café');
+    expect(screen.queryByText('New')).not.toBeOnTheScreen();
+
+    // What the live feed does when Eve pays: the list is fetched again, with one more row.
+    mocked.getActivity.mockResolvedValue([bread, coffee]);
+    await act(() => queryClient.invalidateQueries());
+
+    expect(await screen.findByText('Bakery')).toBeOnTheScreen();
+    // Top to bottom: the label, the new row, the old row.
+    expect(screen.getAllByText(/^(New|Bakery|Corner Café)$/).map((text) => text.props.children)).toEqual([
+      'New',
+      'Bakery',
+      'Corner Café',
+    ]);
+  });
+});
+```
+
+- `jest.mock` with a **factory** (the second argument) replaces the module with exactly what it returns. The real `LiveUpdates` is never loaded, so no WebSocket.
+- `act(...)` tells React a change is coming from outside a `fireEvent`, and waits for the screen to settle.
+- The last check reads every matching text **in order**, so it proves the label is above the new row, not somewhere else.
+
+Before the screen has a label:
+
+```
+  ● ActivityScreen › marks what arrived while watching as new
+
+    expect(received).toEqual(expected) // deep equality
+
+    - Expected  - 1
+    + Received  + 0
+
+      Array [
+    -   "New",
+        "Bakery",
+        "Corner Café",
+      ]
+```
+
+### The label
+
+In `ActivityScreen.tsx`, the rows become:
+
+```tsx
+      {activity.data.map((item) => {
+        const fresh = !seen.current?.has(item.transactionId);
+        return (
+          <View key={item.transactionId} style={fresh && styles.fresh}>
+            {/* Colour alone is invisible to a screen reader, and to some eyes. */}
+            {fresh && <Text style={styles.newLabel}>New</Text>}
+            <ActivityRow item={item} currency={currency} />
+          </View>
+        );
+      })}
+```
+
+and one more style:
+
+```ts
+  newLabel: { color: '#3c4fe0', fontWeight: '700', fontSize: 12 },
+```
+
+(`paddingTop: 6` on `fresh` gives the label a little room.) Now the test passes, and a screen reader reads "New" before the new row.
+
+### Live tests apart
+
+```sh
+mkdir -p __tests__/live
+git mv __tests__/push.test.ts __tests__/live/push.test.ts
+```
+
+In the moved file, imports go one folder further up: `'../src/...'` becomes `'../../src/...'`. Then `jest.config.js`:
+
+```js
+module.exports = {
+  preset: 'react-native',
+  setupFiles: ['<rootDir>/jest.setup.js'],
+  // Forget what every jest.fn() was called with before each test.
+  clearMocks: true,
+  // Tests in __tests__/live need the API running. `npm test` skips them; `npm run test:live` runs them.
+  testPathIgnorePatterns: ['/node_modules/', '<rootDir>/__tests__/live/'],
+};
+```
+
+and in `package.json`'s `scripts`:
+
+```json
+    "test": "jest",
+    "test:live": "jest --testPathIgnorePatterns /node_modules/ --runInBand __tests__/live"
+```
+
+`--testPathIgnorePatterns` on the command line replaces the one in the config, so the live folder is not ignored; `__tests__/live` then picks only those tests; `--runInBand` runs them one at a time, because they share one API and one database.
+
+### Run them
+
+```sh
+npm test
+```
+
+```
+PASS __tests__/ActivityScreen.test.tsx (5.22 s)
+PASS __tests__/pkce.test.ts
+PASS __tests__/ActivityRow.test.tsx
+PASS __tests__/NotificationSwitches.test.tsx (5.379 s)
+PASS __tests__/PayScreen.test.tsx (5.391 s)
+PASS __tests__/stomp.test.ts
+Test Suites: 6 passed, 6 total
+Tests:       20 passed, 20 total
+```
+
+(The first run is slower while Jest prepares the files; the next is faster.) And with the API running, `npm run test:live` still prints lesson 34.2's lines:
+
+```
+PASS __tests__/live/push.test.ts
+      AFTER START asha@example.com test-phone-token
+      AFTER STOP (none)
+```
+
+Commit.
+</Fragment>
+</Exercise>
+
+<Exercise title="One more screen">
+Pick a screen you built and have not tested: **Top up** (Module 31), the card screen with its **Freeze** button, or **Issue a card** (Module 30). Write three tests: what it shows, what it sends, and what it does when the API refuses. Then break one line of the screen and check that exactly one test fails.
+
+<Fragment slot="hint">Read the screen first and list the API functions it calls; each needs a `mockResolvedValue` in `beforeEach` or in the test. For a refusal, `mockRejectedValue(new ApiError(status, title, detail, code))`.</Fragment>
+<Fragment slot="solution">
+
+There is no single answer; check yours against lesson 35.2's list. A good set for **Issue a card**: it shows the form with the default limit; pressing **Issue card** calls `issueCard` with the nickname, the limit in cents and the cardholder's email, then navigates back; and when the API says nobody has that email, it stays on the form and shows the message. Breaking the line that passes the email should fail only the second test.
+</Fragment>
+</Exercise>
+
+## What to notice
+
+- **Mock at the edges.** The API modules and the WebSocket are mocked; everything between them and the screen (hooks, cache, components) is the real code.
+- **Tests can improve the product.** Writing "a new row is marked" made it obvious that colour alone does not mark it for everyone.
+- **Fast by default.** `npm test` needs nothing running, which is what lets Module 36 run it on GitHub's computers for every push.
+
+<MarkComplete />
